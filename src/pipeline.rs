@@ -6,7 +6,16 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Per-invocation scratch dir uniquifier — parallel tests/processes must
+/// never share staged files.
+static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+fn scratch_dir(tag: &str) -> PathBuf {
+    let n = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("ontic-{}-{}-{}", tag, std::process::id(), n))
+}
 
 /// Candidate directories probed for toolchain binaries.
 const TOOL_DIRS: &[&str] = &[
@@ -175,6 +184,11 @@ pub fn bench_c_source(fn_name: &str, params_is_list: &[bool], iters: usize) -> S
 
 extern long {fname}({proto});
 
+long ontic_trap(void) {{
+  extern void abort(void);
+  abort();
+}}
+
 int main(void) {{
   const long N = 1024;
   const long ITERS = {iters};
@@ -243,6 +257,11 @@ pub fn eval_c_source(
 
 extern long {fname}({proto});
 
+long ontic_trap(void) {{
+  extern void abort(void);
+  abort();
+}}
+
 int main(void) {{
 {decls}
   printf("%ld\n", {fname}({call_args_tail}));
@@ -264,7 +283,7 @@ pub fn eval_native(
     list_vals: &[i64],
     scalars: &[i64],
 ) -> Result<i64, String> {
-    let dir = std::env::temp_dir().join(format!("ontic-eval-{}", std::process::id()));
+    let dir = scratch_dir("eval");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mlir_p = dir.join("cand.mlir");
     let ll_mlir = dir.join("cand_llvm.mlir");
@@ -315,7 +334,7 @@ pub fn bench_native(
     params_is_list: &[bool],
     iters: usize,
 ) -> Result<u64, String> {
-    let dir = std::env::temp_dir().join(format!("ontic-bench-{}", std::process::id()));
+    let dir = scratch_dir("bench");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mlir_p = dir.join("cand.mlir");
     let ll_mlir = dir.join("cand_llvm.mlir");
@@ -384,7 +403,7 @@ mod tests {
         }
         let cand = sketch::parse(SUM_SRC).unwrap();
         check::check(&cand).unwrap();
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true).unwrap();
 
         let inputs = vec![Value::List(vec![3, 1, 4, 1, 5, 9, 2, 6])];
         let expect = interp::eval_candidate(&cand, &inputs, interp::Ctx::wrapping())
@@ -411,5 +430,42 @@ mod tests {
         assert!(c.contains("b0, b0, 0, N, 1, s1"));
         let c_scalar_only = bench_c_source("g", &[false], 5);
         assert!(c_scalar_only.contains("extern long g(long);"));
+    }
+}
+
+#[cfg(test)]
+mod trap_tests {
+    use super::*;
+    use crate::{check, interp, lower, sketch};
+    use crate::wish::Value;
+
+    /// Checked-tier honesty gate: native traps exactly where the interpreter
+    /// kills. Overflowing inputs must fail natively; clean inputs agree.
+    #[test]
+    fn test_checked_tier_native_trap_matches_interpreter() {
+        if find_tool("mlir-opt").is_none() || find_tool("llc").is_none() {
+            eprintln!("toolchain missing; trap differential skipped");
+            return;
+        }
+        let cand = sketch::parse("fn @f(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { %acc + %x } }").unwrap();
+        check::check(&cand).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false).unwrap();
+
+        // Clean inputs: both tiers agree.
+        let got = eval_native(&mlir, "f", &[true], &[3, 4, 5], &[]).expect("clean runs");
+        assert_eq!(got, 12);
+
+        // Overflowing inputs: interpreter kills...
+        let killed = interp::eval_candidate(
+            &cand,
+            &[Value::List(vec![i64::MAX, 1])],
+            interp::Ctx::checked(),
+        );
+        assert!(killed.is_err());
+        // ...and native must not return a value either.
+        assert!(
+            eval_native(&mlir, "f", &[true], &[i64::MAX, 1], &[]).is_err(),
+            "native returned a value where the oracle kills"
+        );
     }
 }

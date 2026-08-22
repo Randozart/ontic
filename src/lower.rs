@@ -89,6 +89,8 @@ struct Emitter {
     out: String,
     counter: usize,
     indent: usize,
+    /// Wrapping tier: plain ops. Checked tier: widen-check-narrow expansion.
+    wrapping: bool,
 }
 
 impl Emitter {
@@ -97,6 +99,7 @@ impl Emitter {
             out: String::new(),
             counter: 0,
             indent: 0,
+            wrapping: false,
         }
     }
 
@@ -149,9 +152,11 @@ pub fn emit_fn(
     params: &[(String, Ty)],
     ret: &Ty,
     body: &Expr,
+    wrapping: bool,
 ) -> Result<String, String> {
     let out_ty = mlir_ret_type(ret)?;
     let mut em = Emitter::new();
+    em.wrapping = wrapping;
 
     let sig: Vec<String> = params
         .iter()
@@ -160,6 +165,10 @@ pub fn emit_fn(
 
     em.line("module {");
     em.indent += 1;
+    if !wrapping {
+        // Checked tier trap target; harnesses link an abort() implementation.
+        em.line("func.func private @ontic_trap() -> i64");
+    }
     em.line(&format!(
         "func.func @{}({}) -> {} {{",
         name,
@@ -362,6 +371,9 @@ fn emit_binop(
     if is_comparison(op) {
         return emit_cmp(op, &lv, &rv, em);
     }
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) && !em.wrapping {
+        return emit_checked_arith(op, &lv, &rv, em);
+    }
     let out = em.fresh("op");
     let stmt = match op {
         BinOp::Add => Some(format!("{} = arith.addi {}, {} : i64", out, lv, rv)),
@@ -380,6 +392,67 @@ fn emit_binop(
         }
         None => Err(format!("lowering: unhandled binop {:?}", op)),
     }
+}
+
+/// Checked-tier arithmetic: compute in i128 (cannot overflow for any i64
+/// operand pair), range-check against i64, narrow — or trap via extern
+/// `ontic_trap`. Matches interpreter kill semantics exactly.
+fn emit_checked_arith(
+    op: BinOp,
+    lv: &str,
+    rv: &str,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let wide_op = match op {
+        BinOp::Add => "arith.addi",
+        BinOp::Sub => "arith.subi",
+        BinOp::Mul => "arith.muli",
+        _ => return Err(format!("checked expansion unsupported for {:?}", op)),
+    };
+    let a128 = em.fresh("wa");
+    em.line(&format!("{} = arith.extsi {} : i64 to i128", a128, lv));
+    let b128 = em.fresh("wb");
+    em.line(&format!("{} = arith.extsi {} : i64 to i128", b128, rv));
+    let s128 = em.fresh("ws");
+    em.line(&format!("{} = {} {}, {} : i128", s128, wide_op, a128, b128));
+    let cmin = em.fresh("cmin");
+    em.line(&format!(
+        "{} = arith.constant -9223372036854775808 : i128",
+        cmin
+    ));
+    let cmax = em.fresh("cmax");
+    em.line(&format!(
+        "{} = arith.constant 9223372036854775807 : i128",
+        cmax
+    ));
+    let ge = em.fresh("ge");
+    em.line(&format!("{} = arith.cmpi sge, {}, {} : i128", ge, s128, cmin));
+    let le = em.fresh("le");
+    em.line(&format!("{} = arith.cmpi sle, {}, {} : i128", le, s128, cmax));
+    let ok = em.fresh("ok");
+    em.line(&format!("{} = arith.andi {}, {} : i1", ok, ge, le));
+
+    let res = em.fresh("chk");
+    em.line(&format!("{} = scf.if {} -> (i64) {{", res, ok));
+    em.indent += 1;
+    let narrow = em.fresh("narrow");
+    em.line(&format!(
+        "{} = arith.trunci {} : i128 to i64",
+        narrow, s128
+    ));
+    em.line(&format!("scf.yield {} : i64", narrow));
+    em.indent -= 1;
+    em.line("} else {");
+    em.indent += 1;
+    let trapped = em.fresh("trap");
+    em.line(&format!(
+        "{} = func.call @ontic_trap() : () -> i64",
+        trapped
+    ));
+    em.line(&format!("scf.yield {} : i64", trapped));
+    em.indent -= 1;
+    em.line("}");
+    Ok(res)
 }
 
 fn is_comparison(op: BinOp) -> bool {
@@ -417,7 +490,7 @@ mod tests {
     fn lower(src: &str) -> String {
         let c = sketch::parse(src).unwrap();
         check::check(&c).unwrap();
-        emit_fn(&c.name, &c.params, &c.ret, &c.body).expect("lowers")
+        emit_fn(&c.name, &c.params, &c.ret, &c.body, true).expect("lowers")
     }
 
     #[test]
@@ -467,5 +540,24 @@ mod tests {
     fn test_bool_params_are_i64_abi() {
         let ir = lower("fn @b(%p: Bool) -> Int { if %p { 1 } else { 2 } }");
         assert!(ir.contains("func.func @b(%p: i64) -> i64"));
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+    use crate::sketch;
+
+    #[test]
+    fn test_checked_tier_expands_wide_check_and_trap() {
+        let c = sketch::parse("fn @f(%a: Int, %b: Int) -> Int { %a + %b }").unwrap();
+        let ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, false).unwrap();
+        assert!(ir.contains("ontic_trap"), "missing trap decl");
+        assert!(ir.contains("i128"));
+        assert!(ir.contains("scf.if"));
+        // Wrapping tier of the same body stays plain.
+        let plain = emit_fn(&c.name, &c.params, &c.ret, &c.body, true).unwrap();
+        assert!(!plain.contains("i128"));
+        assert!(plain.contains("arith.addi"));
     }
 }

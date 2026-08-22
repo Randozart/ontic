@@ -318,7 +318,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
 /// When the LLVM toolchain is present, re-time every survivor on real
 /// compiled objects and re-rank by that. Interpreter timing remains the
 /// fallback ordering; the native table is the honest one.
-fn native_rerank(_w: &wish::Wish, survivors: &mut Vec<sieve::Survivor>) {
+fn native_rerank(w: &wish::Wish, survivors: &mut Vec<sieve::Survivor>) {
     if pipeline::find_tool("mlir-opt").is_none() || pipeline::find_tool("llc").is_none() {
         println!("native bench: toolchain missing, interpreter ranking stands");
         return;
@@ -330,6 +330,7 @@ fn native_rerank(_w: &wish::Wish, survivors: &mut Vec<sieve::Survivor>) {
             &s.candidate.params,
             &s.candidate.ret,
             &s.candidate.body,
+            w.wrapping,
         ) {
             Ok(mlir) => {
                 let is_list: Vec<bool> = s
@@ -388,6 +389,7 @@ fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor) -> i32 {
         &survivor.candidate.params,
         &survivor.candidate.ret,
         &survivor.candidate.body,
+        w.wrapping,
     ) {
         Ok(m) => m,
         Err(e) => {

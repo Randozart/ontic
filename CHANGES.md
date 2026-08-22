@@ -56,3 +56,12 @@
 - Checked default unchanged: overflow kills candidates at S3/S5.
 - opt -O3 middle-end added to native pipeline (llc alone is codegen-only).
 - 74 tests green.
+
+### 2026-08-22 23:15 — Checked-tier native traps (W2 complete)
+- Files: `src/lower.rs` (emit_checked_arith: i128 widen-check-narrow +
+  `ontic_trap` extern), `src/pipeline.rs` (trap definition in harnesses,
+  scratch_dir uniquifier for parallel tests).
+- Honesty gate test: native traps exactly where the oracle kills
+  (`test_checked_tier_native_trap_matches_interpreter`); clean inputs agree.
+- Wrapping tier untouched (plain ops). All three tiers now live:
+  wrapping = declared+fast, checked = default+honest-slow, proven = M3.
