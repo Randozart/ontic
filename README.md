@@ -86,6 +86,11 @@ Forge requirements: any llama.cpp `/completion` endpoint; the GBNF grammar and
 the `fn @` prompt prefill are sent per request. Designed against VITRIOL's
 llama-server running Mellum2-12B-A2.5B.
 
+## Editor support
+
+VS Code syntax highlighting for `.ont`/`.sketch` lives in
+`syntax-highlighter/` — see its README for install.
+
 ## Design docs
 
 See `docs/plans/2026-08-22-ontic-mvp.md` for the full architecture, honesty

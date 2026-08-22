@@ -1,0 +1,140 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Ontic",
+  "scopeName": "source.ontic",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#evidence" },
+    { "include": "#invariant-pipe" },
+    { "include": "#declaration" },
+    { "include": "#program-blocks" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#variables" },
+    { "include": "#fn-symbol" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.ontic",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "evidence": {
+      "patterns": [
+        {
+          "name": "keyword.operator.evidence.transparent.ontic",
+          "match": "^\\s*(=>)"
+        },
+        {
+          "name": "keyword.operator.evidence.opaque.ontic",
+          "match": "^\\s*(\\?\\?)"
+        }
+      ]
+    },
+    "invariant-pipe": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.invariant.ontic",
+          "match": "^\\s*(\\|)"
+        }
+      ]
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "name": "meta.function.ontic",
+          "match": "^\\s*(fn)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.ontic" },
+            "2": { "name": "entity.name.function.ontic" }
+          }
+        }
+      ]
+    },
+    "program-blocks": {
+      "patterns": [
+        {
+          "name": "meta.program.ontic",
+          "match": "^\\s*(program)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.program.ontic" },
+            "2": { "name": "entity.name.section.ontic" }
+          }
+        },
+        {
+          "name": "keyword.control.dependency.ontic",
+          "match": "^\\s*(use)\\s+[A-Za-z_][A-Za-z0-9_.]*"
+        },
+        {
+          "name": "keyword.control.block.ontic",
+          "match": "^\\s*(start|end)$"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "storage.modifier.tier.ontic",
+          "match": "\\b(wrapping)\\b"
+        },
+        {
+          "name": "keyword.control.ontic",
+          "match": "\\b(if|else|let|fold|in|from)\\b"
+        },
+        {
+          "name": "support.function.builtin.ontic",
+          "match": "\\b(len)\\b"
+        },
+        {
+          "name": "constant.language.bool.ontic",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.ontic",
+          "match": "\\b(Int|Bool)(?![a-zA-Z0-9_])|\\b(List)<(Int)>"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.percent.ontic",
+          "match": "%[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "fn-symbol": {
+      "patterns": [
+        {
+          "name": "entity.name.function.sketch.ontic",
+          "match": "@[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.ontic",
+          "match": "-?[0-9][0-9_]*"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.ontic",
+          "match": "->|==|!=|<=|>=|&&|\\|\\||[+\\-*/%<>!=]"
+        }
+      ]
+    }
+  }
+}

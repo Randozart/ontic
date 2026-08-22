@@ -83,3 +83,10 @@
 - Dependency declarations inside program blocks now read `use Path.name`.
 - "Wish" remains the vocabulary for function specs everywhere else;
   CLI flag `--wish` unchanged (multi-wish file selector, different concept).
+
+### 2026-08-22 23:59 — VS Code syntax highlighter
+- Files: `syntax-highlighter/` (package.json, language-configuration.json,
+  syntaxes/ontic.tmLanguage.json, README).
+- TextMate grammar for .ont/.sketch: declarations, tiers, program blocks,
+  evidence arrows (=> transparent / ?? opaque), invariant pipes, %vars,
+  @symbols, builtins, types. Mirrors briev-lang extension structure.
