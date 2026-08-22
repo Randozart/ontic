@@ -138,8 +138,8 @@ fn parse_program(lines: &[String]) -> Result<Program, String> {
             _ => {}
         }
         if !started {
-            let dep = line.strip_prefix("wish ").ok_or_else(|| {
-                format!("only `wish` declarations allowed before start, got `{}`", line)
+            let dep = line.strip_prefix("use ").ok_or_else(|| {
+                format!("only `use` declarations allowed before start, got `{}`", line)
             })?;
             deps.push(dep.trim().to_string());
             continue;
@@ -328,8 +328,8 @@ fn Twice(%n: Int) -> Int
   => 21 -> 42
 
 program Demo
-  wish Ledger.total
-  wish Twice
+  use Ledger.total
+  use Twice
 start
   %xs = [1,2,3]
   %r  = Ledger.total(%xs)
@@ -384,7 +384,7 @@ end
 
     #[test]
     fn test_missing_dependency_rejected() {
-        let missing = FILE.replace("  wish Twice\n", "");
+        let missing = FILE.replace("  use Twice\n", "");
         let e = parse_ont(&missing).expect_err("must fail");
         assert!(e.contains("undeclared dependency"), "{}", e);
     }

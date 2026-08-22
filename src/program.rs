@@ -299,8 +299,8 @@ fn Twice(%n: Int) -> Int
   => 21 -> 42
 
 program Demo
-  wish Ledger.total
-  wish Twice
+  use Ledger.total
+  use Twice
 start
   %xs = [1,2,3]
   %r  = Ledger.total(%xs)

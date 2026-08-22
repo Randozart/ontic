@@ -76,3 +76,10 @@
   isolated vault, assemble driver, execute → ["6", "42"].
 - Live demo: ontic run examples/demo.ont prints 6 / 42 from native objects.
 - 82 tests green.
+
+### 2026-08-22 23:59 — Program-block keyword: `wish` → `use`
+- Files: `src/recipe.rs` (parser + fixtures), `src/program.rs` (e2e fixture),
+  `examples/demo.ont`, README/AGENTS snippets.
+- Dependency declarations inside program blocks now read `use Path.name`.
+- "Wish" remains the vocabulary for function specs everywhere else;
+  CLI flag `--wish` unchanged (multi-wish file selector, different concept).
