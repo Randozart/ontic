@@ -209,13 +209,14 @@ fn eval_set(
         }
         let got =
             interp::eval_candidate(cand, &ex.inputs, ctx).map_err(|e| (i, e.to_string()))?;
-        if got != ex.output {
+        if !evidence_holds(&ex.output, &got, ex.tol) {
             return Err((
                 i,
                 format!(
-                    "inputs [{}] expected {}, got {}",
+                    "inputs [{}] expected {} ± {}, got {}",
                     inputs_str(&ex.inputs),
                     ex.output,
+                    ex.tol,
                     got
                 ),
             ));
@@ -290,6 +291,18 @@ fn check_invariants_on(
     None
 }
 
+/// Evidence comparison: exact for Int/Bool/List; abs+rel epsilon for F64
+/// outputs (tolerance is contract — cited verbatim in every kill reason).
+fn evidence_holds(want: &Value, got: &Value, tol: f64) -> bool {
+    match (want, got) {
+        (Value::Float(w), Value::Float(g)) => {
+            let slack = tol + 1e-9 * w.abs();
+            (g - w).abs() <= slack.max(f64::EPSILON * 4.0)
+        }
+        _ => want == got,
+    }
+}
+
 fn inputs_str(inputs: &[Value]) -> String {
     inputs
         .iter()
@@ -324,7 +337,8 @@ fn rank(report: &mut SieveReport) {
 /// Total AST node count — deterministic tie-break for equal timings.
 pub fn ast_size(e: &Expr) -> usize {
     1 + match e {
-        Expr::IntLit(_) | Expr::BoolLit(_) | Expr::Var(_) | Expr::ListLit(_) => 0,
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::Var(_)
+        | Expr::ListLit(_) => 0,
         Expr::Len(i) | Expr::UnOp(_, i) => ast_size(i),
         Expr::If(c, t, f) => ast_size(c) + ast_size(t) + ast_size(f),
         Expr::Let(_, v, b) => ast_size(v) + ast_size(b),

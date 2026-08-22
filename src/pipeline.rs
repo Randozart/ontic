@@ -17,6 +17,27 @@ fn scratch_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ontic-{}-{}-{}", tag, std::process::id(), n))
 }
 
+/// Harness-level ABI kind per function parameter / return.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CK {
+    /// memref<?xi64> expanded flat (5 args)
+    List,
+    /// i64 scalar
+    I64,
+    /// f64 scalar
+    F64,
+}
+
+impl CK {
+    fn proto(&self) -> &'static str {
+        match self {
+            CK::List => "void*, void*, long, long, long",
+            CK::I64 => "long",
+            CK::F64 => "double",
+        }
+    }
+}
+
 /// Candidate directories probed for toolchain binaries.
 const TOOL_DIRS: &[&str] = &[
     "/usr/lib/llvm-18/bin",
@@ -216,46 +237,58 @@ int main(void) {{
 }
 
 /// Build a C driver that calls the function once on FIXED inputs and prints
-/// the result. Used by differential tests: interpreter and native must agree
-/// bit-for-bit under the wrapping tier.
+/// the result (%.17g). Used by differential tests: interpreter and native
+/// must agree bit-for-bit under the wrapping tier.
 pub fn eval_c_source(
     fn_name: &str,
-    params_is_list: &[bool],
+    kinds: &[CK],
     list_vals: &[i64],
-    _scalars: &[i64],
+    scalars_i64: &[i64],
+    scalars_f64: &[f64],
+    ret_f64: bool,
 ) -> String {
     let mut proto = String::new();
     let mut decls = String::new();
     let mut call_args = String::new();
-    let mut li = 0usize;
-    for is_list in params_is_list.iter() {
+    let (mut li, mut si, mut sf) = (0usize, 0usize, 0usize);
+    for k in kinds {
         if !proto.is_empty() {
             proto.push_str(", ");
         }
-        if *is_list {
-            proto.push_str("void*, void*, long, long, long");
-            let vals: Vec<String> = list_vals.iter().map(|v| v.to_string()).collect();
-            decls.push_str(&format!(
-                "  long b{0}[] = {{{1}}};\n",
-                li,
-                vals.join(", ")
-            ));
-            call_args.push_str(&format!(
-                "b{0}, b{0}, 0, {1}, 1, ",
-                li,
-                list_vals.len()
-            ));
-            li += 1;
-        } else {
-            proto.push_str("long");
-            decls.push_str("  long sv = 3;\n");
-            call_args.push_str("sv, ");
+        proto.push_str(k.proto());
+        match k {
+            CK::List => {
+                let vals: Vec<String> = list_vals.iter().map(|v| v.to_string()).collect();
+                decls.push_str(&format!(
+                    "  long b{0}[] = {{{1}}};\n",
+                    li,
+                    vals.join(", ")
+                ));
+                call_args.push_str(&format!(
+                    "b{0}, b{0}, 0, {1}, 1, ",
+                    li,
+                    list_vals.len()
+                ));
+                li += 1;
+            }
+            CK::I64 => {
+                decls.push_str(&format!("  long s{} = {}L;\n", si, scalars_i64[si]));
+                call_args.push_str(&format!("s{}, ", si));
+                si += 1;
+            }
+            CK::F64 => {
+                decls.push_str(&format!("  double f{} = {:e};\n", sf, scalars_f64[sf]));
+                call_args.push_str(&format!("f{}, ", sf));
+                sf += 1;
+            }
         }
     }
+    let ret_t = if ret_f64 { "double" } else { "long" };
+    let fmt = if ret_f64 { "%.17g" } else { "%ld" };
     format!(
         r#"#include <stdio.h>
 
-extern long {fname}({proto});
+extern {ret_t} {fname}({proto});
 
 long ontic_trap(void) {{
   extern void abort(void);
@@ -264,25 +297,30 @@ long ontic_trap(void) {{
 
 int main(void) {{
 {decls}
-  printf("%ld\n", {fname}({call_args_tail}));
+  printf("{fmt}\n", {fname}({call_args_tail}));
   return 0;
 }}
 "#,
+        ret_t = ret_t,
         fname = fn_name,
         proto = proto,
         decls = decls,
+        fmt = fmt,
         call_args_tail = call_args.trim_end_matches(", "),
     )
 }
 
-/// Run the function once natively and return its result.
+/// Run the function once natively; returns the parsed numeric result
+/// (integer results arrive as exact f64).
 pub fn eval_native(
     mlir_text: &str,
     fn_name: &str,
-    params_is_list: &[bool],
+    kinds: &[CK],
     list_vals: &[i64],
-    scalars: &[i64],
-) -> Result<i64, String> {
+    scalars_i64: &[i64],
+    scalars_f64: &[f64],
+    ret_f64: bool,
+) -> Result<f64, String> {
     let dir = scratch_dir("eval");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mlir_p = dir.join("cand.mlir");
@@ -296,7 +334,7 @@ pub fn eval_native(
     object_from_ll(&ll_mlir, &o_p)?;
     std::fs::write(
         &c_p,
-        eval_c_source(fn_name, params_is_list, list_vals, scalars),
+        eval_c_source(fn_name, kinds, list_vals, scalars_i64, scalars_f64, ret_f64),
     )
     .map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
@@ -322,8 +360,8 @@ pub fn eval_native(
     }
     String::from_utf8_lossy(&out.stdout)
         .trim()
-        .parse::<i64>()
-        .map_err(|_| format!("bad differential output"))
+        .parse::<f64>()
+        .map_err(|_| "bad differential output".to_string())
 }
 
 /// Full native measurement: write mlir, lower, emit object, build harness,
@@ -411,14 +449,16 @@ mod tests {
         let got = eval_native(
             &mlir,
             &cand.name,
-            &[true],
+            &[CK::List],
             &[3, 1, 4, 1, 5, 9, 2, 6],
             &[],
+            &[],
+            false,
         )
         .expect("native evaluates");
-        assert_eq!(got, 31, "sanity");
+        assert_eq!(got, 31.0, "sanity");
         assert_eq!(got, match expect {
-            Value::Int(v) => v,
+            Value::Int(v) => v as f64,
             other => panic!("unexpected {:?}", other),
         });
     }
@@ -452,8 +492,9 @@ mod trap_tests {
         let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false).unwrap();
 
         // Clean inputs: both tiers agree.
-        let got = eval_native(&mlir, "f", &[true], &[3, 4, 5], &[]).expect("clean runs");
-        assert_eq!(got, 12);
+        let got = eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], false)
+            .expect("clean runs");
+        assert_eq!(got, 12.0);
 
         // Overflowing inputs: interpreter kills...
         let killed = interp::eval_candidate(
@@ -464,8 +505,52 @@ mod trap_tests {
         assert!(killed.is_err());
         // ...and native must not return a value either.
         assert!(
-            eval_native(&mlir, "f", &[true], &[i64::MAX, 1], &[]).is_err(),
+            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], false).is_err(),
             "native returned a value where the oracle kills"
         );
+    }
+}
+
+#[cfg(test)]
+mod float_tests {
+    use super::*;
+    use crate::{check, interp, lower, sketch};
+    use crate::wish::Value;
+
+    /// P1 gate: F64 candidates lower to arith.mulf/cmpf-style IR (never the
+    /// integer trap path) and match the interpreter bit-for-bit natively.
+    #[test]
+    fn test_f64_native_parity_and_no_trap_expansion() {
+        if find_tool("mlir-opt").is_none() || find_tool("llc").is_none() {
+            eprintln!("toolchain missing; f64 parity skipped");
+            return;
+        }
+        let cand = sketch::parse("fn @m(%a: F64, %b: F64) -> F64 { %a * %b + %a }").unwrap();
+        crate::check::check(&cand).unwrap();
+        // Checked tier must NOT wrap float math in i128 checks.
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false).unwrap();
+        assert!(!mlir.contains("i128"), "float math entered trap expansion");
+        assert!(mlir.contains("arith.mulf"));
+
+        let expect = interp::eval_candidate(
+            &cand,
+            &[Value::Float(1.5), Value::Float(2.5)],
+            interp::Ctx::checked(),
+        )
+        .unwrap();
+        let got = eval_native(
+            &mlir,
+            "m",
+            &[CK::F64, CK::F64],
+            &[],
+            &[],
+            &[1.5, 2.5],
+            true,
+        )
+        .unwrap();
+        match expect {
+            Value::Float(f) => assert_eq!(got, f),
+            other => panic!("unexpected {:?}", other),
+        }
     }
 }

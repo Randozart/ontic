@@ -101,3 +101,16 @@
   guidance, not task hints; kill rate dropped immediately.
 - recipe.rs: pre-fn prefix lines (e.g. wrapping) attach to the following
   wish chunk instead of erroring.
+
+### 2026-08-22 00:45 — P1 Layer A: F64 scalars end-to-end
+- sketch.rs: FloatLit lexer/parser (1.5, 1e-9 forms), Ty::F64, GBNF float rule.
+- wish.rs: Value::Float, Example.tol with `-> x ± tol` syntax (F64-only,
+  abs+rel epsilon at sieve), parse_type F64.
+- check.rs: F64 arith/ordering typing; public infer_type for lowerer.
+- interp.rs: IEEE fast path — inf/NaN propagate, only integer div/mod-by-zero errors.
+- sieve.rs: evidence_holds tolerance comparison; kill reasons cite ±tol verbatim.
+- lower.rs: tyenv-threaded emitter — addf/subf/mulf/divf/remf/cmpf, typed
+  scf.if/scf.for yields, return type from signature; floats never enter i128 traps.
+- pipeline.rs: CK param kinds, f64 differential parity gate.
+- probes.rs: F64 edge/random domains. forge prompt documents IEEE semantics.
+- 88 tests green incl. native f64 bit-parity + no-trap-expansion guard.

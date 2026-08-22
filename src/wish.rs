@@ -18,6 +18,7 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
+    Float(f64),
     Bool(bool),
     List(Vec<i64>),
 }
@@ -27,6 +28,7 @@ impl Value {
     pub fn ty(&self) -> Ty {
         match self {
             Value::Int(_) => Ty::Int,
+            Value::Float(_) => Ty::F64,
             Value::Bool(_) => Ty::Bool,
             Value::List(_) => Ty::ListInt,
         }
@@ -37,6 +39,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Int(v) => write!(f, "{}", v),
+            Value::Float(v) => write!(f, "{}", v),
             Value::Bool(v) => write!(f, "{}", v),
             Value::List(vs) => {
                 write!(f, "[")?;
@@ -52,11 +55,13 @@ impl fmt::Display for Value {
     }
 }
 
-/// One input→output evidence pair.
+/// One input→output evidence pair. `tol` applies to F64 outputs:
+/// pass when |got - want| <= tol + 1e-9*|want|. Zero means exact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Example {
     pub inputs: Vec<Value>,
     pub output: Value,
+    pub tol: f64,
 }
 
 /// Parsed wish with the transparent/opaque split already applied.
@@ -89,6 +94,12 @@ fn parse_value(s: &str) -> Result<Value, String> {
     }
     if t == "false" {
         return Ok(Value::Bool(false));
+    }
+    if t.contains('.') || t.contains('e') || t.contains('E') {
+        let v: f64 = t
+            .parse()
+            .map_err(|_| format!("bad float `{}`", t))?;
+        return Ok(Value::Float(v));
     }
     if let Some(inner) = t.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
         let inner = inner.trim();
@@ -149,8 +160,29 @@ fn parse_example_line(line: &str, what: &str) -> Result<Example, String> {
     for part in split_top_level(in_s) {
         inputs.push(parse_value(&part).map_err(|e| format!("{}: {}", what, e))?);
     }
-    let output = parse_value(out_s).map_err(|e| format!("{}: {}", what, e))?;
-    Ok(Example { inputs, output })
+    // Optional tolerance suffix on float outputs: `-> 6.28 ± 1e-9`
+    let (out_v, tol) = match out_s.split_once('±') {
+        Some((v_s, tol_s)) => {
+            let v = parse_value(v_s.trim()).map_err(|e| format!("{}: {}", what, e))?;
+            let t: f64 = tol_s
+                .trim()
+                .parse()
+                .map_err(|_| format!("{}: bad tolerance `{}`", what, tol_s.trim()))?;
+            (v, t.abs())
+        }
+        None => (parse_value(out_s).map_err(|e| format!("{}: {}", what, e))?, 0.0),
+    };
+    if matches!(out_v, Value::Int(_) | Value::Bool(_)) && tol != 0.0 {
+        return Err(format!(
+            "{}: ± tolerance only applies to F64 outputs",
+            what
+        ));
+    }
+    Ok(Example {
+        inputs,
+        output: out_v,
+        tol,
+    })
 }
 
 /// Parse a full `.ont` wish. Applies auto-split when no explicit `??` exist.
@@ -248,9 +280,13 @@ fn parse_pident(s: &str) -> Result<String, String> {
 fn parse_type(s: &str) -> Result<Ty, String> {
     match s {
         "Int" => Ok(Ty::Int),
+        "F64" => Ok(Ty::F64),
         "Bool" => Ok(Ty::Bool),
         "List<Int>" => Ok(Ty::ListInt),
-        other => Err(format!("unsupported type `{}` (v0: Int, Bool, List<Int>)", other)),
+        other => Err(format!(
+            "unsupported type `{}` (v1: Int, F64, Bool, List<Int>)",
+            other
+        )),
     }
 }
 
@@ -430,5 +466,29 @@ fn f(%a: Int) -> Int
         let c2 = parse(&c1).expect("canonical reparses").canonical();
         assert_eq!(c1, c2);
         assert!(!c1.contains("10,20,30"), "opaque set leaked into canonical");
+    }
+}
+
+#[cfg(test)]
+mod float_tests {
+    use super::*;
+
+    #[test]
+    fn test_float_example_with_tolerance() {
+        let w = parse("fn g(%x: F64) -> F64\n  => 2.0 -> 6.28 ± 1e-9\n").unwrap();
+        assert_eq!(w.transparent[0].tol, 1e-9);
+        assert_eq!(w.transparent[0].output, Value::Float(6.28));
+    }
+
+    #[test]
+    fn test_tolerance_on_int_output_rejected() {
+        assert!(parse("fn g(%x: Int) -> Int\n  => 2 -> 6 ± 1e-9\n").is_err());
+    }
+
+    #[test]
+    fn test_f64_type_roundtrip() {
+        let w = parse("fn g(%x: F64) -> F64\n  => 1e-9 -> 2.5E3\n").unwrap();
+        assert!(matches!(w.transparent[0].output, Value::Float(2500.0)));
+        assert!(w.canonical().contains("F64"));
     }
 }

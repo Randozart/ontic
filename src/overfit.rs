@@ -85,6 +85,9 @@ fn walk(e: &Expr, leaked: &HashSet<i64>, st: &mut Stats) {
         Expr::IntLit(v) => {
             st.int_literals.insert(*v);
         }
+        // Float literals are not example-leak candidates in v0 (evidence is
+        // int-typed); they are honest computation constants.
+        Expr::FloatLit(_) => {}
         Expr::BoolLit(_) | Expr::Var(_) => {}
         Expr::ListLit(items) => {
             st.int_literals.extend(items.iter().copied());
@@ -146,7 +149,7 @@ fn guard_uses_example_literal(
 fn mentions_var(e: &Expr) -> bool {
     match e {
         Expr::Var(_) => true,
-        Expr::IntLit(_) | Expr::BoolLit(_) | Expr::ListLit(_) => false,
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::ListLit(_) => false,
         Expr::UnOp(_, i) => mentions_var(i),
         Expr::Len(i) => mentions_var(i),
         Expr::If(c, t, f) => mentions_var(c) || mentions_var(t) || mentions_var(f),
@@ -221,10 +224,12 @@ mod tests {
             wish::Example {
                 inputs: vec![wish::Value::List(vec![1, 2, 3])],
                 output: wish::Value::Int(6),
+             tol: 0.0,
             },
             wish::Example {
                 inputs: vec![wish::Value::List(vec![4, 5])],
                 output: wish::Value::Int(9),
+             tol: 0.0,
             },
         ]
     }
@@ -255,8 +260,8 @@ mod tests {
         )
         .unwrap();
         let exs = vec![
-            Example { inputs: vec![wish::Value::Int(1)], output: wish::Value::Int(2) },
-            Example { inputs: vec![wish::Value::Int(4)], output: wish::Value::Int(9) },
+            Example { inputs: vec![wish::Value::Int(1)], output: wish::Value::Int(2), tol: 0.0 },
+            Example { inputs: vec![wish::Value::Int(4)], output: wish::Value::Int(9), tol: 0.0 },
         ];
         let v = scan(&c, &exs, &OverfitConfig::default());
         assert!(matches!(v, OverfitVerdict::Suspicious(_)), "got {:?}", v);
@@ -267,8 +272,8 @@ mod tests {
         // Comparing against non-example constant is honest branching.
         let c = sketch::parse("fn @t(%n: Int) -> Int { if %n > 100 { 100 } else { %n * 2 } }").unwrap();
         let exs = vec![
-            Example { inputs: vec![wish::Value::Int(3)], output: wish::Value::Int(6) },
-            Example { inputs: vec![wish::Value::Int(7)], output: wish::Value::Int(14) },
+            Example { inputs: vec![wish::Value::Int(3)], output: wish::Value::Int(6), tol: 0.0 },
+            Example { inputs: vec![wish::Value::Int(7)], output: wish::Value::Int(14), tol: 0.0 },
         ];
         assert_eq!(scan(&c, &exs, &OverfitConfig::default()), OverfitVerdict::Clean);
     }

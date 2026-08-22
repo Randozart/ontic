@@ -47,6 +47,13 @@ impl Ctx {
     }
 }
 
+fn float_of(v: &Value) -> Result<f64, EvalError> {
+    match v {
+        Value::Float(x) => Ok(*x),
+        other => Err(EvalError::TypeError(format!("expected F64, got {}", other))),
+    }
+}
+
 fn int_of(v: &Value) -> Result<i64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -63,6 +70,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 pub fn eval_ctx(expr: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
     match expr {
         Expr::IntLit(v) => Ok(Value::Int(*v)),
+        // IEEE semantics: inf/NaN propagate; only div/mod by zero on INTEGERS errors.
+        Expr::FloatLit(v) => Ok(Value::Float(*v)),
         Expr::BoolLit(b) => Ok(Value::Bool(*b)),
         Expr::Var(n) => env
             .get(n)
@@ -74,7 +83,11 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
             other => Err(EvalError::TypeError(format!("len of non-list {}", other))),
         },
         Expr::UnOp(UnOp::Neg, inner) => {
-            let v = int_of(&eval_ctx(inner, env, ctx)?)?;
+            let inner_v = eval_ctx(inner, env, ctx)?;
+            if let Value::Float(f) = inner_v {
+                return Ok(Value::Float(-f));
+            }
+            let v = int_of(&inner_v)?;
             if ctx.wrapping {
                 Ok(Value::Int(v.wrapping_neg()))
             } else {
@@ -158,6 +171,22 @@ fn eval_binop(
     }
     let lv = eval_ctx(l, env, ctx)?;
     let rv = eval_ctx(r, env, ctx)?;
+    // IEEE fast path for float pairs: no overflow kills, div-by-zero -> inf/nan.
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod)
+        && matches!(lv, Value::Float(_))
+        && matches!(rv, Value::Float(_))
+    {
+        let a = float_of(&lv)?;
+        let b = float_of(&rv)?;
+        let out = match op {
+            BinOp::Add => a + b,
+            BinOp::Sub => a - b,
+            BinOp::Mul => a * b,
+            BinOp::Div => a / b,
+            _ => a % b,
+        };
+        return Ok(Value::Float(out));
+    }
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let a = int_of(&lv)?;
@@ -323,5 +352,28 @@ mod tests {
             run("fn @u(%a: Int) -> Int { %zz }", &[Value::Int(1)]),
             Err(EvalError::Unbound(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod float_tests {
+    use super::*;
+    use crate::sketch;
+
+    #[test]
+    fn test_ieee_division_propagates_inf() {
+        // IEEE semantics: division by zero yields inf, not an error.
+        let c = sketch::parse("fn @d(%a: F64) -> F64 { %a / 0.0 }").unwrap();
+        let v = eval_candidate(&c, &[Value::Float(1.0)], Ctx::checked()).expect("evals");
+        assert!(matches!(v, Value::Float(f) if f.is_infinite()));
+    }
+
+    #[test]
+    fn test_int_div_zero_still_errors() {
+        let c = sketch::parse("fn @i(%a: Int) -> Int { %a / 0 }").unwrap();
+        assert_eq!(
+            eval_candidate(&c, &[Value::Int(1)], Ctx::checked()),
+            Err(EvalError::DivByZero)
+        );
     }
 }

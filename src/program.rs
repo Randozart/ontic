@@ -36,6 +36,7 @@ pub fn fn_symbol(mlir: &str) -> Result<String, String> {
 enum Local {
     List { c_name: String, len: usize },
     Scalar { c_name: String },
+    ScalarF { c_name: String },
 }
 
 /// Generate the complete C driver for a program.
@@ -85,6 +86,12 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         body.push_str(&format!("  long {} = {}L;\n", cn, v));
                         locals.push((name.clone(), Local::Scalar { c_name: cn }));
                     }
+                    crate::wish::Value::Float(v) => {
+                        let cn = format!("v{}", seq);
+                        seq += 1;
+                        body.push_str(&format!("  double {} = {:e};\n", cn, v));
+                        locals.push((name.clone(), Local::ScalarF { c_name: cn }));
+                    }
                     crate::wish::Value::Bool(b) => {
                         let cn = format!("v{}", seq);
                         seq += 1;
@@ -109,12 +116,17 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                                 call_args
                                     .push_str(&format!("{0}, {0}, 0, {1}, 1, ", c_name, len));
                             }
-                            Local::Scalar { .. } => {
+                            Local::Scalar { .. } | Local::ScalarF { .. } => {
                                 return Err(format!("%{} is scalar, `{}` wants list", v, callee))
                             }
                         },
                         (CallArg::Var(v), false) => match lookup(&locals, v)? {
-                            Local::Scalar { c_name } => call_args.push_str(&format!("{}, ", c_name)),
+                            Local::Scalar { c_name } => {
+                                call_args.push_str(&format!("{}, ", c_name))
+                            }
+                            Local::ScalarF { c_name } => {
+                                call_args.push_str(&format!("{}, ", c_name))
+                            }
                             Local::List { .. } => {
                                 return Err(format!("%{} is list, `{}` wants scalar", v, callee))
                             }
@@ -122,6 +134,9 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         (CallArg::Lit(value), false) => match value {
                             crate::wish::Value::Int(v) => {
                                 call_args.push_str(&format!("{}L, ", v))
+                            }
+                            crate::wish::Value::Float(v) => {
+                                call_args.push_str(&format!("{:e}, ", v))
                             }
                             crate::wish::Value::Bool(b) => {
                                 call_args.push_str(&format!("{}L, ", *b as i64))
@@ -148,6 +163,12 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
             Stmt::Print(name) => match lookup(&locals, name)? {
                 Local::Scalar { c_name } => {
                     body.push_str(&format!("  printf(\"%ld\\n\", {});\n", c_name));
+                }
+                Local::ScalarF { c_name } => {
+                    body.push_str(&format!(
+                        "  printf(\"%.17g\\n\", {});\n",
+                        c_name
+                    ));
                 }
                 Local::List { .. } => {
                     return Err(format!("cannot print list %{} (v0 prints scalars)", name))

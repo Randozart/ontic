@@ -20,6 +20,12 @@ pub const ELEM_HI: i64 = 100;
 fn edges(ty: &Ty) -> Vec<Value> {
     match ty {
         Ty::Int => vec![Value::Int(0), Value::Int(1), Value::Int(-1)],
+        Ty::F64 => vec![
+            Value::Float(0.0),
+            Value::Float(1.5),
+            Value::Float(-2.5),
+            Value::Float(1e9),
+        ],
         Ty::Bool => vec![Value::Bool(true), Value::Bool(false)],
         Ty::ListInt => vec![
             Value::List(vec![]),
@@ -33,6 +39,8 @@ fn edges(ty: &Ty) -> Vec<Value> {
 fn sample(ty: &Ty, rng: &mut Rng) -> Value {
     match ty {
         Ty::Int => Value::Int(rng.range_i64(INT_LO, INT_HI)),
+        // Deterministic float sampling: integer grid scaled, no denormals.
+        Ty::F64 => Value::Float(rng.range_i64(INT_LO * 8, INT_HI * 8) as f64 / 8.0),
         Ty::Bool => Value::Bool(rng.next_u64() % 2 == 0),
         Ty::ListInt => {
             let len = rng.below(LIST_LEN_MAX);

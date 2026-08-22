@@ -2,10 +2,11 @@
 //! One grammar, two consumers: `GRAMMAR` (GBNF, constrains server-side
 //! sampling) and `Parser` (Rust mirror, stage S1). They MUST change together.
 
-/// Sketch value types. v0: Int (i64), Bool, List<Int>.
+/// Sketch value types. v1: Int (i64), F64, Bool, List<Int>.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Int,
+    F64,
     Bool,
     ListInt,
 }
@@ -15,6 +16,7 @@ impl Ty {
     pub fn name(&self) -> &'static str {
         match self {
             Ty::Int => "Int",
+            Ty::F64 => "F64",
             Ty::Bool => "Bool",
             Ty::ListInt => "List<Int>",
         }
@@ -50,6 +52,7 @@ pub enum UnOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     IntLit(i64),
+    FloatLit(f64),
     BoolLit(bool),
     Var(String),
     BinOp(BinOp, Box<Expr>, Box<Expr>),
@@ -79,6 +82,7 @@ pub struct Candidate {
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
     Int(i64),
+    Float(f64),
     PIdent(String),
     /// `@name` lexed as one token — bare words are keyword-only otherwise.
     AtName(String),
@@ -153,18 +157,41 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
             });
             continue;
         }
-        if c.is_ascii_digit() {
+        if c.is_ascii_digit()
+            || (c == b'.' && i + 1 < b.len() && b[i + 1].is_ascii_digit())
+        {
             let start = i;
-            while i < b.len() && b[i].is_ascii_digit() {
+            let mut is_float = false;
+            while i < b.len()
+                && (b[i].is_ascii_digit()
+                    || b[i] == b'.'
+                    || b[i] == b'e'
+                    || b[i] == b'E'
+                    || ((b[i] == b'+' || b[i] == b'-') && matches!(exponent_sign(&src[start..i]), true)))
+            {
+                if b[i] == b'.' || b[i] == b'e' || b[i] == b'E' {
+                    is_float = true;
+                }
                 i += 1;
             }
-            let v: i64 = src[start..i]
-                .parse()
-                .map_err(|_| err(start, "integer literal overflow"))?;
-            out.push(Lexed {
-                tok: Tok::Int(v),
-                offset: start,
-            });
+            let text = &src[start..i];
+            if !is_float {
+                let v: i64 = text
+                    .parse()
+                    .map_err(|_| err(start, "integer literal overflow"))?;
+                out.push(Lexed {
+                    tok: Tok::Int(v),
+                    offset: start,
+                });
+            } else {
+                let v: f64 = text
+                    .parse()
+                    .map_err(|_| err(start, format!("bad float literal `{}`", text)))?;
+                out.push(Lexed {
+                    tok: Tok::Float(v),
+                    offset: start,
+                });
+            }
             continue;
         }
         if c.is_ascii_alphabetic() || c == b'_' {
@@ -188,6 +215,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "in" => Some("in"),
                 "from" => Some("from"),
                 "Int" => Some("Int"),
+                "F64" => Some("F64"),
                 "Bool" => Some("Bool"),
                 "List" => Some("List"),
                 _ => None,
@@ -311,6 +339,10 @@ impl Parser {
             Some(Tok::Word("Int")) => {
                 self.pos += 1;
                 Ok(Ty::Int)
+            }
+            Some(Tok::Word("F64")) => {
+                self.pos += 1;
+                Ok(Ty::F64)
             }
             Some(Tok::Word("Bool")) => {
                 self.pos += 1;
@@ -495,6 +527,10 @@ impl Parser {
                 self.pos += 1;
                 Ok(Expr::IntLit(v))
             }
+            Some(Tok::Float(v)) => {
+                self.pos += 1;
+                Ok(Expr::FloatLit(v))
+            }
             Some(Tok::Word("true")) => {
                 self.pos += 1;
                 Ok(Expr::BoolLit(true))
@@ -619,7 +655,7 @@ root        ::= name ws "(" ws params ws ")" ws "->" ws type ws "{" ws e ws "}" 
 name        ::= [a-z_] [a-zA-Z0-9_]*
 params      ::= param (ws "," ws param)*
 param       ::= pid ws ":" ws type
-type        ::= "Int" | "Bool" | "List" "<" "Int" ">"
+type        ::= "Int" | "F64" | "Bool" | "List" "<" "Int" ">"
 e           ::= letx | ifx | orx
 letx        ::= "let" ws pid ws "=" ws e ws ";" ws e
 ifx         ::= "if" ws e ws "{" ws e ws "}" ws "else" ws "{" ws e ws "}"
@@ -632,10 +668,11 @@ addsym      ::= "+" | "-"
 mulx        ::= unx (ws mulsym ws unx)*
 mulsym      ::= "*" | "/" | "%"
 unx         ::= "-" unx | "!" unx | prim
-prim        ::= int | "true" | "false" | pid | listlit | "len" ws "(" ws e ws ")" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+prim        ::= int | float | "true" | "false" | pid | listlit | "len" ws "(" ws e ws ")" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
 pid         ::= "%" [a-zA-Z_] [a-zA-Z0-9_]*
 listlit     ::= "[" ws "]" | "[" ws int (ws "," ws int)* ws "]"
 int         ::= "-"? [0-9]+
+float       ::= "-"? [0-9]+ "." [0-9]+ ("e" ("+"|"-")? [0-9]+)? | "-"? [0-9]+ "e" ("+"|"-")? [0-9]+
 ident       ::= [a-zA-Z_] [a-zA-Z0-9_]*
 ws          ::= [ \t\n]*
 "#;
@@ -704,4 +741,10 @@ mod tests {
             assert!(GRAMMAR.contains(kw), "grammar missing {}", kw);
         }
     }
+}
+
+/// True when the text scanned so far ends inside an exponent marker, allowing
+/// a sign character next in the numeric scanner.
+fn exponent_sign(scanned: &str) -> bool {
+    matches!(scanned.as_bytes().last(), Some(b'e') | Some(b'E'))
 }

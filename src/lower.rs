@@ -11,12 +11,14 @@
 //! by probes is already rejected before lowering ever runs.
 
 use crate::sketch::{BinOp, Expr, Ty};
+use std::collections::HashMap;
 
 /// Pretty-print an expression back to sketch surface syntax.
 /// Used by canonical wish serialization and sieve diagnostics.
 pub fn expr_display(e: &Expr) -> String {
     match e {
         Expr::IntLit(v) => v.to_string(),
+        Expr::FloatLit(v) => format!("{:e}", v),
         Expr::BoolLit(b) => b.to_string(),
         Expr::Var(n) => format!("%{}", n),
         Expr::ListLit(items) => {
@@ -134,6 +136,7 @@ impl Emitter {
 fn mlir_param_type(ty: &Ty) -> &'static str {
     match ty {
         Ty::Int | Ty::Bool => "i64",
+        Ty::F64 => "f64",
         Ty::ListInt => "memref<?xi64>",
     }
 }
@@ -141,6 +144,7 @@ fn mlir_param_type(ty: &Ty) -> &'static str {
 fn mlir_ret_type(ty: &Ty) -> Result<&'static str, String> {
     match ty {
         Ty::Int | Ty::Bool => Ok("i64"),
+        Ty::F64 => Ok("f64"),
         // v0 functions return scalars; list-returning wishes are a planned M2 extension.
         Ty::ListInt => Err("v0 lowering: list-returning functions not supported".to_string()),
     }
@@ -184,9 +188,11 @@ pub fn emit_fn(
             ssa: format!("%{}", n),
         })
         .collect();
+    let tyenv0: HashMap<String, Ty> =
+        params.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
 
-    let result = emit_expr(body, &mut env, &mut em)?;
-    em.line(&format!("return {} : i64", result));
+    let result = emit_expr(body, &mut env, &tyenv0, &mut em)?;
+    em.line(&format!("return {} : {}", result, out_ty));
     em.indent -= 1;
     em.line("}");
     em.indent -= 1;
@@ -202,14 +208,24 @@ fn lookup<'a>(env: &'a [Binding], name: &str) -> Result<&'a Binding, String> {
 }
 
 /// Emit one expression; returns the SSA value carrying its result.
-fn emit_expr(e: &Expr, env: &mut Vec<Binding>, em: &mut Emitter) -> Result<String, String> {
+fn emit_expr(
+    e: &Expr,
+    env: &mut Vec<Binding>,
+    tyenv: &HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
     match e {
         Expr::IntLit(v) => Ok(em.const_i64(*v)),
+        Expr::FloatLit(v) => {
+            let c = em.fresh("cf");
+            em.line(&format!("{} = arith.constant {:e} : f64", c, v));
+            Ok(c)
+        }
         Expr::BoolLit(b) => Ok(em.const_i64(if *b { 1 } else { 0 })),
         Expr::Var(n) => Ok(lookup(env, n)?.ssa.clone()),
         Expr::ListLit(items) => emit_list_lit(items, em),
         Expr::Len(inner) => {
-            let m = emit_expr(inner, env, em)?;
+            let m = emit_expr(inner, env, tyenv, em)?;
             let idx0 = em.const_index(0);
             let dim = em.fresh("dim");
             let mty = "memref<?xi64>";
@@ -229,27 +245,27 @@ fn emit_expr(e: &Expr, env: &mut Vec<Binding>, em: &mut Emitter) -> Result<Strin
             Ok(cast)
         }
         Expr::UnOp(crate::sketch::UnOp::Neg, inner) => {
-            let x = emit_expr(inner, env, em)?;
+            let x = emit_expr(inner, env, tyenv, em)?;
             let z = em.const_i64(0);
             let r = em.fresh("neg");
             em.line(&format!("{} = arith.subi {}, {} : i64", r, z, x));
             Ok(r)
         }
         Expr::UnOp(crate::sketch::UnOp::Not, inner) => {
-            let b = emit_expr(inner, env, em)?;
+            let b = emit_expr(inner, env, tyenv, em)?;
             let one = em.const_i64(1);
             let r = em.fresh("not");
             em.line(&format!("{} = arith.xori {}, {} : i64", r, b, one));
             Ok(r)
         }
-        Expr::If(c, t, f) => emit_if(c, t, f, env, em),
+        Expr::If(c, t, f) => emit_if(c, t, f, env, tyenv, em),
         Expr::Let(n, value, body) => {
-            let v = emit_expr(value, env, em)?;
+            let v = emit_expr(value, env, tyenv, em)?;
             env.push(Binding {
                 name: n.clone(),
                 ssa: v,
             });
-            emit_expr(body, env, em)
+            emit_expr(body, env, tyenv, em)
         }
         Expr::Fold {
             var,
@@ -257,8 +273,8 @@ fn emit_expr(e: &Expr, env: &mut Vec<Binding>, em: &mut Emitter) -> Result<Strin
             list,
             init,
             body,
-        } => emit_fold(var, acc, list, init, body, env, em),
-        Expr::BinOp(op, l, r) => emit_binop(*op, l, r, env, em),
+        } => emit_fold(var, acc, list, init, body, env, tyenv, em),
+        Expr::BinOp(op, l, r) => emit_binop(*op, l, r, env, tyenv, em),
     }
 }
 
@@ -286,24 +302,26 @@ fn emit_if(
     t: &Expr,
     f: &Expr,
     env: &mut Vec<Binding>,
+    tyenv: &HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
-    let cv = emit_expr(c, env, em)?;
+    let cv = emit_expr(c, env, tyenv, em)?;
     let cond = em.fresh("cond");
     em.line(&format!(
         "{} = arith.trunci {} : i64 to i1",
         cond, cv
     ));
+    let ty_str = if expr_ty(t, tyenv) == Ty::F64 { "f64" } else { "i64" };
     let result = em.fresh("ifres");
-    em.line(&format!("{} = scf.if {} -> (i64) {{", result, cond));
+    em.line(&format!("{} = scf.if {} -> ({}) {{", result, cond, ty_str));
     em.indent += 1;
-    let tv = emit_expr(t, env, em)?;
-    em.line(&format!("scf.yield {} : i64", tv));
+    let tv = emit_expr(t, env, tyenv, em)?;
+    em.line(&format!("scf.yield {} : {}", tv, ty_str));
     em.indent -= 1;
     em.line("} else {");
     em.indent += 1;
-    let fv = emit_expr(f, env, em)?;
-    em.line(&format!("scf.yield {} : i64", fv));
+    let fv = emit_expr(f, env, tyenv, em)?;
+    em.line(&format!("scf.yield {} : {}", fv, ty_str));
     em.indent -= 1;
     em.line("}");
     Ok(result)
@@ -319,10 +337,11 @@ fn emit_fold(
     init: &Expr,
     body: &Expr,
     env: &mut Vec<Binding>,
+    tyenv: &HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
-    let init_v = emit_expr(init, env, em)?;
-    let m = emit_expr(list, env, em)?;
+    let init_v = emit_expr(init, env, tyenv, em)?;
+    let m = emit_expr(list, env, tyenv, em)?;
     let idx0 = em.const_index(0);
     let step = em.const_index(1);
     let dim = em.fresh("dim");
@@ -335,9 +354,10 @@ fn emit_fold(
 
     let iv = em.fresh("i");
     let acc_ssa = em.fresh("acc");
+    let ty_str = if expr_ty(init, tyenv) == Ty::F64 { "f64" } else { "i64" };
     em.line(&format!(
-        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (i64) {{",
-        acc_ssa, iv, idx0, dim, step, acc_ssa, init_v
+        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> ({}) {{",
+        acc_ssa, iv, idx0, dim, step, acc_ssa, init_v, ty_str
     ));
     em.indent += 1;
 
@@ -352,8 +372,8 @@ fn emit_fold(
         name: acc.to_string(),
         ssa: acc_ssa.clone(),
     });
-    let body_v = emit_expr(body, env, em)?;
-    em.line(&format!("scf.yield {} : i64", body_v));
+    let body_v = emit_expr(body, env, tyenv, em)?;
+    em.line(&format!("scf.yield {} : {}", body_v, ty_str));
     em.indent -= 1;
     em.line("}");
     Ok(acc_ssa)
@@ -364,12 +384,25 @@ fn emit_binop(
     l: &Expr,
     r: &Expr,
     env: &mut Vec<Binding>,
+    tyenv: &HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
-    let lv = emit_expr(l, env, em)?;
-    let rv = emit_expr(r, env, em)?;
+    let lv = emit_expr(l, env, tyenv, em)?;
+    let rv = emit_expr(r, env, tyenv, em)?;
     if is_comparison(op) {
-        return emit_cmp(op, &lv, &rv, em);
+        return emit_cmp(op, &lv, &rv, expr_ty(l, tyenv) == Ty::F64, em);
+    }
+    if expr_ty(l, tyenv) == Ty::F64 && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+        let out = em.fresh("opf");
+        let stmt = match op {
+            BinOp::Add => format!("{} = arith.addf {}, {} : f64", out, lv, rv),
+            BinOp::Sub => format!("{} = arith.subf {}, {} : f64", out, lv, rv),
+            BinOp::Mul => format!("{} = arith.mulf {}, {} : f64", out, lv, rv),
+            BinOp::Div => format!("{} = arith.divf {}, {} : f64", out, lv, rv),
+            _ => format!("{} = arith.remf {}, {} : f64", out, lv, rv),
+        };
+        em.line(&stmt);
+        return Ok(out);
     }
     if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) && !em.wrapping {
         return emit_checked_arith(op, &lv, &rv, em);
@@ -455,6 +488,33 @@ fn emit_checked_arith(
     Ok(res)
 }
 
+
+/// Static type of an expression for emission decisions (mirrors check::infer
+/// for the subset the emitter needs; candidates were typechecked already).
+fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
+    match e {
+        Expr::IntLit(_) => Ty::Int,
+        Expr::FloatLit(_) => Ty::F64,
+        Expr::BoolLit(_) => Ty::Bool,
+        Expr::ListLit(_) => Ty::ListInt,
+        Expr::Var(n) => tyenv.get(n).cloned().unwrap_or(Ty::Int),
+        Expr::Len(_) => Ty::Int,
+        Expr::UnOp(crate::sketch::UnOp::Not, _) => Ty::Bool,
+        Expr::UnOp(crate::sketch::UnOp::Neg, i) => expr_ty(i, tyenv),
+        Expr::If(_, t, _) => expr_ty(t, tyenv),
+        Expr::Let(_, _, b) => expr_ty(b, tyenv),
+        Expr::Fold { init, .. } => expr_ty(init, tyenv),
+        Expr::BinOp(op, l, _) => match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                // Arith result type follows its left operand (candidates are
+                // pre-typechecked, so operands agree).
+                expr_ty(l, tyenv)
+            }
+            _ => Ty::Bool,
+        },
+    }
+}
+
 fn is_comparison(op: BinOp) -> bool {
     matches!(
         op,
@@ -462,8 +522,14 @@ fn is_comparison(op: BinOp) -> bool {
     )
 }
 
-/// Comparisons produce i1 then widen to the i64 boolean ABI.
-fn emit_cmp(op: BinOp, lv: &str, rv: &str, em: &mut Emitter) -> Result<String, String> {
+/// Comparisons produce i1 then widen to the boolean ABI. Floats use cmpf.
+fn emit_cmp(
+    op: BinOp,
+    lv: &str,
+    rv: &str,
+    is_float: bool,
+    em: &mut Emitter,
+) -> Result<String, String> {
     let pred = match op {
         BinOp::Eq => "eq",
         BinOp::Ne => "ne",
@@ -473,10 +539,11 @@ fn emit_cmp(op: BinOp, lv: &str, rv: &str, em: &mut Emitter) -> Result<String, S
         _ => "sge",
     };
     let bit = em.fresh("cmp");
-    em.line(&format!(
-        "{} = arith.cmpi {}, {}, {} : i64",
-        bit, pred, lv, rv
-    ));
+    if is_float {
+        em.line(&format!("{} = arith.cmpf {}, {}, {} : f64", bit, pred, lv, rv));
+    } else {
+        em.line(&format!("{} = arith.cmpi {}, {}, {} : i64", bit, pred, lv, rv));
+    }
     let out = em.fresh("bool");
     em.line(&format!("{} = arith.extui {} : i1 to i64", out, bit));
     Ok(out)

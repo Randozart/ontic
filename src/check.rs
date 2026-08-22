@@ -4,6 +4,12 @@
 use crate::sketch::{BinOp, Candidate, Expr, Ty, UnOp};
 use std::collections::HashMap;
 
+/// Public type-inference entry: lowerers and tools query expression types
+/// under a signature environment (params + optional %res).
+pub fn infer_type(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
+    infer(e, env)
+}
+
 /// Typecheck a candidate against its own signature. Returns Err with a
 /// human-readable reason on first mismatch.
 pub fn check(cand: &Candidate) -> Result<(), String> {
@@ -28,6 +34,7 @@ pub fn check(cand: &Candidate) -> Result<(), String> {
 fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
     match e {
         Expr::IntLit(_) => Ok(Ty::Int),
+        Expr::FloatLit(_) => Ok(Ty::F64),
         Expr::BoolLit(_) => Ok(Ty::Bool),
         Expr::ListLit(_) => Ok(Ty::ListInt),
         Expr::Var(n) => env
@@ -89,14 +96,26 @@ fn expect_ty_in(e: &Expr, env: &HashMap<String, Ty>, want: &Ty) -> Result<Ty, St
 fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-            expect_ty(l, env, &Ty::Int)?;
-            expect_ty(r, env, &Ty::Int)?;
-            Ok(Ty::Int)
+            let lt = infer(l, env)?;
+            let rt = infer(r, env)?;
+            if lt != rt {
+                return Err(format!("arith on {} vs {}", lt.name(), rt.name()));
+            }
+            match lt {
+                Ty::Int | Ty::F64 => Ok(lt),
+                other => Err(format!("arith on {}", other.name())),
+            }
         }
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-            expect_ty(l, env, &Ty::Int)?;
-            expect_ty(r, env, &Ty::Int)?;
-            Ok(Ty::Bool)
+            let lt = infer(l, env)?;
+            let rt = infer(r, env)?;
+            if lt != rt {
+                return Err(format!("compare {} vs {}", lt.name(), rt.name()));
+            }
+            match lt {
+                Ty::Int | Ty::F64 => Ok(Ty::Bool),
+                other => Err(format!("ordering compare on {}", other.name())),
+            }
         }
         BinOp::And | BinOp::Or => {
             expect_ty(l, env, &Ty::Bool)?;

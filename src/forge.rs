@@ -115,7 +115,8 @@ pub fn build_prompt(wish: &Wish, feedback: &[String]) -> String {
     p.push_str("Language rules:\n");
     p.push_str("- Iterate only via fold: fold %v in <list>, %acc from <init> { <body> }.\n");
     p.push_str("- The body must have exactly the signature's return type.\n");
-    p.push_str("- == / != compare Int or Bool scalars only; never lists.\n");
+    p.push_str("- == / != compare same-typed scalars only; never lists.\n");
+    p.push_str("- F64 arithmetic is IEEE: division by zero yields inf/NaN, never an error.\n");
     p.push_str("- len(x) is the only list operation; there is no indexing or concatenation.\n");
     p.push_str("- One function only; it starts where this prompt ends (at the name).\n");
     p.push_str("\nfn @");
