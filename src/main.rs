@@ -70,6 +70,7 @@ fn cmd_check(path: &str) -> i32 {
             println!("wish      : {}", w.path);
             println!("params    : {}", w.params.len());
             println!("invariants: {}", w.invariants.len());
+            println!("tier      : {}", if w.wrapping { "wrapping" } else { "checked" });
             println!("transparent examples: {}", w.transparent.len());
             println!("opaque examples     : {}{}", w.opaque.len(), if w.auto_split { " (auto-split)" } else { "" });
             let cfg = SiegeConfig::default();

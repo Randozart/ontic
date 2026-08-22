@@ -70,6 +70,9 @@ pub struct Wish {
     pub transparent: Vec<Example>,
     pub opaque: Vec<Example>,
     pub auto_split: bool,
+    /// Declared wrapping tier: arithmetic wraps mod 2^64 instead of killing
+    /// candidates on overflow. Speed requires declaration (AGENTS rule 11).
+    pub wrapping: bool,
 }
 
 /// Parse a single value token: int, bool, or `[i,i,...]` list literal.
@@ -150,6 +153,7 @@ pub fn parse(src: &str) -> Result<Wish, String> {
     let mut params: Vec<(String, Ty)> = Vec::new();
     let mut ret = Ty::Int;
     let mut invariants = Vec::new();
+    let mut wrapping = false;
     let mut transparent = Vec::new();
     let mut opaque = Vec::new();
 
@@ -197,6 +201,10 @@ pub fn parse(src: &str) -> Result<Wish, String> {
             transparent.push(parse_example_line(line, "example").map_err(ctx)?);
             continue;
         }
+        if line == "wrapping" {
+            wrapping = true;
+            continue;
+        }
         if line.starts_with("??") {
             opaque.push(parse_example_line(line, "opaque example").map_err(ctx)?);
             continue;
@@ -217,6 +225,7 @@ pub fn parse(src: &str) -> Result<Wish, String> {
         transparent,
         opaque,
         auto_split: false,
+        wrapping,
     };
     apply_auto_split(&mut wish);
     validate(&wish)?;
@@ -313,6 +322,9 @@ impl Wish {
         let trans: Vec<String> = self.transparent.iter().map(example_str).collect();
         let _ = &self.opaque; // opaque set deliberately excluded from canonical text
         let mut out = String::new();
+        if self.wrapping {
+            out.push_str("wrapping\n");
+        }
         out.push_str(&format!(
             "fn {}({}) -> {}\n",
             self.path,

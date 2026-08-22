@@ -29,6 +29,24 @@ impl std::fmt::Display for EvalError {
 
 pub type Env = HashMap<String, Value>;
 
+/// Evaluation semantics tier. `wrapping` mirrors a wish's declared wrapping
+/// clause: arithmetic wraps mod 2^64 and only division/modulo-by-zero are
+/// errors. Default (checked) kills candidates on any overflow so probes can
+/// expose unguarded paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ctx {
+    pub wrapping: bool,
+}
+
+impl Ctx {
+    pub fn checked() -> Self {
+        Ctx { wrapping: false }
+    }
+    pub fn wrapping() -> Self {
+        Ctx { wrapping: true }
+    }
+}
+
 fn int_of(v: &Value) -> Result<i64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -36,9 +54,13 @@ fn int_of(v: &Value) -> Result<i64, EvalError> {
     }
 }
 
-/// Evaluate `expr` under `env`. Checked arithmetic: overflow/div-zero are
-/// hard errors so probes can expose candidates with unguarded paths.
+/// Evaluate `expr` under `env` in the default (checked) tier.
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
+    eval_ctx(expr, env, Ctx::checked())
+}
+
+/// Evaluate `expr` under `env` with explicit semantics tier.
+pub fn eval_ctx(expr: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
     match expr {
         Expr::IntLit(v) => Ok(Value::Int(*v)),
         Expr::BoolLit(b) => Ok(Value::Bool(*b)),
@@ -47,27 +69,32 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             .cloned()
             .ok_or_else(|| EvalError::Unbound(n.clone())),
         Expr::ListLit(items) => Ok(Value::List(items.clone())),
-        Expr::Len(inner) => match eval(inner, env)? {
+        Expr::Len(inner) => match eval_ctx(inner, env, ctx)? {
             Value::List(vs) => Ok(Value::Int(vs.len() as i64)),
             other => Err(EvalError::TypeError(format!("len of non-list {}", other))),
         },
-        Expr::UnOp(UnOp::Neg, inner) => int_of(&eval(inner, env)?)
-            .and_then(|v| v.checked_neg().ok_or(EvalError::Overflow))
-            .map(Value::Int),
-        Expr::UnOp(UnOp::Not, inner) => match eval(inner, env)? {
+        Expr::UnOp(UnOp::Neg, inner) => {
+            let v = int_of(&eval_ctx(inner, env, ctx)?)?;
+            if ctx.wrapping {
+                Ok(Value::Int(v.wrapping_neg()))
+            } else {
+                v.checked_neg().map(Value::Int).ok_or(EvalError::Overflow)
+            }
+        }
+        Expr::UnOp(UnOp::Not, inner) => match eval_ctx(inner, env, ctx)? {
             Value::Bool(b) => Ok(Value::Bool(!b)),
             other => Err(EvalError::TypeError(format!("! on {}", other))),
         },
-        Expr::If(c, t, e) => match eval(c, env)? {
-            Value::Bool(true) => eval(t, env),
-            Value::Bool(false) => eval(e, env),
+        Expr::If(c, t, e) => match eval_ctx(c, env, ctx)? {
+            Value::Bool(true) => eval_ctx(t, env, ctx),
+            Value::Bool(false) => eval_ctx(e, env, ctx),
             other => Err(EvalError::TypeError(format!("if cond is {}", other))),
         },
         Expr::Let(n, value, body) => {
-            let v = eval(value, env)?;
+            let v = eval_ctx(value, env, ctx)?;
             let mut scoped = env.clone();
             scoped.insert(n.clone(), v);
-            eval(body, &scoped)
+            eval_ctx(body, &scoped, ctx)
         }
         Expr::Fold {
             var,
@@ -75,8 +102,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             list,
             init,
             body,
-        } => eval_fold(var, acc, list, init, body, env),
-        Expr::BinOp(op, l, r) => eval_binop(*op, l, r, env),
+        } => eval_fold(var, acc, list, init, body, env, ctx),
+        Expr::BinOp(op, l, r) => eval_binop(*op, l, r, env, ctx),
     }
 }
 
@@ -89,25 +116,32 @@ fn eval_fold(
     init: &Expr,
     body: &Expr,
     env: &Env,
+    ctx: Ctx,
 ) -> Result<Value, EvalError> {
-    let items = match eval(list, env)? {
+    let items = match eval_ctx(list, env, ctx)? {
         Value::List(vs) => vs,
         other => return Err(EvalError::TypeError(format!("fold over {}", other))),
     };
-    let mut running = eval(init, env)?;
+    let mut running = eval_ctx(init, env, ctx)?;
     for item in items {
         let mut scoped = env.clone();
         scoped.insert(var.to_string(), Value::Int(item));
         scoped.insert(acc.to_string(), running);
-        running = eval(body, &scoped)?;
+        running = eval_ctx(body, &scoped, ctx)?;
     }
     Ok(running)
 }
 
-fn eval_binop(op: BinOp, l: &Expr, r: &Expr, env: &Env) -> Result<Value, EvalError> {
+fn eval_binop(
+    op: BinOp,
+    l: &Expr,
+    r: &Expr,
+    env: &Env,
+    ctx: Ctx,
+) -> Result<Value, EvalError> {
     // Short-circuit booleans first.
     if matches!(op, BinOp::And | BinOp::Or) {
-        let lv = match eval(l, env)? {
+        let lv = match eval_ctx(l, env, ctx)? {
             Value::Bool(b) => b,
             other => return Err(EvalError::TypeError(format!("{} operand {}", op_str(op), other))),
         };
@@ -117,31 +151,36 @@ fn eval_binop(op: BinOp, l: &Expr, r: &Expr, env: &Env) -> Result<Value, EvalErr
         if matches!(op, BinOp::Or) && lv {
             return Ok(Value::Bool(true));
         }
-        return match eval(r, env)? {
+        return match eval_ctx(r, env, ctx)? {
             Value::Bool(b) => Ok(Value::Bool(b)),
             other => Err(EvalError::TypeError(format!("{} operand {}", op_str(op), other))),
         };
     }
-    let lv = eval(l, env)?;
-    let rv = eval(r, env)?;
+    let lv = eval_ctx(l, env, ctx)?;
+    let rv = eval_ctx(r, env, ctx)?;
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let a = int_of(&lv)?;
             let b = int_of(&rv)?;
-            let out = match op {
-                BinOp::Add => a.checked_add(b),
-                BinOp::Sub => a.checked_sub(b),
-                BinOp::Mul => a.checked_mul(b),
-                BinOp::Div => {
+            let out = match (op, ctx.wrapping) {
+                (BinOp::Add, true) => Some(a.wrapping_add(b)),
+                (BinOp::Sub, true) => Some(a.wrapping_sub(b)),
+                (BinOp::Mul, true) => Some(a.wrapping_mul(b)),
+                (BinOp::Add, false) => a.checked_add(b),
+                (BinOp::Sub, false) => a.checked_sub(b),
+                (BinOp::Mul, false) => a.checked_mul(b),
+                (_, _) if matches!(op, BinOp::Div) => {
                     if b == 0 {
                         return Err(EvalError::DivByZero);
                     }
                     a.checked_div(b)
                 }
-                _ => {
+                (_, _) => {
                     if b == 0 {
                         return Err(EvalError::ModByZero);
                     }
+                    // Wrapping remainder is the sign-of-dividend semantics
+                    // matching x86 idiv — same as checked for in-domain values.
                     a.checked_rem(b)
                 }
             };
@@ -202,12 +241,13 @@ fn op_str(op: BinOp) -> &'static str {
 pub fn eval_candidate(
     candidate: &crate::sketch::Candidate,
     inputs: &[Value],
+    ctx: Ctx,
 ) -> Result<Value, EvalError> {
     let mut env: Env = HashMap::new();
     for ((name, _), v) in candidate.params.iter().zip(inputs.iter()) {
         env.insert(name.clone(), v.clone());
     }
-    eval(&candidate.body, &env)
+    eval_ctx(&candidate.body, &env, ctx)
 }
 
 #[cfg(test)]
@@ -217,7 +257,7 @@ mod tests {
 
     fn run(src: &str, inputs: &[Value]) -> Result<Value, EvalError> {
         let c = sketch::parse(src).expect("candidate parses");
-        eval_candidate(&c, inputs)
+        eval_candidate(&c, inputs, Ctx::checked())
     }
 
     #[test]

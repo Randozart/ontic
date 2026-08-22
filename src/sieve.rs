@@ -143,6 +143,11 @@ fn reject(stage: Stage, kind: KillKind, reason: String) -> Rejection {
 }
 
 fn run_one(wish: &Wish, text: &str, cfg: &SiegeConfig) -> Result<Survivor, Rejection> {
+    let ictx = if wish.wrapping {
+        interp::Ctx::wrapping()
+    } else {
+        interp::Ctx::checked()
+    };
     // S1 parse
     let cand = sketch::parse(text)
         .map_err(|e| reject(Stage::Parse, KillKind::Invalid, format!("offset {}: {}", e.offset, e.message)))?;
@@ -152,7 +157,7 @@ fn run_one(wish: &Wish, text: &str, cfg: &SiegeConfig) -> Result<Survivor, Rejec
         .map_err(|m| reject(Stage::WellFormed, KillKind::Invalid, m))?;
 
     // S3 transparent evidence
-    eval_set(wish, &cand, &wish.transparent).map_err(|(i, m)| {
+    eval_set(wish, &cand, &wish.transparent, ictx).map_err(|(i, m)| {
         reject(
             Stage::Transparent,
             KillKind::WrongOutput,
@@ -161,7 +166,7 @@ fn run_one(wish: &Wish, text: &str, cfg: &SiegeConfig) -> Result<Survivor, Rejec
     })?;
 
     // S4 held-out evidence
-    eval_set(wish, &cand, &wish.opaque).map_err(|(i, m)| {
+    eval_set(wish, &cand, &wish.opaque, ictx).map_err(|(i, m)| {
         reject(
             Stage::HeldOut,
             KillKind::Overfit,
@@ -173,7 +178,7 @@ fn run_one(wish: &Wish, text: &str, cfg: &SiegeConfig) -> Result<Survivor, Rejec
     })?;
 
     // S5 probes
-    run_probes(wish, &cand, cfg)?;
+    run_probes(wish, &cand, cfg, ictx)?;
 
     // S6 shape scan
     if let OverfitVerdict::Suspicious(m) =
@@ -183,7 +188,7 @@ fn run_one(wish: &Wish, text: &str, cfg: &SiegeConfig) -> Result<Survivor, Rejec
     }
 
     // S7 bench
-    let ns = bench(wish, &cand, cfg.bench_iters);
+    let ns = bench(wish, &cand, cfg.bench_iters, ictx);
     Ok(Survivor {
         candidate: cand,
         source_text: text.to_string(),
@@ -192,12 +197,18 @@ fn run_one(wish: &Wish, text: &str, cfg: &SiegeConfig) -> Result<Survivor, Rejec
 }
 
 /// Evaluate every example against `cand`; on mismatch return (index, why).
-fn eval_set(wish: &Wish, cand: &Candidate, set: &[Example]) -> Result<(), (usize, String)> {
+fn eval_set(
+    wish: &Wish,
+    cand: &Candidate,
+    set: &[Example],
+    ctx: interp::Ctx,
+) -> Result<(), (usize, String)> {
     for (i, ex) in set.iter().enumerate() {
         if ex.inputs.len() != wish.params.len() {
             continue; // arity already validated at wish level
         }
-        let got = interp::eval_candidate(cand, &ex.inputs).map_err(|e| (i, e.to_string()))?;
+        let got =
+            interp::eval_candidate(cand, &ex.inputs, ctx).map_err(|e| (i, e.to_string()))?;
         if got != ex.output {
             return Err((
                 i,
@@ -215,10 +226,15 @@ fn eval_set(wish: &Wish, cand: &Candidate, set: &[Example]) -> Result<(), (usize
 
 /// S5: seeded probe rows; runtime errors and invariant violations kill with
 /// a recorded counterexample.
-fn run_probes(wish: &Wish, cand: &Candidate, cfg: &SiegeConfig) -> Result<(), Rejection> {
+fn run_probes(
+    wish: &Wish,
+    cand: &Candidate,
+    cfg: &SiegeConfig,
+    ctx: interp::Ctx,
+) -> Result<(), Rejection> {
     let rows = probes::generate(wish, cfg.probe_count, cfg.seed, cfg.edge_budget);
     for row in rows {
-        let res = match interp::eval_candidate(cand, &row) {
+        let res = match interp::eval_candidate(cand, &row, ctx) {
             Ok(v) => v,
             Err(e) => {
                 return Err(reject(
@@ -228,7 +244,7 @@ fn run_probes(wish: &Wish, cand: &Candidate, cfg: &SiegeConfig) -> Result<(), Re
                 ))
             }
         };
-        if let Some(reason) = check_invariants_on(wish, &row, &res) {
+        if let Some(reason) = check_invariants_on(wish, &row, &res, ctx) {
             return Err(reject(Stage::Probe, KillKind::InvariantViolation, reason));
         }
     }
@@ -237,14 +253,19 @@ fn run_probes(wish: &Wish, cand: &Candidate, cfg: &SiegeConfig) -> Result<(), Re
 
 /// Evaluate every invariant under env(params → inputs, "res" → result).
 /// Returns None when all hold; otherwise a counterexample reason string.
-fn check_invariants_on(wish: &Wish, inputs: &[Value], res: &Value) -> Option<String> {
+fn check_invariants_on(
+    wish: &Wish,
+    inputs: &[Value],
+    res: &Value,
+    ctx: interp::Ctx,
+) -> Option<String> {
     let mut env: Env = HashMap::new();
     for ((name, _), v) in wish.params.iter().zip(inputs.iter()) {
         env.insert(name.clone(), v.clone());
     }
     env.insert("res".to_string(), res.clone());
     for inv in &wish.invariants {
-        let held = match interp::eval(inv, &env) {
+        let held = match interp::eval_ctx(inv, &env, ctx) {
             Ok(Value::Bool(b)) => b,
             Ok(other) => {
                 return Some(format!(
@@ -279,7 +300,7 @@ fn inputs_str(inputs: &[Value]) -> String {
 
 /// S7: coarse deterministic timing — round-robin transparent examples.
 /// Ranking signal only; correctness was settled by S3–S6.
-fn bench(wish: &Wish, cand: &Candidate, iters: usize) -> u64 {
+fn bench(wish: &Wish, cand: &Candidate, iters: usize, ctx: interp::Ctx) -> u64 {
     let set = &wish.transparent;
     if set.is_empty() || iters == 0 {
         return u64::MAX;
@@ -287,7 +308,7 @@ fn bench(wish: &Wish, cand: &Candidate, iters: usize) -> u64 {
     let start = Instant::now();
     for i in 0..iters {
         let ex = &set[i % set.len()];
-        let _ = interp::eval_candidate(cand, &ex.inputs);
+        let _ = interp::eval_candidate(cand, &ex.inputs, ctx);
     }
     let calls = (iters * set.len()) as u128;
     (start.elapsed().as_nanos() / calls) as u64
@@ -446,5 +467,42 @@ fn Ledger.total(%items: List<Int>) -> Int
     fn test_ast_size_counts_nodes() {
         let e = sketch::parse_expr_str("%a + (len(%l))").unwrap();
         assert_eq!(ast_size(&e), 4); // binop + var + len + var
+    }
+
+    #[test]
+    fn test_wrapping_tier_survives_overflow_values() {
+        // i64::MAX-scale sums would kill the checked tier; declared wrapping
+        // makes them defined semantics, so the honest fold survives.
+        let w = wish::parse(
+            "fn f(%items: List<Int>) -> Int\n  wrapping\n  => [1] -> 1\n  => [] -> 0\n",
+        )
+        .unwrap();
+        assert!(w.wrapping);
+        let texts = vec![("honest".to_string(), HONEST.to_string())];
+        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        assert_eq!(r.survivors.len(), 1, "{:?}", r.rejections);
+    }
+
+    #[test]
+    fn test_checked_tier_still_kills_overflow_reachable() {
+        // Passes both visible examples; probe rows with 3+ elements blow
+        // past i64 under repeated ×1e9 — checked tier must kill at S5.
+        let w = wish::parse(
+            "fn f(%items: List<Int>) -> Int\n  => [1] -> 1000000000\n  => [] -> 1\n",
+        )
+        .unwrap();
+        let big = "fn @f(%items: List<Int>) -> Int { fold %x in %items, %acc from 1 { %acc * 1000000000 } }";
+        let texts = vec![("big".to_string(), big.to_string())];
+        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        assert_eq!(r.survivors.len(), 0);
+        assert_eq!(r.rejections[0].1.stage, Stage::Probe);
+        assert_eq!(r.rejections[0].1.kind, KillKind::RuntimeError);
+    }
+
+    #[test]
+    fn test_canonical_includes_wrapping() {
+        let plain = wish::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
+        let wrap = wish::parse("fn f(%a: Int) -> Int\n  wrapping\n  => 1 -> 2\n").unwrap();
+        assert_ne!(plain.canonical(), wrap.canonical());
     }
 }

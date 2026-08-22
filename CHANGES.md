@@ -44,3 +44,15 @@
   Gap root-caused: no overflow flags on addi blocks LLVM reassociation/
   unrolling. Decision pending: nsw flags vs declared wrapping ops.
 - Tool discovery: ONTIC_MLIR_BIN env > /usr/lib/llvm-18/bin > PATH.
+
+### 2026-08-22 22:30 — Overflow semantics: three tiers landed (W0–W3, W1b)
+- Files: `docs/plans/2026-08-22-overflow-semantics.md`, AGENTS.md rule 11,
+  wish.rs (`wrapping` line + canonical), interp.rs (Ctx threading,
+  wrapping_add/sub/mul/neg), sieve.rs (tier-aware eval/probes/bench),
+  pipeline.rs (opt -O3 stage, eval_native differential driver), new
+  examples/ledger-wrapping.ont, benchmarks/results/2026-08-22-overflow-parity.md.
+- Wrapping tier: declared in wish, bit-exact interp↔native (differential test
+  gates it), plain ops → LLVM reassociation legal.
+- Checked default unchanged: overflow kills candidates at S3/S5.
+- opt -O3 middle-end added to native pipeline (llc alone is codegen-only).
+- 74 tests green.

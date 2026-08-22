@@ -57,6 +57,10 @@ Patches are unacceptable. There is no "go fast and break things."
    including negative tests (a known-overfit candidate MUST be rejected).
 10. **SELF-CONTAINED**: no network calls except to the configured
     llama-server endpoint. No telemetry. Vault is plain files.
+11. **SPEED REQUIRES DECLARATION**: the fast path never exists without a
+    visible contract word in the wish (`wrapping`, future `prop` proofs).
+    Compiler mercy is forbidden: semantics must be identical between the
+    oracle interpreter and emitted native code, tier for tier.
 
 ## Architecture Pillars
 

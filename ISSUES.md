@@ -38,3 +38,20 @@
   borrowed source lifetimes (fixed with 'static keyword literals); short-circuit
   test itself was wrong (a==0 forces RHS eval); probe-stage kill test needed a
   candidate that passes examples but violates invariants elsewhere.
+
+### 2026-08-22 — Parity gap misattribution corrected
+- First table blamed missing overflow flags entirely. Half the gap was the C
+  reference's CONSTANT trip count enabling full unroll; Ontic's bound is
+  runtime (memref dim). Correction recorded in
+  benchmarks/results/2026-08-22-overflow-parity.md; specialization queued
+  for eclipse-track P2.
+
+### 2026-08-22 — llc-only pipeline skipped LLVM middle end
+- mlir-translate→llc runs codegen passes only; clang references get unroll/
+  vectorize/reassociate. Fixed by inserting `opt -O3` between translate and
+  llc in pipeline::mlir_to_llvmir.
+
+### 2026-08-22 — bench harness timed its own buffer initialization
+- First native numbers (~5.5k ns) included per-iteration buffer init inside
+  the timed loop. Moved outside; real numbers ~10x lower. Lesson: audit the
+  harness before believing any timing.
