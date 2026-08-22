@@ -10,6 +10,7 @@ pub mod http;
 pub mod interp;
 pub mod lower;
 pub mod overfit;
+pub mod pipeline;
 pub mod probes;
 pub mod rng;
 pub mod sha256;

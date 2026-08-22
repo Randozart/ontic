@@ -3,10 +3,11 @@
 
 use ontic::forge::{self, ForgeConfig};
 use ontic::lower;
+use ontic::pipeline;
+use ontic::sketch;
 use ontic::sieve::{self, SiegeConfig};
 use ontic::vault::Vault;
 use ontic::wish;
-use std::process::Command;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -301,12 +302,72 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             eprintln!("no candidate survived the sieve");
             1
         }
-        Some(survivor) => {
+        Some(_) => {
+            native_rerank(&w, &mut report.survivors);
+            print_native_ranking(&report);
+            let winner = report.survivors.first().unwrap();
             if !store {
                 return 0;
             }
-            emit_and_store(&w, survivor)
+            emit_and_store(&w, winner)
         }
+    }
+}
+
+/// When the LLVM toolchain is present, re-time every survivor on real
+/// compiled objects and re-rank by that. Interpreter timing remains the
+/// fallback ordering; the native table is the honest one.
+fn native_rerank(_w: &wish::Wish, survivors: &mut Vec<sieve::Survivor>) {
+    if pipeline::find_tool("mlir-opt").is_none() || pipeline::find_tool("llc").is_none() {
+        println!("native bench: toolchain missing, interpreter ranking stands");
+        return;
+    }
+    let mut measured: Vec<(sieve::Survivor, u64)> = Vec::new();
+    for s in survivors.iter() {
+        match lower::emit_fn(
+            &s.candidate.name,
+            &s.candidate.params,
+            &s.candidate.ret,
+            &s.candidate.body,
+        ) {
+            Ok(mlir) => {
+                let is_list: Vec<bool> = s
+                    .candidate
+                    .params
+                    .iter()
+                    .map(|(_, t)| matches!(t, sketch::Ty::ListInt))
+                    .collect();
+                // S7 input sizing: fixed 1024-element probe buffer, 2000 iters.
+                match pipeline::bench_native(&mlir, &s.candidate.name, &is_list, 2_000) {
+                    Ok(ns) => measured.push((s.clone(), ns)),
+                    Err(e) => eprintln!(
+                        "native bench failed for {}: {} (interpreter ranking stands for this candidate)",
+                        s.candidate.name, e
+                    ),
+                }
+            }
+            Err(e) => eprintln!("lowering failed during native rerank: {}", e),
+        }
+    }
+    if !measured.is_empty() {
+        measured.sort_by_key(|(s, ns)| (*ns, sieve::ast_size(&s.candidate.body)));
+        *survivors = measured.into_iter().map(|(mut s, ns)| {
+            s.ns_per_call = ns;
+            s
+        }).collect();
+    }
+}
+
+/// Print the post-native-ranking table with a mode label.
+fn print_native_ranking(report: &sieve::SieveReport) {
+    println!("native ranking:");
+    for (rank, s) in report.survivors.iter().enumerate() {
+        println!(
+            "  #{:<2} {:>8} ns/call  {:>4} AST nodes",
+            rank,
+            s.ns_per_call,
+            sieve::ast_size(&s.candidate.body)
+        );
     }
 }
 
@@ -333,7 +394,22 @@ fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor) -> i32 {
             return 1;
         }
     };
-    validate_mlir_best_effort(&mlir);
+    // Mandatory when the toolchain is present: unvalidated IR never vaults.
+    let staged = std::env::temp_dir().join("ontic-emit-check.mlir");
+    match std::fs::write(&staged, &mlir)
+        .map_err(|e| e.to_string())
+        .and_then(|_| pipeline::validate_mlir(&staged))
+    {
+        Ok(()) => println!("MLIR    : validated by mlir-opt"),
+        Err(e) => {
+            if pipeline::find_tool("mlir-opt").is_none() {
+                println!("MLIR    : mlir-opt not installed; validation skipped");
+            } else {
+                eprintln!("FATAL   : mlir-opt rejected emission:\n{}", e);
+                return 1;
+            }
+        }
+    }
     let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
     let v = match Vault::open(&vault_dir) {
         Ok(v) => v,
@@ -351,30 +427,6 @@ fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor) -> i32 {
             eprintln!("{}", e);
             1
         }
-    }
-}
-
-/// Run mlir-opt over emitted IR when available; absence is reported, never fatal.
-fn validate_mlir_best_effort(mlir: &str) {
-    let tmp = std::env::temp_dir().join("ontic-emit-check.mlir");
-    if std::fs::write(&tmp, mlir).is_err() {
-        eprintln!("note: could not stage IR for mlir-opt; skipped");
-        return;
-    }
-    match Command::new("mlir-opt")
-        .arg(tmp.to_string_lossy().as_ref())
-        .arg("-o")
-        .arg("/dev/null")
-        .output()
-    {
-        Ok(out) if out.status.success() => println!("MLIR    : validated by mlir-opt"),
-        Ok(out) => {
-            eprintln!(
-                "WARNING : mlir-opt rejected emission:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            )
-        }
-        Err(_) => println!("MLIR    : mlir-opt not installed; validation skipped"),
     }
 }
 

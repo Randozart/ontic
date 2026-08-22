@@ -30,3 +30,17 @@
 - Live end-to-end against VITRIOL llama-server (Mellum2-12B on :8287):
   candidates generated under GBNF and semantically sieved (S2/S3 kills on real
   model output observed). Full solve-to-vault gate pending server restart.
+
+### 2026-08-22 21:40 — Step A: toolchain integration live
+- Files: `src/pipeline.rs` (new), `src/lower.rs`, `src/main.rs`, `src/lib.rs`, both plan docs.
+- A0/A1: quoted SSA names rejected by mlir-opt → bare `%name`; Ubuntu 18.1.3
+  rejects custom `memref.dim` assembly entirely → generic op syntax emission.
+  Validation now MANDATORY before vaulting (toolchain present ⇒ no unvalidated IR).
+- A2/A4: S7 upgraded — survivors timed as NATIVE OBJECTS (mlir-opt conversion
+  chain → mlir-translate → llc → clang-linked C harness, median of 9 runs,
+  self-timed CLOCK_MONOTONIC). MemRef ABI verified flat-5 expansion
+  (allocated, aligned, offset, size, stride).
+- A4 first parity table: Ontic 576 ns/call vs C -O2 377 (1024-elem sum).
+  Gap root-caused: no overflow flags on addi blocks LLVM reassociation/
+  unrolling. Decision pending: nsw flags vs declared wrapping ops.
+- Tool discovery: ONTIC_MLIR_BIN env > /usr/lib/llvm-18/bin > PATH.

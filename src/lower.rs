@@ -155,7 +155,7 @@ pub fn emit_fn(
 
     let sig: Vec<String> = params
         .iter()
-        .map(|(n, t)| format!("%\"{}\": {}", n, mlir_param_type(t)))
+        .map(|(n, t)| format!("%{}: {}", n, mlir_param_type(t)))
         .collect();
 
     em.line("module {");
@@ -172,7 +172,7 @@ pub fn emit_fn(
         .iter()
         .map(|(n, _t)| Binding {
             name: n.clone(),
-            ssa: format!("%\"{}\"", n),
+            ssa: format!("%{}", n),
         })
         .collect();
 
@@ -204,8 +204,12 @@ fn emit_expr(e: &Expr, env: &mut Vec<Binding>, em: &mut Emitter) -> Result<Strin
             let idx0 = em.const_index(0);
             let dim = em.fresh("dim");
             let mty = "memref<?xi64>";
+            // Generic op syntax: Ubuntu LLVM 18.1.3's mlir-opt rejects the
+            // custom memref.dim assembly ("expected operation name in
+            // quotes") regardless of shape; the generic form parses cleanly
+            // everywhere. See ISSUES.md 2026-08-22.
             em.line(&format!(
-                "{} = memref.dim {}, {} : {}, index",
+                "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
                 dim, m, idx0, mty
             ));
             let cast = em.fresh("len");
@@ -314,7 +318,11 @@ fn emit_fold(
     let step = em.const_index(1);
     let dim = em.fresh("dim");
     let mty = "memref<?xi64>";
-    em.line(&format!("{} = memref.dim {}, {} : {}, index", dim, m, idx0, mty));
+    // Generic op syntax — see Len arm note re Ubuntu mlir-opt memref.dim.
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim, m, idx0, mty
+    ));
 
     let iv = em.fresh("i");
     let acc_ssa = em.fresh("acc");
@@ -421,7 +429,7 @@ mod tests {
         assert!(ir.contains("iter_args"));
         assert!(ir.contains("arith.addi"));
         assert!(ir.contains("memref.load"));
-        assert!(ir.contains("func.func @total(%\"items\": memref<?xi64>) -> i64"));
+        assert!(ir.contains("func.func @total(%items: memref<?xi64>) -> i64"));
     }
 
     #[test]
@@ -458,6 +466,6 @@ mod tests {
     #[test]
     fn test_bool_params_are_i64_abi() {
         let ir = lower("fn @b(%p: Bool) -> Int { if %p { 1 } else { 2 } }");
-        assert!(ir.contains("func.func @b(%\"p\": i64) -> i64"));
+        assert!(ir.contains("func.func @b(%p: i64) -> i64"));
     }
 }
