@@ -1,0 +1,403 @@
+//! Ontic CLI: `check` a wish, `solve` it (hand candidates or forge), `bench`
+//! survivors, and inspect the `vault`. Hand-rolled arg parsing — no clap.
+
+use ontic::forge::{self, ForgeConfig};
+use ontic::lower;
+use ontic::sieve::{self, SiegeConfig};
+use ontic::vault::Vault;
+use ontic::wish;
+use std::process::Command;
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    std::process::exit(dispatch(&args));
+}
+
+/// Route to subcommand; returns process exit code.
+fn dispatch(args: &[String]) -> i32 {
+    match args.get(1).map(|s| s.as_str()) {
+        Some("check") => match args.get(2) {
+            Some(path) => cmd_check(path),
+            None => usage("check needs a .ont file"),
+        },
+        Some("solve") => cmd_solve(args),
+        Some("bench") => cmd_bench(args),
+        Some("vault") => cmd_vault(args),
+        Some("--help") | Some("-h") | Some("help") | None => {
+            print_help();
+            0
+        }
+        Some(other) => usage(&format!("unknown command `{}`", other)),
+    }
+}
+
+fn usage(msg: &str) -> i32 {
+    eprintln!("error: {}", msg);
+    print_help();
+    1
+}
+
+fn print_help() {
+    println!(
+        "ontic — stochastic specification compiler
+
+USAGE:
+  ontic check <file.ont>                          validate a wish, report probe strength
+  ontic solve <file.ont> [opts]                   sieve candidates; winner -> vault as MLIR
+  ontic bench <file.ont> [opts]                   rank survivors with timings only
+  ontic vault [--dir D]                           list verified functions
+
+SOLVE OPTIONS:
+  --hand <file>     candidate sketch file (repeatable; skips forge)
+  --samples <N>     forge sample count (default 32)
+  --forge <h:p>     llama-server endpoint (default env ONTIC_FORGE or {})",
+        forge::DEFAULT_FORGE
+    );
+}
+
+/// Load and fully validate a wish file.
+fn load_wish(path: &str) -> Result<wish::Wish, String> {
+    let src = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path, e))?;
+    let w = wish::parse(&src)?;
+    sieve::validate_wish(&w)?;
+    Ok(w)
+}
+
+fn cmd_check(path: &str) -> i32 {
+    match load_wish(path) {
+        Ok(w) => {
+            println!("wish      : {}", w.path);
+            println!("params    : {}", w.params.len());
+            println!("invariants: {}", w.invariants.len());
+            println!("transparent examples: {}", w.transparent.len());
+            println!("opaque examples     : {}{}", w.opaque.len(), if w.auto_split { " (auto-split)" } else { "" });
+            let cfg = SiegeConfig::default();
+            let rows = probes_count(&w, &cfg);
+            println!("probe plan: {} rows (seed 0x{:X})", rows, cfg.seed);
+            if w.invariants.is_empty() {
+                println!("note      : no invariants — probes check runtime errors only");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("invalid wish: {}", e);
+            1
+        }
+    }
+}
+
+use ontic::probes;
+
+fn probes_count(w: &wish::Wish, cfg: &SiegeConfig) -> usize {
+    probes::generate(w, cfg.probe_count, cfg.seed, cfg.edge_budget).len()
+}
+
+/// Resolve forge config from flags/env.
+fn forge_config(forge_flag: Option<&str>, samples: usize, seed: u64) -> ForgeConfig {
+    let mut cfg = ForgeConfig::default();
+    let endpoint = forge_flag
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("ONTIC_FORGE").ok());
+    if let Some(ep) = endpoint {
+        let (h, p) = forge::parse_endpoint(&ep);
+        cfg.host = h;
+        cfg.port = p;
+    }
+    cfg.samples = samples;
+    cfg.seed = seed;
+    cfg
+}
+
+/// Extract repeated --hand paths plus scalar options from raw args.
+struct SolveOpts {
+    wish_path: String,
+    hand: Vec<String>,
+    samples: usize,
+    seed: u64,
+    forge: Option<String>,
+}
+
+fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
+    let wish_path = match args.get(2) {
+        Some(p) => p.clone(),
+        None => return Err("solve needs a .ont file".to_string()),
+    };
+    let mut opts = SolveOpts {
+        wish_path,
+        hand: Vec::new(),
+        samples: 32,
+        seed: 0x5EED,
+        forge: None,
+    };
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--hand" => {
+                i += 1;
+                match args.get(i) {
+                    Some(f) => opts.hand.push(f.clone()),
+                    None => return Err("--hand needs a file path".to_string()),
+                }
+            }
+            "--samples" => {
+                i += 1;
+                opts.samples = args
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| "--samples needs a number".to_string())?;
+            }
+            "--seed" => {
+                i += 1;
+                opts.seed = args
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| "--seed needs a number".to_string())?;
+            }
+            "--forge" => {
+                i += 1;
+                opts.forge = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--forge needs host:port".to_string())?
+                        .clone(),
+                );
+            }
+            other => return Err(format!("unknown option `{}`", other)),
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
+
+/// Read hand-written candidate files into labeled texts.
+fn load_hand(paths: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for (i, p) in paths.iter().enumerate() {
+        let text =
+            std::fs::read_to_string(p).map_err(|e| format!("read {}: {}", p, e))?;
+        out.push((format!("hand-{}:{}", i, p), text));
+    }
+    Ok(out)
+}
+
+fn print_report(r: &sieve::SieveReport) {
+    for (label, rej) in &r.rejections {
+        println!(
+            "KILLED {:<28} {} / {} : {}",
+            label,
+            rej.stage.label(),
+            rej.kind.label(),
+            rej.reason
+        );
+    }
+    for (rank, s) in r.survivors.iter().enumerate() {
+        println!(
+            "PASS   #{:<2} {:>8} ns/call  {:>4} AST nodes",
+            rank,
+            s.ns_per_call,
+            sieve::ast_size(&s.candidate.body)
+        );
+    }
+}
+
+fn cmd_solve(args: &[String]) -> i32 {
+    let opts = match parse_solve_args(args) {
+        Ok(o) => o,
+        Err(e) => return usage(&e),
+    };
+    run_solve(&opts, true)
+}
+
+fn cmd_bench(args: &[String]) -> i32 {
+    let opts = match parse_solve_args(args) {
+        Ok(o) => o,
+        Err(e) => return usage(&e),
+    };
+    run_solve(&opts, false)
+}
+
+/// Shared solve/bench pipeline. When `store` is true the winner is lowered
+/// to MLIR and written to the vault.
+fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
+    let w = match load_wish(&opts.wish_path) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("invalid wish: {}", e);
+            return 1;
+        }
+    };
+    let cfg = SiegeConfig::default();
+
+    let candidates = if !opts.hand.is_empty() {
+        match load_hand(&opts.hand) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{}", e);
+                return 1;
+            }
+        }
+    } else {
+        let fcfg = forge_config(opts.forge.as_deref(), opts.samples, opts.seed);
+        println!(
+            "forging {} candidates from {}:{} ...",
+            fcfg.samples, fcfg.host, fcfg.port
+        );
+        match forge::sample(&w, &fcfg, &[]) {
+            Ok(texts) => texts.into_iter().enumerate().map(|(i, t)| (format!("forge-{}", i), t)).collect(),
+            Err(e) => {
+                eprintln!("forge failed: {}", e);
+                return 1;
+            }
+        }
+    };
+
+    let mut report = match sieve::run(&w, &candidates, &cfg) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("wish rejected by sieve preconditions: {}", e);
+            return 1;
+        }
+    };
+    print_report(&report);
+
+    // One feedback round when forging produced nothing usable.
+    if report.survivors.is_empty() && opts.hand.is_empty() {
+        let feedback: Vec<String> = report
+            .rejections
+            .iter()
+            .take(16)
+            .map(|(l, r)| format!("{}/{}/{}: {}", l, r.stage.label(), r.kind.label(), r.reason))
+            .collect();
+        let fcfg = forge_config(opts.forge.as_deref(), opts.samples, opts.seed.wrapping_add(1));
+        println!("feedback round: {} resamples ...", fcfg.samples);
+        match forge::sample(&w, &fcfg, &feedback) {
+            Ok(texts) => {
+                let cands: Vec<(String, String)> = texts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| (format!("retry-{}", i), t))
+                    .collect();
+                match sieve::run(&w, &cands, &cfg) {
+                    Ok(r2) => {
+                        print_report(&r2);
+                        merge_reports(&mut report, r2);
+                    }
+                    Err(e) => eprintln!("retry sieving failed: {}", e),
+                }
+            }
+            Err(e) => eprintln!("forge retry failed: {}", e),
+        }
+    }
+
+    match report.survivors.first() {
+        None => {
+            eprintln!("no candidate survived the sieve");
+            1
+        }
+        Some(survivor) => {
+            if !store {
+                return 0;
+            }
+            emit_and_store(&w, survivor)
+        }
+    }
+}
+
+/// Fold retry results into the primary report deterministically.
+fn merge_reports(base: &mut sieve::SieveReport, extra: sieve::SieveReport) {
+    base.rejections.extend(extra.rejections);
+    base.survivors.extend(extra.survivors);
+    // Re-rank after merge so the printed winner is global.
+    base.survivors
+        .sort_by_key(|s| (s.ns_per_call, sieve::ast_size(&s.candidate.body)));
+}
+
+/// Lower the winner, best-effort validate with mlir-opt, store in vault.
+fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor) -> i32 {
+    let mlir = match lower::emit_fn(
+        &survivor.candidate.name,
+        &survivor.candidate.params,
+        &survivor.candidate.ret,
+        &survivor.candidate.body,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("lowering failed (candidate verified but not emittable): {}", e);
+            return 1;
+        }
+    };
+    validate_mlir_best_effort(&mlir);
+    let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
+    let v = match Vault::open(&vault_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    match v.put(w, &survivor.source_text, &mlir) {
+        Ok(key) => {
+            println!("VAULTED {} ({})", w.path, key);
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            1
+        }
+    }
+}
+
+/// Run mlir-opt over emitted IR when available; absence is reported, never fatal.
+fn validate_mlir_best_effort(mlir: &str) {
+    let tmp = std::env::temp_dir().join("ontic-emit-check.mlir");
+    if std::fs::write(&tmp, mlir).is_err() {
+        eprintln!("note: could not stage IR for mlir-opt; skipped");
+        return;
+    }
+    match Command::new("mlir-opt")
+        .arg(tmp.to_string_lossy().as_ref())
+        .arg("-o")
+        .arg("/dev/null")
+        .output()
+    {
+        Ok(out) if out.status.success() => println!("MLIR    : validated by mlir-opt"),
+        Ok(out) => {
+            eprintln!(
+                "WARNING : mlir-opt rejected emission:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        }
+        Err(_) => println!("MLIR    : mlir-opt not installed; validation skipped"),
+    }
+}
+
+fn cmd_vault(args: &[String]) -> i32 {
+    let dir = match args.iter().position(|a| a == "--dir") {
+        Some(i) => match args.get(i + 1) {
+            Some(d) => d.clone(),
+            None => return usage("--dir needs a path"),
+        },
+        None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
+    };
+    let v = match Vault::open(&dir) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    match v.list() {
+        Ok(entries) => {
+            if entries.is_empty() {
+                println!("vault empty at {}", dir);
+            }
+            for e in entries {
+                println!("{}  {}  {}", &e.key[..12.min(e.key.len())], e.name, e.signature);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            1
+        }
+    }
+}

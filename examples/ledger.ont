@@ -1,0 +1,10 @@
+// Ledger.total — the canonical Ontic example.
+// Sum a list of integers. The forge sees only the transparent evidence;
+// the `??` line is held out to prove generality.
+fn Ledger.total(%items: List<Int>) -> Int
+  | %res >= -1000000000
+  => [1,2,3] -> 6
+  => [] -> 0
+  => [5] -> 5
+  ?? [4,5] -> 9
+  ?? [10,20,30,40] -> 100
