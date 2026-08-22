@@ -90,3 +90,14 @@
 - TextMate grammar for .ont/.sketch: declarations, tiers, program blocks,
   evidence arrows (=> transparent / ?? opaque), invariant pipes, %vars,
   @symbols, builtins, types. Mirrors briev-lang extension structure.
+
+### 2026-08-22 (session 2) — M1 gate complete: solve-from-spec live
+- Forge solved Ledger.total from its spec alone via Qwen3.8-27B (:8279;
+  Mellum2 :8287 still down — pipeline is model-agnostic). 8 samples, 5
+  deterministic S1/S2 kills, survivor mlir-opt validated and vaulted under
+  the same canonical key as the earlier hand-solved version.
+- forge.rs: prompt now carries the language's static rules (fold-only
+  iteration, scalar-only equality, signature-typed bodies) — spec-of-language
+  guidance, not task hints; kill rate dropped immediately.
+- recipe.rs: pre-fn prefix lines (e.g. wrapping) attach to the following
+  wish chunk instead of erroring.

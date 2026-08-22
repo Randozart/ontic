@@ -68,6 +68,7 @@ fn split_chunks(src: &str) -> Result<(Vec<String>, Vec<String>), String> {
     let mut wishes: Vec<String> = Vec::new();
     let mut prog_lines: Vec<String> = Vec::new();
     let mut in_program = false;
+    let mut pending: Option<String> = None;
     for (lineno, raw) in src.lines().enumerate() {
         let line = raw.trim_end();
         let trimmed = line.trim();
@@ -96,12 +97,18 @@ fn split_chunks(src: &str) -> Result<(Vec<String>, Vec<String>), String> {
             continue;
         }
         if trimmed.starts_with("fn ") {
-            wishes.push(String::new());
+            // A pre-`fn` prefix (e.g. `wrapping`) belongs to this wish.
+            wishes.push(pending.take().unwrap_or_default());
+            let last = wishes.last_mut().expect("chunk exists");
+            if !last.is_empty() {
+                last.push('\n');
+            }
         } else if wishes.is_empty() {
-            return Err(ctx(&format!(
-                "line before any `fn` signature: `{}`",
-                trimmed
-            )));
+            // Buffer pre-signature lines; validated by wish::parse later.
+            let e = pending.get_or_insert_with(String::new);
+            e.push_str(line);
+            e.push('\n');
+            continue;
         }
         let last = wishes.last_mut().expect("chunk exists");
         last.push_str(line);
