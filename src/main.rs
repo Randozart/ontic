@@ -4,6 +4,8 @@
 use ontic::forge::{self, ForgeConfig};
 use ontic::lower;
 use ontic::pipeline;
+use ontic::program;
+use ontic::recipe;
 use ontic::sketch;
 use ontic::sieve::{self, SiegeConfig};
 use ontic::vault::Vault;
@@ -20,6 +22,10 @@ fn dispatch(args: &[String]) -> i32 {
         Some("check") => match args.get(2) {
             Some(path) => cmd_check(path),
             None => usage("check needs a .ont file"),
+        },
+        Some("run") => match args.get(2) {
+            Some(path) => cmd_run(path),
+            None => usage("run needs a .ont file"),
         },
         Some("solve") => cmd_solve(args),
         Some("bench") => cmd_bench(args),
@@ -46,6 +52,7 @@ USAGE:
   ontic check <file.ont>                          validate a wish, report probe strength
   ontic solve <file.ont> [opts]                   sieve candidates; winner -> vault as MLIR
   ontic bench <file.ont> [opts]                   rank survivors with timings only
+  ontic run <file.ont>                            execute a recipe over vaulted fns
   ontic vault [--dir D]                           list verified functions
 
 SOLVE OPTIONS:
@@ -57,15 +64,36 @@ SOLVE OPTIONS:
 }
 
 /// Load and fully validate a wish file.
-fn load_wish(path: &str) -> Result<wish::Wish, String> {
+/// Load an .ont file (single wish OR multi-wish + program) and validate
+/// every wish in it.
+fn load_file(path: &str) -> Result<recipe::OntFile, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path, e))?;
-    let w = wish::parse(&src)?;
-    sieve::validate_wish(&w)?;
-    Ok(w)
+    let f = recipe::parse_ont(&src)?;
+    for w in &f.wishes {
+        sieve::validate_wish(w)?;
+    }
+    Ok(f)
+}
+
+/// Pick a wish by path (default: first).
+fn pick_wish<'a>(f: &'a recipe::OntFile, want: Option<&str>) -> Result<wish::Wish, String> {
+    match want {
+        Some(p) => f
+            .wishes
+            .iter()
+            .find(|w| w.path == p)
+            .map(|w| w.clone())
+            .ok_or_else(|| format!("no wish `{}` in file", p)),
+        None => f
+            .wishes
+            .first()
+            .map(|w| w.clone())
+            .ok_or_else(|| "file has no wishes".to_string()),
+    }
 }
 
 fn cmd_check(path: &str) -> i32 {
-    match load_wish(path) {
+    match load_file(path).and_then(|f| pick_wish(&f, None)) {
         Ok(w) => {
             println!("wish      : {}", w.path);
             println!("params    : {}", w.params.len());
@@ -113,6 +141,8 @@ fn forge_config(forge_flag: Option<&str>, samples: usize, seed: u64) -> ForgeCon
 /// Extract repeated --hand paths plus scalar options from raw args.
 struct SolveOpts {
     wish_path: String,
+    /// Optional `--wish Path` selector for multi-wish files.
+    wish_sel: Option<String>,
     hand: Vec<String>,
     samples: usize,
     seed: u64,
@@ -126,6 +156,7 @@ fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
     };
     let mut opts = SolveOpts {
         wish_path,
+        wish_sel: None,
         hand: Vec::new(),
         samples: 32,
         seed: 0x5EED,
@@ -162,6 +193,14 @@ fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
                     .get(i)
                     .and_then(|v| v.parse().ok())
                     .ok_or_else(|| "--seed needs a number".to_string())?;
+            }
+            "--wish" => {
+                i += 1;
+                opts.wish_sel = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--wish needs a wish path".to_string())?
+                        .clone(),
+                );
             }
             "--forge" => {
                 i += 1;
@@ -228,7 +267,8 @@ fn cmd_bench(args: &[String]) -> i32 {
 /// Shared solve/bench pipeline. When `store` is true the winner is lowered
 /// to MLIR and written to the vault.
 fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
-    let w = match load_wish(&opts.wish_path) {
+    let w = match load_file(&opts.wish_path).and_then(|f| pick_wish(&f, opts.wish_sel.as_deref()))
+    {
         Ok(w) => w,
         Err(e) => {
             eprintln!("invalid wish: {}", e);
@@ -455,6 +495,40 @@ fn cmd_vault(args: &[String]) -> i32 {
             }
             for e in entries {
                 println!("{}  {}  {}", &e.key[..12.min(e.key.len())], e.name, e.signature);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            1
+        }
+    }
+}
+
+/// `ontic run <file.ont>` — execute a recipe over vault-verified functions.
+fn cmd_run(path: &str) -> i32 {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("read {}: {}", path, e);
+            return 1;
+        }
+    };
+    let file = match recipe::parse_ont(&src) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("invalid ont file: {}", e);
+            return 1;
+        }
+    };
+    if file.program.is_none() {
+        eprintln!("no program block in {}", path);
+        return 1;
+    }
+    match program::run(&file) {
+        Ok(lines) => {
+            for l in lines {
+                println!("{}", l);
             }
             0
         }

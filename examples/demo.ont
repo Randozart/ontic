@@ -1,0 +1,22 @@
+// Demo recipe: two verified functions composed linearly.
+// Solve both wishes first, then `ontic run examples/demo.ont`.
+fn Ledger.total(%items: List<Int>) -> Int
+  | %res >= -1000000000
+  => [1,2,3] -> 6
+  => [] -> 0
+  ?? [4,5] -> 9
+
+fn Twice(%n: Int) -> Int
+  => 21 -> 42
+  => 0 -> 0
+
+program Demo
+  wish Ledger.total
+  wish Twice
+start
+  %xs = [1,2,3]
+  %r  = Ledger.total(%xs)
+  print(%r)
+  %n  = Twice(21)
+  print(%n)
+end

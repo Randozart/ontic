@@ -127,6 +127,7 @@ cargo test --lib            # full behavioral suite (pre-commit gate)
 cargo run -- check examples/ledger.ont    # validate a wish, report probe strength
 cargo run -- solve examples/ledger.ont    # sieve pipeline (hand candidates / forge)
 cargo run -- bench examples/ledger.ont    # rank survivors with timings
+cargo run -- run examples/demo.ont        # execute a recipe over the vault
 cargo run -- vault ls                     # list verified functions
 ```
 

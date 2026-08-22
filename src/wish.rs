@@ -75,6 +75,12 @@ pub struct Wish {
     pub wrapping: bool,
 }
 
+/// Public wrapper so recipe.rs can reuse the example value grammar for
+/// program literals without duplicating it.
+pub fn parse_example_line_pub(line: &str) -> Result<Example, String> {
+    parse_example_line(line, "value")
+}
+
 /// Parse a single value token: int, bool, or `[i,i,...]` list literal.
 fn parse_value(s: &str) -> Result<Value, String> {
     let t = s.trim();

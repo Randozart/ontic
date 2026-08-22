@@ -12,6 +12,8 @@ pub mod lower;
 pub mod overfit;
 pub mod pipeline;
 pub mod probes;
+pub mod program;
+pub mod recipe;
 pub mod rng;
 pub mod sha256;
 pub mod sieve;

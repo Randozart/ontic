@@ -40,11 +40,47 @@ ontic check examples/ledger.ont          # validate wish, report probe strength
 ontic solve examples/ledger.ont --forge 127.0.0.1:8287   # forge + sieve + vault MLIR
 ontic solve examples/ledger.ont --hand cand.sketch       # sieve hand candidates only
 ontic bench examples/ledger.ont --hand ...               # timings only
+ontic run examples/demo.ont              # execute a recipe (program block)
 ontic vault                              # list verified functions
 ```
 
+## Recipes
+
+One `.ont` file may hold several wishes plus one linear `program` block:
+
+```
+fn Ledger.total(%items: List<Int>) -> Int
+  | %res >= -1000000000
+  => [1,2,3] -> 6
+
+fn Twice(%n: Int) -> Int
+  => 21 -> 42
+
+program Demo
+  wish Ledger.total
+  wish Twice
+start
+  %xs = [1,2,3]
+  %r  = Ledger.total(%xs)
+  print(%r)
+  %n  = Twice(21)
+  print(%n)
+end
+```
+
+Strictly linear glue over verified parts — all computation stays in sieved
+wishes. Dependencies must be vaulted before `run`; unsolved wishes are named
+with their fix command.
+
+## Overflow tiers
+
+- `wrapping` line in a wish → mod-2^64 semantics, bit-exact interpreter↔native,
+  LLVM free to reassociate (the fast lane; declared, never implicit).
+- Default tier is checked: overflow kills candidates in the sieve and traps
+  natively — honest-slow until M3 Z3 proofs replace checks.
+
 Environment: `ONTIC_FORGE` (host:port), `ONTIC_FORGE_WORKERS` (default 2),
-`ONTIC_VAULT` (default `.ontic/vault`).
+`ONTIC_VAULT` (default `.ontic/vault`), `ONTIC_MLIR_BIN` (toolchain dir).
 
 Forge requirements: any llama.cpp `/completion` endpoint; the GBNF grammar and
 the `fn @` prompt prefill are sent per request. Designed against VITRIOL's

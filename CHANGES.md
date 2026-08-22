@@ -65,3 +65,14 @@
   (`test_checked_tier_native_trap_matches_interpreter`); clean inputs agree.
 - Wrapping tier untouched (plain ops). All three tiers now live:
   wrapping = declared+fast, checked = default+honest-slow, proven = M3.
+
+### 2026-08-22 23:50 — Recipes: linear programs over verified parts (R complete)
+- Files: `src/recipe.rs` (multi-wish .ont parser + program typecheck),
+  `src/program.rs` (C-driver assembly + native execution), `src/main.rs`
+  (`ontic run`, multi-wish files, `--wish` selector), examples/demo.ont.
+- Strictly linear glue per plan: BindLit / BindCall / print; literals allowed
+  as call args; deps must be vaulted (unsolved deps name their fix command).
+- E2E gate: test_recipe_end_to_end_native — hand-solve both wishes into an
+  isolated vault, assemble driver, execute → ["6", "42"].
+- Live demo: ontic run examples/demo.ont prints 6 / 42 from native objects.
+- 82 tests green.
