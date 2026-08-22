@@ -133,11 +133,19 @@ fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--hand" => {
+                // Greedy: consume consecutive non-flag paths as candidates.
                 i += 1;
-                match args.get(i) {
-                    Some(f) => opts.hand.push(f.clone()),
-                    None => return Err("--hand needs a file path".to_string()),
+                while let Some(f) = args.get(i) {
+                    if f.starts_with("--") {
+                        break;
+                    }
+                    opts.hand.push(f.clone());
+                    i += 1;
                 }
+                if opts.hand.is_empty() {
+                    return Err("--hand needs at least one file path".to_string());
+                }
+                continue;
             }
             "--samples" => {
                 i += 1;

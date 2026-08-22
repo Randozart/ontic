@@ -9,12 +9,29 @@ use crate::http::HttpClient;
 use crate::sketch;
 use crate::wish::{Value, Wish};
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// Default endpoint matches VITRIOL's memory-mode shim port.
 pub const DEFAULT_FORGE: &str = "127.0.0.1:8279";
 const MAX_TOKENS: usize = 512;
-/// Parallel TCP workers — each keeps its own keep-alive connection.
-const WORKERS: usize = 8;
+/// Parallel TCP workers — deliberately low: the llama-server endpoint is
+/// often SHARED and frequently launched with --parallel 1; slot exhaustion
+/// manifests as connection resets. Override via ONTIC_FORGE_WORKERS.
+fn worker_count() -> usize {
+    std::env::var("ONTIC_FORGE_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&w| w >= 1)
+        .unwrap_or(2)
+}
+/// Per-sample transport retries (fresh connection each try) before a sample
+/// is abandoned. The batch still succeeds if any other sample survives.
+const SAMPLE_TRIES: usize = 3;
+/// Retryable server statuses — typically transient overload on shared hosts.
+fn retryable_status(status: u16) -> bool {
+    matches!(status, 500 | 502 | 503 | 504)
+}
 
 #[derive(Debug, Clone)]
 pub struct ForgeConfig {
@@ -66,10 +83,13 @@ fn val_text(v: &Value) -> String {
 
 /// Build the sampling prompt. Transparent examples ONLY — this is the single
 /// choke point enforcing the opacity guarantee; audit changes here hardest.
+/// Prefill strategy: the prompt ends with a literal `fn @`, so the model's
+/// first generated token is already inside the function name. Mellum2 is a
+/// code-completion model; completion-style prompting beats chat instructions.
 pub fn build_prompt(wish: &Wish, feedback: &[String]) -> String {
     let mut p = String::new();
-    p.push_str("Write one Ontic sketch implementation.\n");
-    p.push_str(&format!("{}\n", sig_text(wish)));
+    p.push_str("Complete one Ontic sketch function for the wish below.\n");
+    p.push_str(&format!("Wish:\n{}\n", sig_text(wish)));
     if !wish.invariants.is_empty() {
         p.push_str("Invariants:\n");
         for inv in &wish.invariants {
@@ -92,12 +112,14 @@ pub fn build_prompt(wish: &Wish, feedback: &[String]) -> String {
             p.push_str(&format!("- {}\n", f));
         }
     }
-    p.push_str("Reply with only the sketch function.");
+    p.push_str("\nfn @");
     p
 }
 
 /// Build the JSON body for one /completion call (pure — unit tested).
-/// Grammar is ALWAYS set; unconstrained sampling is forbidden (AGENTS.md).
+/// Grammar is ALWAYS set and strict from the first generated token; the
+/// prompt prefill (`fn @`) means token 0 is already inside the name, so no
+/// prose or reasoning preamble is reachable.
 pub fn body_for(prompt: &str, cfg: &ForgeConfig, sample_index: usize) -> String {
     json!({
         "prompt": prompt,
@@ -110,14 +132,31 @@ pub fn body_for(prompt: &str, cfg: &ForgeConfig, sample_index: usize) -> String 
     .to_string()
 }
 
-/// Extract the generated text from a llama-server /completion response.
+/// Extract the candidate text from a /completion response.
+/// The prompt prefill ends with `fn @`, so generated content starts at the
+/// function NAME. We deterministically reattach the prefix and slice to the
+/// last `}` (models sometimes append commentary after the function). Pure
+/// text surgery — acceptance decisions remain entirely in the sieve.
+pub fn extract_candidate(raw: &str) -> String {
+    let text = raw.trim();
+    if let Some(i) = text.find("fn @") {
+        // Model echoed the full form; slice from the real start.
+        let end = text.rfind('}').map(|j| j + 1).unwrap_or(text.len());
+        return text[i..end.max(i)].trim().to_string();
+    }
+    // Prefill continuation: slice trailing commentary after the final brace.
+    let end = text.rfind('}').map(|j| j + 1).unwrap_or(text.len());
+    format!("fn @{}", &text[..end])
+}
+
 fn extract_content(body: &str) -> Result<String, String> {
     let v: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("bad JSON response: {}", e))?;
-    v.get("content")
+    let raw = v
+        .get("content")
         .and_then(|c| c.as_str())
-        .map(|s| s.trim().to_string())
-        .ok_or_else(|| "response missing `content`".to_string())
+        .ok_or_else(|| "response missing `content`".to_string())?;
+    Ok(extract_candidate(raw))
 }
 
 /// Sample `cfg.samples` candidates in parallel. Returns texts ordered by
@@ -126,13 +165,15 @@ fn extract_content(body: &str) -> Result<String, String> {
 pub fn sample(wish: &Wish, cfg: &ForgeConfig, feedback: &[String]) -> Result<Vec<String>, String> {
     let prompt = build_prompt(wish, feedback);
     let n = cfg.samples.max(1);
-    let workers = WORKERS.min(n);
+    let workers = worker_count().min(n);
+    let done = AtomicUsize::new(0);
 
     let results: Vec<Vec<(usize, String)>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..workers)
             .map(|w| {
                 let prompt_ref = &prompt;
                 let cfg_ref = &cfg;
+                let done_ref = &done;
                 s.spawn(move || -> Result<Vec<(usize, String)>, String> {
                     let mut client = HttpClient::connect(&cfg_ref.host, cfg_ref.port)?;
                     let host_header = format!("{}:{}", cfg_ref.host, cfg_ref.port);
@@ -140,11 +181,42 @@ pub fn sample(wish: &Wish, cfg: &ForgeConfig, feedback: &[String]) -> Result<Vec
                     let mut idx = w;
                     while idx < n {
                         let body = body_for(prompt_ref, cfg_ref, idx);
-                        let resp = client.post_json(&host_header, "/completion", &body)?;
-                        if resp.status != 200 {
-                            return Err(format!("HTTP {}: {}", resp.status, resp.body));
+                        // Shared-server etiquette: transient failures (reset
+                        // connections, 5xx) get fresh-connection retries with
+                        // backoff; an exhausted sample is skipped, not fatal.
+                        let mut attempt = 0;
+                        loop {
+                            attempt += 1;
+                            match client.post_json(&host_header, "/completion", &body) {
+                                Ok(resp) if resp.status == 200 => {
+                                    out.push((idx, extract_content(&resp.body)?));
+                                    break;
+                                }
+                                Ok(resp) if retryable_status(resp.status) && attempt < SAMPLE_TRIES => {
+                                    eprintln!(
+                                        "forge: sample {} got HTTP {}, retrying ({}/{})",
+                                        idx, resp.status, attempt, SAMPLE_TRIES
+                                    );
+                                }
+                                Ok(resp) => {
+                                    return Err(format!("sample {}: HTTP {}: {}", idx, resp.status, resp.body))
+                                }
+                                Err(e) if attempt < SAMPLE_TRIES => {
+                                    eprintln!(
+                                        "forge: sample {} transport error ({}), reconnecting ({}/{})",
+                                        idx, e, attempt, SAMPLE_TRIES
+                                    );
+                                    client = HttpClient::connect(&cfg_ref.host, cfg_ref.port)?;
+                                }
+                                Err(e) => {
+                                    eprintln!("forge: sample {} abandoned: {}", idx, e);
+                                    break;
+                                }
+                            }
+                            std::thread::sleep(Duration::from_millis(300 * attempt as u64));
                         }
-                        out.push((idx, extract_content(&resp.body)?));
+                        let seen = done_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!("forge: {}/{} sampled", seen, n);
                         idx += workers;
                     }
                     Ok(out)
@@ -163,7 +235,11 @@ pub fn sample(wish: &Wish, cfg: &ForgeConfig, feedback: &[String]) -> Result<Vec
 
     let mut flat: Vec<(usize, String)> = results.into_iter().flatten().collect();
     flat.sort_by_key(|(i, _)| *i);
-    Ok(flat.into_iter().map(|(_, t)| t).collect())
+    let texts: Vec<String> = flat.into_iter().map(|(_, t)| t).collect();
+    if texts.is_empty() {
+        return Err("all samples failed (server unreachable or rejecting)".to_string());
+    }
+    Ok(texts)
 }
 
 #[cfg(test)]
@@ -221,5 +297,28 @@ fn Ledger.total(%items: List<Int>) -> Int
     fn test_endpoint_parsing() {
         assert_eq!(parse_endpoint("10.0.0.2:9000"), ("10.0.0.2".into(), 9000));
         assert_eq!(parse_endpoint("junk"), ("127.0.0.1".into(), 8279));
+    }
+
+    #[test]
+    fn test_candidate_extraction_reattaches_prefill() {
+        let raw = "total(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { %acc + %x } }\nExplanation follows.";
+        let got = extract_candidate(raw);
+        assert!(got.starts_with("fn @total"));
+        assert!(got.ends_with("}"));
+        assert!(!got.contains("Explanation"));
+    }
+
+    #[test]
+    fn test_extraction_handles_echoed_form() {
+        let raw = "junk\nfn @f() -> Int { 1 }\ntail";
+        assert_eq!(extract_candidate(raw), "fn @f() -> Int { 1 }");
+    }
+
+    #[test]
+    fn test_prompt_ends_with_prefill_and_hides_opaque() {
+        let w = wish::parse(WISH_SRC).unwrap();
+        let p = build_prompt(&w, &[]);
+        assert!(p.ends_with("\nfn @"));
+        assert!(!p.contains("-> 9"), "opaque example leaked into prompt");
     }
 }

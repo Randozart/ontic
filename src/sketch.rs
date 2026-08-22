@@ -606,14 +606,22 @@ pub fn parse(src: &str) -> Result<Candidate, ParseError> {
 // Any change here must be applied to the parser in the same commit.
 // ---------------------------------------------------------------------------
 
+// Prefill strategy: the PROMPT ends with a literal `fn @`, so the grammar
+// takes over at the function NAME — no prose is ever reachable. The Rust
+// parser still expects the full `fn @name(...)` form; forge reattaches the
+// prefix when extracting (see forge::extract_candidate).
+// Prefill strategy: the PROMPT ends with a literal `fn @`, so the grammar
+// takes over at the function NAME — no prose is ever reachable. The Rust
+// parser still expects the full `fn @name(...)` form; forge reattaches the
+// prefix when extracting (see forge::extract_candidate).
 pub const GRAMMAR: &str = r#"
-root        ::= ws "fn" ws "@" fname ws "(" ws params ws ")" ws "->" ws type ws "{" ws e ws "}" ws
-fname       ::= [a-z_] [a-zA-Z0-9_]*
+root        ::= name ws "(" ws params ws ")" ws "->" ws type ws "{" ws e ws "}" ws
+name        ::= [a-z_] [a-zA-Z0-9_]*
 params      ::= param (ws "," ws param)*
-param       ::= "%" ident ws ":" ws type
+param       ::= pid ws ":" ws type
 type        ::= "Int" | "Bool" | "List" "<" "Int" ">"
 e           ::= letx | ifx | orx
-letx        ::= "let" ws "%" ident ws "=" ws e ws ";" ws e
+letx        ::= "let" ws pid ws "=" ws e ws ";" ws e
 ifx         ::= "if" ws e ws "{" ws e ws "}" ws "else" ws "{" ws e ws "}"
 orx         ::= andx (ws "||" ws andx)*
 andx        ::= cmpx (ws "&&" ws cmpx)*
@@ -624,7 +632,8 @@ addsym      ::= "+" | "-"
 mulx        ::= unx (ws mulsym ws unx)*
 mulsym      ::= "*" | "/" | "%"
 unx         ::= "-" unx | "!" unx | prim
-prim        ::= int | "true" | "false" | "%" ident | listlit | "len" ws "(" ws e ws ")" | "fold" ws "%" ident ws "in" ws e ws "," ws "%" ident ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+prim        ::= int | "true" | "false" | pid | listlit | "len" ws "(" ws e ws ")" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+pid         ::= "%" [a-zA-Z_] [a-zA-Z0-9_]*
 listlit     ::= "[" ws "]" | "[" ws int (ws "," ws int)* ws "]"
 int         ::= "-"? [0-9]+
 ident       ::= [a-zA-Z_] [a-zA-Z0-9_]*
