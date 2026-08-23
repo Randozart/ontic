@@ -346,3 +346,11 @@
 - GAP IDENTIFIED: List<F64> native return is a Flat-MemRef struct; ctypes
   segfaults on direct binding. Needs sret-aware wrapper or C shim.
   Queued for pyous v2.
+
+### 2026-08-23 09:20 — D2-GATE: coords.txt → verified kernel → PLY
+- examples/write_ply.py: reads coords.txt (trusted IO), calls vaulted
+  translate_scale kernel via ctypes struct-return with numpy zero-copy,
+  writes valid PLY ASCII. 64 vertices from 64 input points.
+- pyous.py: ListF64Kernel fixed — per-call argtypes built from param
+  count; MemRefF64 sret struct return works correctly.
+- First paper-RE artifact: spec → forge → sieve → native → Python → PLY.

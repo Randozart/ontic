@@ -215,26 +215,39 @@ class MemRefF64(ctypes.Structure):
 
 
 class ListF64Kernel:
-    """Callable wrapper for List<F64> → List<F64> kernels."""
-    def __init__(self, lib, symbol):
-        self._fn = getattr(lib, symbol)
-        self._fn.restype = ctypes.c_void_p  # returns aligned pointer
-        # Args: (pts_ptr, pts_ptr, pts_o, pts_s, pts_st, scalar...)
+    """Callable wrapper for List<F64> → List<F64> kernels.
+    
+    Native ABI: each List<F64> param = 5 flat args; F64 params = 1 double.
+    restype = MemRefF64 struct; ctypes auto-handles hidden sret pointer.
+    """
+    def __init__(self, lib, symbol, num_scalars: int):
+        self._lib = lib
+        self._symbol = symbol
+        self._num_scalars = num_scalars
 
     def __call__(self, pts, *scalars):
         import numpy as np
         arr = np.ascontiguousarray(pts, dtype=np.float64)
         n = len(arr)
+
+        fn = getattr(self._lib, self._symbol)
+        fn.restype = MemRefF64
+        # Flat-5 for the list + one double per scalar
+        fn.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_long, ctypes.c_long, ctypes.c_long,
+        ] + [ctypes.c_double] * self._num_scalars
+
         ptr = arr.ctypes.data_as(ctypes.c_void_p)
-        # Flat-5 for the list param + any scalars
         args = [ptr, ptr, ctypes.c_long(0), ctypes.c_long(n), ctypes.c_long(1)]
         args.extend(ctypes.c_double(s) for s in scalars)
-        raw = self._fn(*args)
-        # raw is void* to the result buffer; size == n for elementwise ops
-        out_t = ctypes.c_double * n
-        buf = out_t.from_address(raw)
-        return np.frombuffer(buf, dtype=np.float64).copy()
+        result = fn(*args)
 
+        if result.size == 0 or not result.aligned:
+            return np.array([], dtype=np.float64)
+        out_t = ctypes.c_double * result.size
+        buf = out_t.from_address(result.aligned)
+        return np.frombuffer(buf, dtype=np.float64).copy()
 
 def gen_list_return(spec: str, tier: str = "wrapping",
                     samples: int | None = None,
@@ -265,6 +278,14 @@ def gen_list_return(spec: str, tier: str = "wrapping",
     sym = sk.split("@", 1)[1].split("(")[0].split()[0] if "@" in sk else "f"
 
     lib = ctypes.CDLL(str(so_path))
-    kernel = ListF64Kernel(lib, sym)
+    # Count scalar params from the stored sketch signature.
+    sig = manifest.get("signature", "")
+    num_scalars = 0
+    inner = sig.split("(", 1)[1].split(")")[0] if "(" in sig else ""
+    for p in inner.split(","):
+        p = p.strip()
+        if p and "List" not in p:
+            num_scalars += 1
+    kernel = ListF64Kernel(lib, sym, num_scalars)
     kernel.__sieve_meta__ = manifest.get("last_solve", {})
     return kernel
