@@ -251,3 +251,20 @@
 - Docs: AGENTS rule 10 amended (configured endpoints, key hygiene,
   reproducibility caveat); README cloud usage section.
 - 115 tests green.
+
+### 2026-08-23 05:40 — C4 live gates + oracle fixes found by cloud candidates
+- G-cloud ✅: ledger-wrapping solved via Gemini flash-lite (3/6 survivors,
+  token report 1998/422), vaulted under same key as local solves.
+- HG2 ✅: rms.ont SOLVED by cloud forge with hints — 5-6/8 survivors
+  first round, vaulted (new key: hints excluded from identity as designed).
+- Oracle gaps exposed by live candidates, fixed:
+  - pure-float comparisons crashed in int_of → float path for all binops
+    when any operand is F64 (interp)
+  - Int==F64 promotion missing in checker Eq arm
+  - arith.cmpf needs ordered-float predicate names (oeq/une/olt...)
+  - gemini schema params carried % sigil + dotted names → clean_ident()
+    normalization; MAX_TOKENS_CLOUD=1536 (composed bodies truncate at 512)
+  - --samples/--seed flags were dropped by forge_config rewrite (found via
+    live run); fcfg hoisted out of candidates branch
+- Default cloud model updated per provider guidance: gemini-3.5-flash-lite.
+- ONTIC_DEBUG=1 dumps raw reassembled candidates.

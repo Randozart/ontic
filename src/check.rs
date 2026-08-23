@@ -304,14 +304,19 @@ fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Resu
             expect_ty(r, env, &Ty::Bool)?;
             Ok(Ty::Bool)
         }
-        // Equality is polymorphic over matching scalar types (v0: Int|Bool).
+        // Equality over matching scalars; Int==F64 promotes like other
+        // numeric ops (documented convention).
         BinOp::Eq | BinOp::Ne => {
             let lt = infer(l, env)?;
             let rt = infer(r, env)?;
-            if lt != rt || matches!(lt, Ty::ListInt) {
-                return Err(format!("== needs equal scalar types, got {} vs {}", lt.name(), rt.name()));
+            match (&lt, &rt) {
+                (Ty::Int | Ty::F64, Ty::Int | Ty::F64) | (Ty::Bool, Ty::Bool) => Ok(Ty::Bool),
+                _ => Err(format!(
+                    "== needs equal scalar types, got {} vs {}",
+                    lt.name(),
+                    rt.name()
+                )),
             }
-            Ok(Ty::Bool)
         }
     }
 }

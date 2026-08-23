@@ -29,6 +29,8 @@ fn worker_count() -> usize {
 /// Per-sample transport retries (fresh connection each try) before a sample
 /// is abandoned. The batch still succeeds if any other sample survives.
 const SAMPLE_TRIES: usize = 3;
+/// Cloud generations get more room than llama prefill: composed bodies run long.
+const MAX_TOKENS_CLOUD: usize = 1536;
 /// Retryable server statuses — typically transient overload on shared hosts.
 fn retryable_status(status: u16) -> bool {
     matches!(status, 500 | 502 | 503 | 504)
@@ -75,7 +77,7 @@ impl Default for ForgeConfig {
             port,
             backend: Backend::Llama,
             endpoint: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-            model: "gemini-2.0-flash-lite".to_string(),
+            model: "gemini-3.5-flash-lite".to_string(),
             api_key_env: "GEMINI_API_KEY".to_string(),
             samples: 32,
             seed: 0x5EED,
@@ -215,6 +217,10 @@ pub fn sample(
     cfg: &ForgeConfig,
     feedback: &[String],
 ) -> Result<(Vec<String>, Usage), String> {
+    // Cloud backends never touch the llama worker pool.
+    if cfg.backend != Backend::Llama {
+        return sample_cloud(wish, cfg, feedback);
+    }
     let prompt = build_prompt(wish, feedback);
     let n = cfg.samples.max(1);
     let workers = worker_count().min(n);
@@ -324,9 +330,9 @@ fn sample_cloud(
     for idx in 0..cfg.samples.max(1) {
         let body = match cfg.backend {
             Backend::OpenAICompat => {
-                sampler::openai_body(&cfg.model, &chat_prompt_text, cfg.temperature, 512)
+                sampler::openai_body(&cfg.model, &chat_prompt_text, cfg.temperature, MAX_TOKENS_CLOUD)
             }
-            _ => sampler::gemini_body(&chat_prompt_text, cfg.temperature, 512),
+            _ => sampler::gemini_body(&chat_prompt_text, cfg.temperature, MAX_TOKENS_CLOUD),
         };
         let mut attempt = 0usize;
         loop {
@@ -344,7 +350,11 @@ fn sample_cloud(
                         _ => sampler::openai_parse(&resp.body)?,
                     };
                     usage_total += u;
-                    texts.push((idx, forge_extract_helper(raw)));
+                    let cand_text = forge_extract_helper(&raw);
+                    if std::env::var("ONTIC_DEBUG").is_ok() {
+                        eprintln!("DEBUG cand {}: {}", idx, cand_text);
+                    }
+                    texts.push((idx, cand_text));
                     break;
                 }
                 Ok(resp)
@@ -466,6 +476,6 @@ fn Ledger.total(%items: List<Int>) -> Int
 
 /// Normalize raw provider output into a candidate text (thin alias kept so
 /// the cloud path reads symmetrically with the llama path).
-fn forge_extract_helper(raw: String) -> String {
-    extract_candidate(&raw)
+fn forge_extract_helper(raw: &str) -> String {
+    extract_candidate(raw)
 }

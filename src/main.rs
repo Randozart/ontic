@@ -134,6 +134,8 @@ fn probes_count(w: &wish::Wish, cfg: &SiegeConfig) -> usize {
 /// Resolve forge config from flags/env.
 fn forge_config(opts: &SolveOpts) -> ForgeConfig {
     let mut cfg = ForgeConfig::default();
+    cfg.samples = opts.samples;
+    cfg.seed = opts.seed;
     // Backend selection: flag > env > default(llama).
     if let Some(b) = &opts.sampler_backend {
         cfg.backend = forge::Backend::Llama; // placeholder replaced below
@@ -148,7 +150,7 @@ fn forge_config(opts: &SolveOpts) -> ForgeConfig {
                 .model
                 .clone()
                 .or_else(|| std::env::var("ONTIC_MODEL").ok())
-                .unwrap_or_else(|| "gemini-2.0-flash-lite".to_string());
+                .unwrap_or_else(|| "gemini-3.5-flash-lite".to_string());
             let key_env = opts
                 .api_key_env
                 .clone()
@@ -172,7 +174,7 @@ fn forge_config(opts: &SolveOpts) -> ForgeConfig {
                 .model
                 .clone()
                 .or_else(|| std::env::var("ONTIC_MODEL").ok())
-                .unwrap_or_else(|| "gemini-2.0-flash-lite".to_string());
+                .unwrap_or_else(|| "gemini-3.5-flash-lite".to_string());
         }
     }
     // Endpoint handling: llama uses host:port; cloud uses base URL.
@@ -378,6 +380,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
     };
     let cfg = SiegeConfig::default();
 
+    let fcfg = forge_config(opts);
     let candidates = if !opts.hand.is_empty() {
         match load_hand(&opts.hand) {
             Ok(c) => c,
@@ -387,11 +390,17 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             }
         }
     } else {
-        let fcfg = forge_config(opts);
-        println!(
-            "forging {} candidates from {}:{} ...",
-            fcfg.samples, fcfg.host, fcfg.port
-        );
+        if matches!(fcfg.backend, forge::Backend::Llama) {
+            println!(
+                "forging {} candidates from {}:{} ...",
+                fcfg.samples, fcfg.host, fcfg.port
+            );
+        } else {
+            println!(
+                "forging {} candidates via {} ({}) ...",
+                fcfg.samples, fcfg.backend.label(), fcfg.model
+            );
+        }
         match forge::sample(&w, &fcfg, &[]) {
             Ok((texts, usage)) => {
                 println!(

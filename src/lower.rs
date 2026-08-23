@@ -837,13 +837,20 @@ fn emit_cmp(
     is_float: bool,
     em: &mut Emitter,
 ) -> Result<String, String> {
-    let pred = match op {
-        BinOp::Eq => "eq",
-        BinOp::Ne => "ne",
-        BinOp::Lt => "slt",
-        BinOp::Le => "sle",
-        BinOp::Gt => "sgt",
-        _ => "sge",
+    // cmpf uses ordered-float predicate names; cmpi uses signed-int names.
+    let pred = match (op, is_float) {
+        (BinOp::Eq, false) => "eq",
+        (BinOp::Ne, false) => "ne",
+        (BinOp::Lt, false) => "slt",
+        (BinOp::Le, false) => "sle",
+        (BinOp::Gt, false) => "sgt",
+        (_, false) => "sge",
+        (BinOp::Eq, true) => "oeq",
+        (BinOp::Ne, true) => "une",
+        (BinOp::Lt, true) => "olt",
+        (BinOp::Le, true) => "ole",
+        (BinOp::Gt, true) => "ogt",
+        (_, true) => "oge",
     };
     let bit = em.fresh("cmp");
     if is_float {

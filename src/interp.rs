@@ -449,10 +449,11 @@ fn eval_binop(
     let lv_f = as_promotable(&lv);
     let rv_f = as_promotable(&rv);
     if let (Some(a), Some(b)) = (lv_f, rv_f) {
-        // Promotion fires ONLY on mixed Int/F64; pure-Int stays exact.
-        let mixed = (matches!(lv, Value::Float(_)) && matches!(rv, Value::Int(_)))
-            || (matches!(lv, Value::Int(_)) && matches!(rv, Value::Float(_)));
-        if mixed {
+        // Float semantics fire whenever ANY operand is F64 (mixed widens,
+        // pure-float compares/arithmetic are IEEE). Pure-Int stays exact.
+        let any_float =
+            matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_));
+        if any_float {
             return match op {
                 BinOp::Add => Ok(Value::Float(a + b)),
                 BinOp::Sub => Ok(Value::Float(a - b)),
@@ -463,6 +464,8 @@ fn eval_binop(
                 BinOp::Le => Ok(Value::Bool(a <= b)),
                 BinOp::Gt => Ok(Value::Bool(a > b)),
                 BinOp::Ge => Ok(Value::Bool(a >= b)),
+                BinOp::Eq => Ok(Value::Bool(a == b)),
+                BinOp::Ne => Ok(Value::Bool(a != b)),
                 _ => Err(EvalError::TypeError(format!(
                     "{} on {} vs {}",
                     op_str(op),

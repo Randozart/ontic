@@ -85,3 +85,11 @@
   hand (`}]}}]],` vs `}]}]}],`). Fix: build fixtures programmatically from
   json!() so structure is compiler-checked. Lesson: never hand-write nested
   escape-heavy fixtures.
+
+### 2026-08-23 — Live cloud candidates exposed three oracle/lowerer gaps
+- Pure-float comparisons hit int_of (no float path for Lt..Ge on F64/F64).
+- Mixed Int==F64 rejected by checker despite documented promotion.
+- arith.cmpf predicate enum differs from cmpi (oeq vs eq etc.).
+All fixed with regression coverage via live-solve runs. Lesson: the first
+REAL float workload finds gaps no synthetic test imagined — keep live gates
+in the loop early.

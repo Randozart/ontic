@@ -176,18 +176,25 @@ pub fn gemini_parse(body: &str) -> Result<(String, Usage), String> {
     };
     let obj: serde_json::Value = serde_json::from_str(text.trim())
         .map_err(|e| format!("schema payload not JSON: {}", e))?;
-    let name = obj.get("name").and_then(|x| x.as_str()).unwrap_or("f");
+    // Normalization (pure text surgery): models often include the % sigil in
+    // parameter names and dots in function names; both break the lexer.
+    let clean_ident = |s: &str| -> String {
+        s.trim()
+            .trim_start_matches('%')
+            .replace(['.', '-'], "_")
+    };
+    let name = clean_ident(obj.get("name").and_then(|x| x.as_str()).unwrap_or("f"));
     let ret = obj.get("ret").and_then(|x| x.as_str()).unwrap_or("Int");
     let body_src = obj.get("body").and_then(|x| x.as_str()).unwrap_or("");
     let mut params: Vec<(String, String)> = Vec::new();
     if let Some(arr) = obj.get("params").and_then(|p| p.as_array()) {
         for p in arr {
-            let n = p.get("n").and_then(|x| x.as_str()).unwrap_or("a");
+            let n = clean_ident(p.get("n").and_then(|x| x.as_str()).unwrap_or("a"));
             let t = p.get("t").and_then(|x| x.as_str()).unwrap_or("Int");
-            params.push((n.to_string(), t.to_string()));
+            params.push((n, t.to_string()));
         }
     }
-    Ok((reassemble(name, &params, ret, body_src), usage))
+    Ok((reassemble(&name, &params, ret, body_src), usage))
 }
 
 #[cfg(test)]
