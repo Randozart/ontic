@@ -1,14 +1,16 @@
 # Ontic
 
-**Stochastic specification compiler.** You write the gen (`.ont`); Mellum2
-proposes implementations; a fully deterministic sieve decides what is true.
-Verified winners are emitted as MLIR and cached in a content-addressed vault.
+**A DSL whose products are verified native libraries.**
 
-```
-fn Ledger.total(%items: List<Int>) -> Int
-  | %res >= -1000000000        // invariant: bounds the probe oracle
-  => [1,2,3] -> 6              // transparent — forge sees this
-  ?? [4,5] -> 9                // opaque — held out; overfit killer
+Write a specification (`.ont`) — signatures, invariants, example evidence.
+A local transformer proposes implementations. A deterministic seven-stage
+sieve proves them. The output: a shared library + C header that Python,
+C, C++, Rust — anything with an FFI — consumes at native speed.
+
+```python
+import pyous as po
+rms = po.gen(open("examples/rms.ont").read(), tier="wrapping")
+rms([2.0, 8.0])   # -> 5.830951894845301  (native speed, sieve-verified)
 ```
 
 ## The Wall
