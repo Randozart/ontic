@@ -125,3 +125,16 @@
 - Pipeline: CK::ListF64 harness kind (double arrays); bench harness typed by CK.
 - Gate: test_float_list_fold_native_parity — interpreter ≡ native through
   memref<?xf64>. 89 tests green.
+
+### 2026-08-22 02:20 — Numeric promotion + prompt evolution
+- Language decision: Int→F64 widening in mixed arith/comparisons
+  (research-language convention). check.rs promotes, interp.rs IEEE path,
+  lower.rs emits arith.sitofp on the Int side.
+- check.rs: Len accepts List<F64>; fold binds F64 elements from List<F64>.
+- forge.rs: spec-notation firewall in prompt (SPECIFICATION vs IMPLEMENTATION
+  sections, explicit "do not emit | => ?? ±"), few-shot format example
+  replacing abstract placeholders (small models parrot meta-syntax),
+  %res prohibition, colder retry temperature (T=0.4 repair mode).
+- examples/rms.ont opened as live benchmark: two-stage fold (deviations from
+  mean) + empty guard. Current status: all candidates honestly killed at S3
+  with genuine near-misses (sumsq=20, mean-sq=10, NaN-on-empty). OPEN target.

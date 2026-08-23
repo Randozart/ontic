@@ -317,8 +317,10 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             .take(16)
             .map(|(l, r)| format!("{}/{}/{}: {}", l, r.stage.label(), r.kind.label(), r.reason))
             .collect();
-        let fcfg = forge_config(opts.forge.as_deref(), opts.samples, opts.seed.wrapping_add(1));
-        println!("feedback round: {} resamples ...", fcfg.samples);
+        let mut fcfg = forge_config(opts.forge.as_deref(), opts.samples, opts.seed.wrapping_add(1));
+        // Repair mode: colder sampling turns exploration into refinement.
+        fcfg.temperature = 0.4;
+        println!("feedback round: {} resamples at T={} ...", fcfg.samples, fcfg.temperature);
         match forge::sample(&w, &fcfg, &feedback) {
             Ok(texts) => {
                 let cands: Vec<(String, String)> = texts

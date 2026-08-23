@@ -88,8 +88,9 @@ fn val_text(v: &Value) -> String {
 /// code-completion model; completion-style prompting beats chat instructions.
 pub fn build_prompt(wish: &Wish, feedback: &[String]) -> String {
     let mut p = String::new();
-    p.push_str("Complete one Ontic sketch function for the wish below.\n");
-    p.push_str(&format!("Wish:\n{}\n", sig_text(wish)));
+    p.push_str("Complete one Ontic sketch implementation.\n");
+    p.push_str("\n=== SPECIFICATION (notation only — never copy into code) ===\n");
+    p.push_str(&format!("{}\n", sig_text(wish)));
     if !wish.invariants.is_empty() {
         p.push_str("Invariants:\n");
         for inv in &wish.invariants {
@@ -107,19 +108,24 @@ pub fn build_prompt(wish: &Wish, feedback: &[String]) -> String {
         }
     }
     if !feedback.is_empty() {
-        p.push_str("Rejected attempts and reasons (avoid these mistakes):\n");
+        p.push_str("\nRejected attempts and reasons (avoid these mistakes):\n");
         for f in feedback {
             p.push_str(&format!("- {}\n", f));
         }
     }
-    p.push_str("Language rules:\n");
-    p.push_str("- Iterate only via fold: fold %v in <list>, %acc from <init> { <body> }.\n");
-    p.push_str("- The body must have exactly the signature's return type.\n");
-    p.push_str("- == / != compare same-typed scalars only; never lists.\n");
-    p.push_str("- F64 arithmetic is IEEE: division by zero yields inf/NaN, never an error.\n");
-    p.push_str("- len(x) is the only list operation; there is no indexing or concatenation.\n");
-    p.push_str("- One function only; it starts where this prompt ends (at the name).\n");
-    p.push_str("\nfn @");
+    p.push_str("\n=== LANGUAGE RULES ===\n");
+    p.push_str("Output exactly one function; nothing else.\n");
+    p.push_str("Example of the format on a DIFFERENT task:\n");
+    p.push_str("fn @square_mean(%ns: List<Int>) -> Int { let %n = len(%ns); let %s = fold %v in %ns, %acc from 0 { %acc + %v * %v }; %s / %n }\n");
+    p.push_str("The | , => , ?? , +- tolerance marks above are SPECIFICATION notation. Do not emit them.\n");
+    p.push_str("Iterate only via fold: fold %v in <list>, %acc from <init> { <body> }.\n");
+    p.push_str("The body must have exactly the signature's return type.\n");
+    p.push_str("== / != compare same-typed scalars only; never lists.\n");
+    p.push_str("F64 arithmetic is IEEE: division by zero yields inf/NaN, never an error.\n");
+    p.push_str("len(x) is the only list operation; there is no indexing or concatenation.\n");
+    p.push_str("Choose your own short lowercase name.\n");
+    p.push_str("%res exists only in specifications; NEVER reference it inside the implementation.\n");
+    p.push_str("\n=== IMPLEMENTATION ===\nfn @");
     p
 }
 

@@ -41,7 +41,13 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             .get(n)
             .cloned()
             .ok_or_else(|| format!("unbound variable %{}", n)),
-        Expr::Len(inner) => expect_ty(inner, env, &Ty::ListInt).map(|_| Ty::Int),
+        Expr::Len(inner) => {
+            let t = infer(inner, env)?;
+            match t {
+                Ty::ListInt | Ty::ListF64 => Ok(Ty::Int),
+                other => Err(format!("len of {}", other.name())),
+            }
+        }
         Expr::UnOp(UnOp::Neg, inner) => expect_ty(inner, env, &Ty::Int),
         Expr::UnOp(UnOp::Not, inner) => expect_ty(inner, env, &Ty::Bool),
         Expr::If(c, t, f) => {
@@ -108,23 +114,24 @@ fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Resu
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let lt = infer(l, env)?;
             let rt = infer(r, env)?;
-            if lt != rt {
-                return Err(format!("arith on {} vs {}", lt.name(), rt.name()));
-            }
-            match lt {
-                Ty::Int | Ty::F64 => Ok(lt),
-                other => Err(format!("arith on {}", other.name())),
+            // Numeric promotion: mixing Int with F64 widens to F64
+            // (research-language convention, documented in AGENTS.md).
+            match (&lt, &rt) {
+                (Ty::Int, Ty::Int) => Ok(Ty::Int),
+                (Ty::F64, _) | (_, Ty::F64)
+                    if matches!(lt, Ty::Int | Ty::F64) && matches!(rt, Ty::Int | Ty::F64) =>
+                {
+                    Ok(Ty::F64)
+                }
+                _ => Err(format!("arith on {} vs {}", lt.name(), rt.name())),
             }
         }
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
             let lt = infer(l, env)?;
             let rt = infer(r, env)?;
-            if lt != rt {
-                return Err(format!("compare {} vs {}", lt.name(), rt.name()));
-            }
-            match lt {
-                Ty::Int | Ty::F64 => Ok(Ty::Bool),
-                other => Err(format!("ordering compare on {}", other.name())),
+            match (&lt, &rt) {
+                (Ty::Int | Ty::F64, Ty::Int | Ty::F64) => Ok(Ty::Bool),
+                _ => Err(format!("compare {} vs {}", lt.name(), rt.name())),
             }
         }
         BinOp::And | BinOp::Or => {

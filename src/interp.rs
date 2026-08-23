@@ -54,6 +54,16 @@ fn float_of(v: &Value) -> Result<f64, EvalError> {
     }
 }
 
+/// Some(F64 value) when this operand participates in promotion: floats pass
+/// through; ints widen. Bools/lists never promote.
+fn as_promotable(v: &Value) -> Option<f64> {
+    match v {
+        Value::Float(f) => Some(*f),
+        Value::Int(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
 fn int_of(v: &Value) -> Result<i64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -196,6 +206,34 @@ fn eval_binop(
             _ => a % b,
         };
         return Ok(Value::Float(out));
+    }
+    // Numeric promotion: Int operands widen into any F64 operation or
+    // ordered comparison (language convention, matches check.rs).
+    let lv_f = as_promotable(&lv);
+    let rv_f = as_promotable(&rv);
+    if let (Some(a), Some(b)) = (lv_f, rv_f) {
+        // Promotion fires ONLY on mixed Int/F64; pure-Int stays exact.
+        let mixed = (matches!(lv, Value::Float(_)) && matches!(rv, Value::Int(_)))
+            || (matches!(lv, Value::Int(_)) && matches!(rv, Value::Float(_)));
+        if mixed {
+            return match op {
+                BinOp::Add => Ok(Value::Float(a + b)),
+                BinOp::Sub => Ok(Value::Float(a - b)),
+                BinOp::Mul => Ok(Value::Float(a * b)),
+                BinOp::Div => Ok(Value::Float(a / b)),
+                BinOp::Mod => Ok(Value::Float(a % b)),
+                BinOp::Lt => Ok(Value::Bool(a < b)),
+                BinOp::Le => Ok(Value::Bool(a <= b)),
+                BinOp::Gt => Ok(Value::Bool(a > b)),
+                BinOp::Ge => Ok(Value::Bool(a >= b)),
+                _ => Err(EvalError::TypeError(format!(
+                    "{} on {} vs {}",
+                    op_str(op),
+                    lv,
+                    rv
+                ))),
+            };
+        }
     }
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {

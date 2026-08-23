@@ -107,12 +107,8 @@ fn parse_value(s: &str) -> Result<Value, String> {
     if t == "false" {
         return Ok(Value::Bool(false));
     }
-    if t.contains('.') || t.contains('e') || t.contains('E') {
-        let v: f64 = t
-            .parse()
-            .map_err(|_| format!("bad float `{}`", t))?;
-        return Ok(Value::Float(v));
-    }
+    // List literals first: `[2.0, 4.0]` contains '.', which must not trip
+    // scalar-float detection.
     if let Some(inner) = t.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
         let inner = inner.trim();
         if inner.is_empty() {
@@ -140,6 +136,10 @@ fn parse_value(s: &str) -> Result<Value, String> {
         } else {
             Value::List(items_i)
         });
+    }
+    if t.contains('.') || t.contains('e') || t.contains('E') {
+        let v: f64 = t.parse().map_err(|_| format!("bad float `{}`", t))?;
+        return Ok(Value::Float(v));
     }
     Ok(Value::Int(parse_int(t)?))
 }
@@ -354,7 +354,11 @@ fn check_set(wish: &Wish, set: &[Example], label: &str) -> Result<(), String> {
             ));
         }
         for ((v, (_, t)), idx) in ex.inputs.iter().zip(wish.params.iter()).zip(0..) {
-            if v.ty() != *t {
+            // Empty list literals are polymorphic; they adopt the declared
+            // element type of the parameter they feed.
+            let polymorphic_empty =
+                matches!(v, Value::List(vs) if vs.is_empty()) && matches!(t, Ty::ListF64);
+            if v.ty() != *t && !polymorphic_empty {
                 return Err(format!(
                     "wish `{}`: {} example param #{} is {}, expected {}",
                     wish.path,

@@ -55,3 +55,14 @@
 - First native numbers (~5.5k ns) included per-iteration buffer init inside
   the timed loop. Moved outside; real numbers ~10x lower. Lesson: audit the
   harness before believing any timing.
+
+### 2026-08-22 — Qwen parrots prompt meta-syntax
+- Rules containing placeholders (`lowercase_name(%a: T, ...)`) were copied
+  verbatim into candidates. Fix: concrete few-shot example function instead
+  of abstract format description. Lesson: never show meta-tokens to small
+  models under grammar constraints.
+
+### 2026-08-22 — rms.ont unsolved by forge (open)
+- Stats.meansqdev requires two dependent folds (mean, then deviation sum) +
+  empty guard. All candidates honestly rejected at S3 with near-misses.
+  Not a sieve bug — a capability boundary being measured honestly.

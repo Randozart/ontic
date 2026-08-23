@@ -408,33 +408,56 @@ fn emit_binop(
 ) -> Result<String, String> {
     let lv = emit_expr(l, env, tyenv, em)?;
     let rv = emit_expr(r, env, tyenv, em)?;
-    if is_comparison(op) {
-        return emit_cmp(op, &lv, &rv, expr_ty(l, tyenv) == Ty::F64, em);
+    // Numeric promotion: widen the Int side of a mixed numeric op via
+    // arith.sitofp (matches interp/check convention).
+    let lt = expr_ty(l, tyenv);
+    let rt = expr_ty(r, tyenv);
+    let mixed_float = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+        && ((matches!(lt, Ty::F64) && matches!(rt, Ty::Int))
+            || (matches!(lt, Ty::Int) && matches!(rt, Ty::F64)));
+    let mut lv_s = lv;
+    let mut rv_s = rv;
+    let mut any_float = matches!(lt, Ty::F64) || matches!(rt, Ty::F64);
+    if mixed_float {
+        if matches!(lt, Ty::Int) {
+            let w = em.fresh("widen");
+            em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, lv_s));
+            lv_s = w;
+        }
+        if matches!(rt, Ty::Int) {
+            let w = em.fresh("widen");
+            em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, rv_s));
+            rv_s = w;
+        }
+        any_float = true;
     }
-    if expr_ty(l, tyenv) == Ty::F64 && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+    if is_comparison(op) {
+        return emit_cmp(op, &lv_s, &rv_s, any_float, em);
+    }
+    if any_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
         let out = em.fresh("opf");
         let stmt = match op {
-            BinOp::Add => format!("{} = arith.addf {}, {} : f64", out, lv, rv),
-            BinOp::Sub => format!("{} = arith.subf {}, {} : f64", out, lv, rv),
-            BinOp::Mul => format!("{} = arith.mulf {}, {} : f64", out, lv, rv),
-            BinOp::Div => format!("{} = arith.divf {}, {} : f64", out, lv, rv),
-            _ => format!("{} = arith.remf {}, {} : f64", out, lv, rv),
+            BinOp::Add => format!("{} = arith.addf {}, {} : f64", out, lv_s, rv_s),
+            BinOp::Sub => format!("{} = arith.subf {}, {} : f64", out, lv_s, rv_s),
+            BinOp::Mul => format!("{} = arith.mulf {}, {} : f64", out, lv_s, rv_s),
+            BinOp::Div => format!("{} = arith.divf {}, {} : f64", out, lv_s, rv_s),
+            _ => format!("{} = arith.remf {}, {} : f64", out, lv_s, rv_s),
         };
         em.line(&stmt);
         return Ok(out);
     }
     if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) && !em.wrapping {
-        return emit_checked_arith(op, &lv, &rv, em);
+        return emit_checked_arith(op, &lv_s, &rv_s, em);
     }
     let out = em.fresh("op");
     let stmt = match op {
-        BinOp::Add => Some(format!("{} = arith.addi {}, {} : i64", out, lv, rv)),
-        BinOp::Sub => Some(format!("{} = arith.subi {}, {} : i64", out, lv, rv)),
-        BinOp::Mul => Some(format!("{} = arith.muli {}, {} : i64", out, lv, rv)),
-        BinOp::Div => Some(format!("{} = arith.divsi {}, {} : i64", out, lv, rv)),
-        BinOp::Mod => Some(format!("{} = arith.remsi {}, {} : i64", out, lv, rv)),
-        BinOp::And => Some(format!("{} = arith.andi {}, {} : i64", out, lv, rv)),
-        BinOp::Or => Some(format!("{} = arith.ori {}, {} : i64", out, lv, rv)),
+        BinOp::Add => Some(format!("{} = arith.addi {}, {} : i64", out, lv_s, rv_s)),
+        BinOp::Sub => Some(format!("{} = arith.subi {}, {} : i64", out, lv_s, rv_s)),
+        BinOp::Mul => Some(format!("{} = arith.muli {}, {} : i64", out, lv_s, rv_s)),
+        BinOp::Div => Some(format!("{} = arith.divsi {}, {} : i64", out, lv_s, rv_s)),
+        BinOp::Mod => Some(format!("{} = arith.remsi {}, {} : i64", out, lv_s, rv_s)),
+        BinOp::And => Some(format!("{} = arith.andi {}, {} : i64", out, lv_s, rv_s)),
+        BinOp::Or => Some(format!("{} = arith.ori {}, {} : i64", out, lv_s, rv_s)),
         _ => None,
     };
     match stmt {
