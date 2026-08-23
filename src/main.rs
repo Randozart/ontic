@@ -301,8 +301,8 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
         }
     };
 
-    let deps = resolve_deps(&w);
-    let mut report = match sieve::run(&w, &candidates, &cfg, &deps) {
+    let resolved = resolve_deps(&w);
+    let mut report = match sieve::run(&w, &candidates, &cfg, &resolved.map) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("wish rejected by sieve preconditions: {}", e);
@@ -330,7 +330,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
                     .enumerate()
                     .map(|(i, t)| (format!("retry-{}", i), t))
                     .collect();
-                match sieve::run(&w, &cands, &cfg, &deps) {
+                match sieve::run(&w, &cands, &cfg, &resolved.map) {
                     Ok(r2) => {
                         print_report(&r2);
                         merge_reports(&mut report, r2);
@@ -348,13 +348,13 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             1
         }
         Some(_) => {
-            native_rerank(&w, &mut report.survivors);
+            native_rerank(&w, &resolved, &mut report.survivors);
             print_native_ranking(&report);
             let winner = report.survivors.first().unwrap();
             if !store {
                 return 0;
             }
-            emit_and_store(&w, winner)
+            emit_and_store(&w, winner, &resolved)
         }
     }
 }
@@ -362,7 +362,8 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
 /// When the LLVM toolchain is present, re-time every survivor on real
 /// compiled objects and re-rank by that. Interpreter timing remains the
 /// fallback ordering; the native table is the honest one.
-fn native_rerank(w: &wish::Wish, survivors: &mut Vec<sieve::Survivor>) {
+fn native_rerank(w: &wish::Wish, resolved: &ResolvedDeps, survivors: &mut Vec<sieve::Survivor>) {
+    let dep_mlirs: Vec<String> = resolved.mlirs.clone();
     if pipeline::find_tool("mlir-opt").is_none() || pipeline::find_tool("llc").is_none() {
         println!("native bench: toolchain missing, interpreter ranking stands");
         return;
@@ -375,8 +376,15 @@ fn native_rerank(w: &wish::Wish, survivors: &mut Vec<sieve::Survivor>) {
             &s.candidate.ret,
             &s.candidate.body,
             w.wrapping,
+            &resolved.calls,
         ) {
-            Ok(mlir) => {
+            Ok(cand_mlir) => {
+                // Candidate + deps compile as ONE composite so intra-module
+                // calls resolve at lowering time.
+                let mut parts = dep_mlirs.clone();
+                parts.push(cand_mlir);
+                let mlir =
+                    lower::compose_modules(&parts).expect("composite compose");
                 let kinds: Vec<pipeline::CK> = s
                     .candidate
                     .params
@@ -389,7 +397,7 @@ fn native_rerank(w: &wish::Wish, survivors: &mut Vec<sieve::Survivor>) {
                     })
                     .collect();
                 // S7 input sizing: fixed 1024-element probe buffer, 2000 iters.
-                match pipeline::bench_native(&mlir, &s.candidate.name, &kinds, 2_000) {
+                match pipeline::bench_native(&mlir, &s.candidate.name, &kinds, 2_000, &[]) {
                     Ok(ns) => measured.push((s.clone(), ns)),
                     Err(e) => eprintln!(
                         "native bench failed for {}: {} (interpreter ranking stands for this candidate)",
@@ -424,14 +432,33 @@ fn print_native_ranking(report: &sieve::SieveReport) {
 
 /// Resolve a wish's declared dependencies against the vault by path.
 /// Flat closure: transitive calls must all be listed in the top wish.
-fn resolve_deps(w: &wish::Wish) -> interp::DepMap {
+/// Resolved dependency set: runtime table + raw MLIR modules for linking.
+struct ResolvedDeps {
+    map: interp::DepMap,
+    mlirs: Vec<String>,
+    calls: lower::CallMap,
+}
+
+impl ResolvedDeps {
+    fn empty() -> Self {
+        ResolvedDeps {
+            map: interp::DepMap::new(),
+            mlirs: Vec::new(),
+            calls: lower::CallMap::new(),
+        }
+    }
+}
+
+fn resolve_deps(w: &wish::Wish) -> ResolvedDeps {
     let vault_dir =
         std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
     let v = match Vault::open(&vault_dir) {
         Ok(v) => v,
-        Err(_) => return interp::DepMap::new(),
+        Err(_) => return ResolvedDeps::empty(),
     };
     let mut map = interp::DepMap::new();
+    let mut mlirs = Vec::new();
+    let mut calls = lower::CallMap::new();
     for path in &w.deps {
         if let Some(entry) = v.find_by_path(path) {
             if let Ok(cand) = ontic::sketch::parse(&entry.sketch_text) {
@@ -440,11 +467,32 @@ fn resolve_deps(w: &wish::Wish) -> interp::DepMap {
                 } else {
                     interp::Tier::checked()
                 };
-                map.insert(path.clone(), interp::DepFn { cand, tier });
+                // The call symbol is the func name inside the dep's module.
+                let symbol = entry
+                    .mlir
+                    .split("func.func @")
+                    .nth(1)
+                    .and_then(|r| r.find('('))
+                    .map(|i| entry.mlir[..].split("func.func @").nth(1).unwrap()[..i].trim().to_string());
+                map.insert(
+                    path.clone(),
+                    interp::DepFn { cand: cand.clone(), tier },
+                );
+                if let Some(sym) = symbol {
+                    calls.insert(
+                        path.clone(),
+                        lower::CallTarget {
+                            symbol: sym,
+                            params: cand.params.iter().map(|(_, t)| *t).collect(),
+                            ret: cand.ret,
+                        },
+                    );
+                }
+                mlirs.push(entry.mlir.clone());
             }
         }
     }
-    map
+    ResolvedDeps { map, mlirs, calls }
 }
 
 /// Fold retry results into the primary report deterministically.
@@ -457,13 +505,14 @@ fn merge_reports(base: &mut sieve::SieveReport, extra: sieve::SieveReport) {
 }
 
 /// Lower the winner, best-effort validate with mlir-opt, store in vault.
-fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor) -> i32 {
+fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor, resolved: &ResolvedDeps) -> i32 {
     let mlir = match lower::emit_fn(
         &survivor.candidate.name,
         &survivor.candidate.params,
         &survivor.candidate.ret,
         &survivor.candidate.body,
         w.wrapping,
+        &resolved.calls,
     ) {
         Ok(m) => m,
         Err(e) => {
@@ -472,8 +521,12 @@ fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor) -> i32 {
         }
     };
     // Mandatory when the toolchain is present: unvalidated IR never vaults.
+    // Candidates calling deps are validated as a COMPOSITE module.
     let staged = std::env::temp_dir().join("ontic-emit-check.mlir");
-    match std::fs::write(&staged, &mlir)
+    let mut parts: Vec<String> = resolved.mlirs.clone();
+    parts.push(mlir.clone());
+    let validation_text = lower::compose_modules(&parts).unwrap_or(mlir.clone());
+    match std::fs::write(&staged, &validation_text)
         .map_err(|e| e.to_string())
         .and_then(|_| pipeline::validate_mlir(&staged))
     {

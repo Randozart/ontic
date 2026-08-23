@@ -196,3 +196,13 @@
   sieve (test_vault_call_composition_survives_sieve); undeclared calls die
   at S2 with actionable reasons.
 - 98 tests green.
+
+### 2026-08-23 02:10 — M2 step F: composite emission + native linking
+- lower.rs: emit_fn takes CallMap; emit_call emits func.call with widened
+  numeric args and param-type suffixes; compose_modules merges modules;
+  ontic_trap declared always (broadcast guard uses it in every tier);
+  expr_ty types builtin reductions by element type.
+- main.rs: ResolvedDeps{map,mlirs,calls}; native bench compiles ONE
+  composite module (deps+candidate); validation gate uses composite too.
+- E2E GATE: devsq-composed.ont solved, validated, native-benched, vaulted —
+  first fully composed verified function (mean called from devsq).

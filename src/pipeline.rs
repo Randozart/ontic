@@ -376,6 +376,7 @@ pub fn eval_native(
     scalars_i64: &[i64],
     scalars_f64: &[f64],
     ret: RetSpec,
+    extra_mls: &[String],
 ) -> Result<Vec<f64>, String> {
     let dir = scratch_dir("eval");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -388,6 +389,16 @@ pub fn eval_native(
     std::fs::write(&mlir_p, mlir_text).map_err(|e| e.to_string())?;
     mlir_to_llvmir(&mlir_p, &ll_mlir)?;
     object_from_ll(&ll_mlir, &o_p)?;
+    let mut objects = vec![o_p.clone()];
+    for (i, extra) in extra_mls.iter().enumerate() {
+        let ep_mlir = dir.join(format!("extra{}.mlir", i));
+        let ep_ll = dir.join(format!("extra{}_llvm.mlir", i));
+        let ep_o = dir.join(format!("extra{}.o", i));
+        std::fs::write(&ep_mlir, extra).map_err(|e| e.to_string())?;
+        mlir_to_llvmir(&ep_mlir, &ep_ll)?;
+        object_from_ll(&ep_ll, &ep_o)?;
+        objects.push(ep_o);
+    }
     std::fs::write(
         &c_p,
         eval_c_source(
@@ -402,17 +413,14 @@ pub fn eval_native(
     )
     .map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
-    run(
-        &cc,
-        &[
-            "-O2",
-            c_p.to_str().ok_or("bad c path")?,
-            o_p.to_str().ok_or("bad obj path")?,
-            "-o",
-            bin_p.to_str().ok_or("bad bin path")?,
-        ],
-        "differential link",
-    )?;
+    let mut link_args: Vec<&str> =
+        vec!["-O2", c_p.to_str().ok_or("bad c path")?];
+    for o in &objects {
+        link_args.push(o.to_str().ok_or("bad obj path")?);
+    }
+    link_args.push("-o");
+    link_args.push(bin_p.to_str().ok_or("bad bin path")?);
+    run(&cc, &link_args, "differential link")?;
     let out = Command::new(&bin_p)
         .output()
         .map_err(|e| format!("differential exec failed: {}", e))?;
@@ -437,6 +445,7 @@ pub fn bench_native(
     fn_name: &str,
     kinds: &[CK],
     iters: usize,
+    extra_mls: &[String],
 ) -> Result<u64, String> {
     let dir = scratch_dir("bench");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -452,17 +461,25 @@ pub fn bench_native(
     std::fs::write(&c_p, bench_c_source(fn_name, kinds, iters))
         .map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
-    run(
-        &cc,
-        &[
-            "-O2",
-            c_p.to_str().ok_or("bad c path")?,
-            o_p.to_str().ok_or("bad obj path")?,
-            "-o",
-            bin_p.to_str().ok_or("bad bin path")?,
-        ],
-        "harness link",
-    )?;
+    // Extra dependency modules compiled alongside the candidate.
+    let mut dep_objs: Vec<PathBuf> = Vec::new();
+    for (i, extra) in extra_mls.iter().enumerate() {
+        let ep_mlir = dir.join(format!("dep{}.mlir", i));
+        let ep_ll = dir.join(format!("dep{}_llvm.mlir", i));
+        let ep_o = dir.join(format!("dep{}.o", i));
+        std::fs::write(&ep_mlir, extra).map_err(|e| e.to_string())?;
+        mlir_to_llvmir(&ep_mlir, &ep_ll)?;
+        object_from_ll(&ep_ll, &ep_o)?;
+        dep_objs.push(ep_o);
+    }
+    let mut link_args: Vec<&str> =
+        vec!["-O2", c_p.to_str().ok_or("bad c path")?, o_p.to_str().ok_or("bad obj path")?];
+    for o in &dep_objs {
+        link_args.push(o.to_str().ok_or("bad dep obj")?);
+    }
+    link_args.push("-o");
+    link_args.push(bin_p.to_str().ok_or("bad bin path")?);
+    run(&cc, &link_args, "harness link")?;
 
     const ROUNDS: usize = 9;
     let mut samples: Vec<u64> = Vec::new();
@@ -507,7 +524,7 @@ mod tests {
         }
         let cand = sketch::parse(SUM_SRC).unwrap();
         check::check(&cand).unwrap();
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true, &lower::CallMap::new()).unwrap();
 
         let inputs = vec![Value::List(vec![3, 1, 4, 1, 5, 9, 2, 6])];
         let expect = interp::eval_candidate(&cand, &inputs, &interp::Ctx::wrapping())
@@ -517,6 +534,7 @@ mod tests {
             &cand.name,
             &[CK::List],
             &[3, 1, 4, 1, 5, 9, 2, 6],
+            &[],
             &[],
             &[],
             &[],
@@ -560,7 +578,7 @@ mod trap_tests {
 
         // Clean inputs: both tiers agree.
         let got =
-            eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], RetSpec::I64)
+            eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], &[], RetSpec::I64)
                 .expect("clean runs");
         assert_eq!(got, vec![12.0]);
 
@@ -573,7 +591,7 @@ mod trap_tests {
         assert!(killed.is_err());
         // ...and native must not return a value either.
         assert!(
-            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], RetSpec::I64).is_err(),
+            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], &[], RetSpec::I64).is_err(),
             "native returned a value where the oracle kills"
         );
     }
@@ -613,6 +631,7 @@ mod float_tests {
             &[],
             &[],
             &[],
+            &[],
             &[1.5, 2.5],
             RetSpec::F64,
         )
@@ -643,7 +662,7 @@ mod listf64_tests {
         .unwrap();
         crate::check::check(&cand).unwrap();
         let mlir =
-            lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true).unwrap();
+            lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true, &lower::CallMap::new()).unwrap();
         assert!(mlir.contains("memref<?xf64>"), "param type not f64");
         assert!(mlir.contains("memref.load") && mlir.contains("arith.addf"));
 
@@ -655,6 +674,7 @@ mod listf64_tests {
             &[CK::ListF64],
             &[],
             &[1.5, 2.0, -0.5],
+            &[],
             &[],
             &[],
             RetSpec::F64,

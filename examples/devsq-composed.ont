@@ -1,0 +1,8 @@
+// Mean squared deviation, COMPOSED over the vault's Stats.mean.
+// This is the M2 gate: decomposition beats model size.
+use Stats.mean
+wrapping
+fn Stats.meansqdev(%xs: List<F64>) -> F64
+  | %res >= 0
+  => [2.0, 4.0] -> 1.0 ± 1e-9
+  ?? [3.0] -> 0.0 ± 1e-12

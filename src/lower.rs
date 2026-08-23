@@ -13,6 +13,17 @@
 use crate::sketch::{BinOp, Builtin, Expr, Ty};
 use std::collections::HashMap;
 
+/// How to emit a call to one declared dependency.
+#[derive(Debug, Clone)]
+pub struct CallTarget {
+    /// The function symbol inside the dependency's compiled module.
+    pub symbol: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+pub type CallMap = HashMap<String, CallTarget>;
+
 /// Pretty-print an expression back to sketch surface syntax.
 /// Used by canonical wish serialization and sieve diagnostics.
 pub fn expr_display(e: &Expr) -> String {
@@ -114,6 +125,7 @@ struct Emitter {
     indent: usize,
     /// Wrapping tier: plain ops. Checked tier: widen-check-narrow expansion.
     wrapping: bool,
+    calls: CallMap,
 }
 
 impl Emitter {
@@ -123,6 +135,7 @@ impl Emitter {
             counter: 0,
             indent: 0,
             wrapping: false,
+            calls: CallMap::new(),
         }
     }
 
@@ -179,10 +192,12 @@ pub fn emit_fn(
     ret: &Ty,
     body: &Expr,
     wrapping: bool,
+    calls: &CallMap,
 ) -> Result<String, String> {
     let out_ty = mlir_ret_type(ret)?;
     let mut em = Emitter::new();
     em.wrapping = wrapping;
+    em.calls = calls.clone();
 
     let sig: Vec<String> = params
         .iter()
@@ -191,10 +206,10 @@ pub fn emit_fn(
 
     em.line("module {");
     em.indent += 1;
-    if !wrapping {
-        // Checked tier trap target; harnesses link an abort() implementation.
-        em.line("func.func private @ontic_trap() -> i64");
-    }
+    // Trap target declaration: used by checked-tier arithmetic AND by the
+    // broadcast length guard (a structural error in EVERY tier). Unused
+    // declarations are valid MLIR; harnesses link abort().
+    em.line("func.func private @ontic_trap() -> i64");
     em.line(&format!(
         "func.func @{}({}) -> {} {{",
         name,
@@ -212,6 +227,10 @@ pub fn emit_fn(
         .collect();
     let mut tyenv0: HashMap<String, Ty> =
         params.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
+    // Dep call results are typed by their targets.
+    for (p, t) in calls {
+        tyenv0.insert(p.clone(), t.ret);
+    }
 
     let result = emit_expr(body, &mut env, &mut tyenv0, &mut em)?;
     em.line(&format!("return {} : {}", result, out_ty));
@@ -250,10 +269,7 @@ fn emit_expr(
         Expr::BoolLit(b) => Ok(em.const_i64(if *b { 1 } else { 0 })),
         Expr::Var(n) => Ok(lookup(env, n)?.ssa.clone()),
         Expr::ListLit(items) => emit_list_lit(items, em),
-        Expr::Call(p, _) => Err(format!(
-            "lowering: vault call `{}` needs composite-module support (M2 step F)",
-            p
-        )),
+        Expr::Call(p, args) => emit_call(p, args, env, tyenv, em),
         Expr::Builtin(b, inner) => emit_builtin(*b, inner, env, tyenv, em),
         Expr::UnOp(crate::sketch::UnOp::Neg, inner) => {
             let x = emit_expr(inner, env, tyenv, em)?;
@@ -413,6 +429,82 @@ fn emit_builtin(
             em.line(&format!("{} = {} {} : f64", out, op, xf));
             Ok(out)
         }
+    }
+}
+
+
+/// Emit a vault call: evaluate args, widen numerics into F64 params, then
+/// `func.call` the dependency's compiled symbol.
+fn emit_call(
+    path: &str,
+    args: &[Expr],
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let target = em
+        .calls
+        .get(path)
+        .cloned()
+        .ok_or_else(|| format!("lowering: no call target for `{}`", path))?;
+    if args.len() != target.params.len() {
+        return Err(format!(
+            "call `{}` arity {} != {}",
+            path,
+            args.len(),
+            target.params.len()
+        ));
+    }
+    // Widen Int arguments headed into F64 params (matches checker promotion).
+    let mut prepared: Vec<(String, Ty)> = Vec::new();
+    for (a, pt) in args.iter().zip(target.params.iter()) {
+        let ssa = emit_expr(a, env, tyenv, em)?;
+        let at = expr_ty(a, tyenv);
+        let widened = if matches!(pt, Ty::F64) && matches!(at, Ty::Int) {
+            let w = em.fresh("widen");
+            em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, ssa));
+            w
+        } else {
+            ssa
+        };
+        prepared.push((widened, pt.clone()));
+    }
+
+    match target.ret {
+        Ty::F64 => {
+            let mut parts = Vec::new();
+            for ((ssa, pt)) in &prepared {
+                match pt {
+                    Ty::ListF64 | Ty::ListInt => parts.push(format!(
+                        "{}: {}",
+                        ssa,
+                        if matches!(pt, Ty::ListF64) { "memref<?xf64>" } else { "memref<?xi64>" }
+                    )),
+                    Ty::F64 => parts.push(format!("{}: f64", ssa)),
+                    _ => parts.push(format!("{}: i64", ssa)),
+                }
+            }
+            let out = em.fresh("call");
+            // func.call type suffix lists PARAM TYPES only, never SSA names.
+            let param_tys: Vec<&str> = prepared
+                .iter()
+                .map(|(_, pt)| match pt {
+                    Ty::ListF64 => "memref<?xf64>",
+                    Ty::ListInt => "memref<?xi64>",
+                    Ty::F64 => "f64",
+                    _ => "i64",
+                })
+                .collect();
+            em.line(&format!(
+                "{} = func.call @{}({}) : ({}) -> f64",
+                out,
+                target.symbol,
+                prepared.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(", "),
+                param_tys.join(", ")
+            ));
+            Ok(out)
+        }
+        _ => Err("lowering: only F64-returning dep calls supported".to_string()),
     }
 }
 
@@ -680,8 +772,19 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
         Expr::ListLit(_) => Ty::ListInt,
         Expr::Var(n) => tyenv.get(n).cloned().unwrap_or(Ty::Int),
         Expr::Call(p, _) => tyenv.get(p).cloned().unwrap_or(Ty::Int),
-        Expr::Builtin(b, _) if matches!(b, Builtin::Len | Builtin::Sum) => Ty::Int,
-        Expr::Builtin(_, _) => Ty::F64,
+        Expr::Builtin(b, inner) => match b {
+            Builtin::Len => Ty::Int,
+            // Reductions follow their list's element type.
+            Builtin::Sum | Builtin::Max | Builtin::Min => {
+                if matches!(expr_ty(inner, tyenv), Ty::ListF64) {
+                    Ty::F64
+                } else {
+                    Ty::Int
+                }
+            }
+            // Numeric transforms are always F64.
+            _ => Ty::F64,
+        },
         Expr::UnOp(crate::sketch::UnOp::Not, _) => Ty::Bool,
         Expr::UnOp(crate::sketch::UnOp::Neg, i) => expr_ty(i, tyenv),
         Expr::If(_, t, _) => expr_ty(t, tyenv),
@@ -766,7 +869,7 @@ mod tests {
     fn lower(src: &str) -> String {
         let c = sketch::parse(src).unwrap();
         check::check(&c).unwrap();
-        emit_fn(&c.name, &c.params, &c.ret, &c.body, true).expect("lowers")
+        emit_fn(&c.name, &c.params, &c.ret, &c.body, true, &CallMap::new()).expect("lowers")
     }
 
     #[test]
@@ -1018,5 +1121,48 @@ fn elem_to_f64(x: String, t: &Ty, em: &mut Emitter) -> String {
             w
         }
         _ => x,
+    }
+}
+
+/// Merge several emitted modules into one: inner `func.func`s concatenated
+/// inside a single `module { ... }`. Used so candidates calling vault
+/// functions validate AND link together with their dependencies.
+pub fn compose_modules(mlirs: &[String]) -> Result<String, String> {
+    if mlirs.is_empty() {
+        return Err("no modules to compose".to_string());
+    }
+    let mut out = String::from("module {\n");
+    for m in mlirs {
+        let t = m.trim();
+        let inner = t
+            .strip_prefix("module {")
+            .and_then(|x| x.strip_suffix('}'))
+            .ok_or_else(|| "compose: module not in expected shape".to_string())?;
+        // Dedent one level (our emitter uses two-space indent uniformly).
+        for line in inner.lines() {
+            let l = line.strip_prefix("  ").unwrap_or(line);
+            if !l.trim().is_empty() {
+                out.push_str("  ");
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+    }
+    out.push('}');
+    Ok(out)
+}
+
+#[cfg(test)]
+mod compose_tests {
+    use super::*;
+
+    #[test]
+    fn test_compose_merges_func_decls() {
+        let a = "module {\n  func.func @a(%\"x\": i64) -> i64 {\n    return %\"x\" : i64\n  }\n}".to_string();
+        let b = "module {\n  func.func @b() -> i64 {\n    return 0 : i64\n  }\n}".to_string();
+        let c = compose_modules(&[a, b]).unwrap();
+        assert!(c.contains("func.func @a"));
+        assert!(c.contains("func.func @b"));
+        assert_eq!(c.matches("module {").count(), 1);
     }
 }
