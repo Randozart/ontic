@@ -42,6 +42,8 @@ pub enum Backend {
     Llama,
     OpenAICompat,
     GeminiNative,
+    /// Type-directed random enumeration — the ablation baseline.
+    Uniform,
 }
 
 impl Backend {
@@ -50,6 +52,7 @@ impl Backend {
             Backend::Llama => "llama",
             Backend::OpenAICompat => "openai",
             Backend::GeminiNative => "gemini",
+            Backend::Uniform => "uniform",
         }
     }
 }
@@ -217,8 +220,16 @@ pub fn sample(
     cfg: &ForgeConfig,
     feedback: &[String],
 ) -> Result<(Vec<String>, Usage), String> {
+    // Uniform = local type-directed enumeration (ablation baseline).
+    if cfg.backend == Backend::Uniform {
+        let gens = crate::genrand::generate(gen, cfg.samples.max(1), cfg.seed);
+        return Ok((gens.into_iter().map(|g| g.text).collect(), Usage::zero()));
+    }
     // Cloud backends never touch the llama worker pool.
-    if cfg.backend != Backend::Llama {
+    if matches!(
+        cfg.backend,
+        Backend::OpenAICompat | Backend::GeminiNative
+    ) {
         return sample_cloud(gen, cfg, feedback);
     }
     let prompt = build_prompt(gen, feedback);

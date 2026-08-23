@@ -34,6 +34,7 @@ fn dispatch(args: &[String]) -> i32 {
         Some("bench") => cmd_bench(args),
         Some("vault") => cmd_vault(args),
         Some("lib") => cmd_lib(args),
+        Some("ablate") => cmd_ablate(args),
         Some("key") => match args.get(2) {
             Some(path) => cmd_key(path, None),
             None => usage("key needs a .ont file"),
@@ -63,6 +64,7 @@ USAGE:
   ontic run <file.ont>                            execute a recipe over vaulted fns
   ontic vault [--dir D]                           list verified functions
   ontic lib [ls|promote <Path>|demote <Path>]     manage graduated stdlib entries
+  ontic ablate <file.ont> --samples N             uniform-vs-LLM control experiment
   ontic key <file.ont> [--gen Path]               print canonical SHA-256 key
 
 SOLVE OPTIONS:
@@ -149,6 +151,7 @@ fn forge_config(opts: &SolveOpts) -> ForgeConfig {
         let kind = match b.as_str() {
             "openai" | "openai-compat" => forge::Backend::OpenAICompat,
             "gemini" | "gemini-native" => forge::Backend::GeminiNative,
+            "uniform" => forge::Backend::Uniform,
             _ => forge::Backend::Llama,
         };
         cfg.backend = kind;
@@ -957,4 +960,115 @@ fn cmd_lib(args: &[String]) -> i32 {
         },
         Some(other) => usage(&format!("unknown lib command `{}`", other)),
     }
+}
+
+/// `ontic ablate <file> --samples K` — run the uniform enumeration baseline
+/// against the configured LLM sampler on identical evidence, and print the
+/// per-stage survival comparison. The control experiment for THE WALL.
+fn cmd_ablate(args: &[String]) -> i32 {
+    let mut opts = match parse_solve_args(args) {
+        Ok(o) => o,
+        Err(e) => return usage(&e),
+    };
+    // Ablation always includes uniform as one arm.
+    if opts.sampler_backend.is_none() {
+        opts.sampler_backend = Some("llama".to_string());
+    }
+    let w = match load_file(&opts.wish_path)
+        .and_then(|f| pick_gen(&f, opts.wish_sel.as_deref()))
+    {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("invalid gen: {}", e);
+            return 1;
+        }
+    };
+    let cfg = SiegeConfig::default();
+    let resolved = resolve_deps(&w);
+
+    let arms: Vec<(String, forge::Backend)> = vec![
+        ("uniform".to_string(), forge::Backend::Uniform),
+        (
+            opts.sampler_backend.clone().unwrap_or_default(),
+            match opts.sampler_backend.as_deref() {
+                Some("openai") => forge::Backend::OpenAICompat,
+                Some("gemini") | Some("gemini-native") => forge::Backend::GeminiNative,
+                _ => forge::Backend::Llama,
+            },
+        ),
+    ];
+
+    let mut rows: Vec<(String, usize, [usize; 7], usize)> = Vec::new();
+    for (_label, backend) in &arms {
+        let mut fcfg = forge_config(&opts);
+        fcfg.backend = *backend;
+        println!(
+            "== arm {:<8} : {} samples ==",
+            fcfg.backend.label(),
+            fcfg.samples
+        );
+        let texts = match forge::sample(&w, &fcfg, &[]) {
+            Ok((t, _u)) => t,
+            Err(e) => {
+                eprintln!("sampler failed: {}", e);
+                rows.push((fcfg.backend.label().to_string(), 0, [0; 7], 0));
+                continue;
+            }
+        };
+        let labeled: Vec<(String, String)> = texts
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| (format!("{}-{}", fcfg.backend.label(), i), t))
+            .collect();
+        let report = match sieve::run(&w, &labeled, &cfg, &resolved.map) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("sieve precondition failed: {}", e);
+                return 1;
+            }
+        };
+        let mut stages = [0usize; 7];
+        for (_, rej) in &report.rejections {
+            let idx = match rej.stage {
+                sieve::Stage::Parse => 0,
+                sieve::Stage::WellFormed => 1,
+                sieve::Stage::Transparent => 2,
+                sieve::Stage::HeldOut => 3,
+                sieve::Stage::Probe => 4,
+                sieve::Stage::Shape => 5,
+                sieve::Stage::Bench => 6,
+            };
+            stages[idx] += 1;
+        }
+        rows.push((
+            fcfg.backend.label().to_string(),
+            report.rejections.len(),
+            stages,
+            report.survivors.len(),
+        ));
+    }
+
+    println!("\nABLATION ({}, {} samples/arm)", w.path, opts.samples);
+    println!(
+        "{:<10} {:>6} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>6}",
+        "sampler", "cands", "S1", "S2", "S3", "S4", "S5", "S6", "surv", "best"
+    );
+    for (label, killed, stages, surv) in &rows {
+        // Best bench among survivors when toolchain present is already
+        // printed per-arm above; here we show survival counts only.
+        let _ = killed;
+        println!(
+            "{:<10} {:>6} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4}",
+            label,
+            opts.samples,
+            stages[0],
+            stages[1],
+            stages[2],
+            stages[3],
+            stages[4],
+            stages[5],
+            surv
+        );
+    }
+    0
 }

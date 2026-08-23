@@ -90,6 +90,11 @@ pub fn expr_display(e: &Expr) -> String {
     }
 }
 
+/// Public alias so the uniform sampler renders operators identically.
+pub fn binop_display(op: BinOp) -> &'static str {
+    binop_str(op)
+}
+
 fn binop_str(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",

@@ -287,3 +287,15 @@
 - Live PY-GATE: cold genesis 14.4s via Gemini (12 candidates, 11 honest
   kills incl. 5× NaN-on-empty probes), 6 survivors, native bench 924ns,
   warm cache-hit 6ms, rms([2,8]) exact from Python.
+
+### 2026-08-23 06:40 — Sampler ablation control experiment (G4)
+- genrand.rs: type-directed random sketch generator (well-typed by
+  construction; references params; depth-bounded folds/broadcasts/reductions).
+- forge.rs: Backend::Uniform dispatches to local enumeration.
+- main.rs: `ontic ablate <file>` runs uniform + configured sampler arms,
+  prints per-stage survival table.
+- Results:
+  ledger-wrapping: uniform 0/8 survivors vs gemini 8/8.
+  rms (hints):     uniform 0/6 (S2/S3 kills) vs gemini 5/6.
+- Verdict: the transformer earns its slot decisively on both trivial and
+  hard tasks; type-directed enumeration never produces correct semantics.

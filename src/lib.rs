@@ -8,6 +8,7 @@ pub mod check;
 pub mod cloud;
 pub mod dotenv;
 pub mod forge;
+pub mod genrand;
 pub mod http;
 pub mod interp;
 pub mod lower;
