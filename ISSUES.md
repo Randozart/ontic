@@ -79,3 +79,9 @@
   batch completion still requires a stable endpoint.
 - HG2 (rms retry with hints) partially observed: hints visibly steered
   candidates toward two-pass shapes before outage. Re-run pending stability.
+
+### 2026-08-23 — Hand-counted JSON fixtures fail silently
+- Gemini response fixture with nested JSON-in-JSON was miscounted twice by
+  hand (`}]}}]],` vs `}]}]}],`). Fix: build fixtures programmatically from
+  json!() so structure is compiler-checked. Lesson: never hand-write nested
+  escape-heavy fixtures.

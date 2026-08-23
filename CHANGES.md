@@ -229,3 +229,14 @@
 
 ### 2026-08-23 04:10 — Plan: cloud sampler backends + provenance
 - docs/plans/2026-08-23-cloud-samplers.md; .env gitignored.
+
+### 2026-08-23 04:40 — Cloud samplers: dotenv + curl transport + openai/gemini backends
+- src/dotenv.rs: .env reader, never overrides real env.
+- src/cloud.rs: curl HTTPS transport; API key via 0600 header file
+  (`-H @file`), deleted on drop — never in argv/logs.
+- src/sampler.rs: Kind enum; openai chat/completions body+parse;
+  gemini generateContent with responseSchema {name,params[{n,t}],ret,body}
+  (type enum kills param-type typos by construction) + reassembly;
+  Usage accumulation. Fixture built programmatically after hand-counted
+  bracket fixture failed twice (ISSUES entry).
+- 107 tests green.

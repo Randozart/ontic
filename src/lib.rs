@@ -5,6 +5,8 @@
 //! the content-addressed vault.
 
 pub mod check;
+pub mod cloud;
+pub mod dotenv;
 pub mod forge;
 pub mod http;
 pub mod interp;
@@ -15,6 +17,7 @@ pub mod probes;
 pub mod program;
 pub mod recipe;
 pub mod rng;
+pub mod sampler;
 pub mod sha256;
 pub mod sieve;
 pub mod sketch;
