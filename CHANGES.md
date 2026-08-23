@@ -407,3 +407,7 @@ boundary found (multi-pass composition) was closed by architecture
 - MatVec NOT expressible: requires constructing List<F64> from computed
   scalars; sketch list literals only accept number tokens. Queued as
   language extension (expression-list literals or cons/append builtins).
+
+### 2026-08-23 08:50 — Plans + status report for next stretch
+- docs/plans/2026-08-23-expression-lists-and-ply.md (EL1-EL3, CT1, D1)
+- docs/reports/2026-08-23-status-report.md (comprehensive state capture)
