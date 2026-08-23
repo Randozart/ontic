@@ -77,6 +77,7 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(String, Box<Expr>, Box<Expr>),
     ListLit(Vec<i64>),
+    FloatListLit(Vec<f64>),
     /// Unary builtins: Len/Sum/Max/Min over lists; Sqrt/Exp/Log/Abs numeric;
     /// Range(n) builds 0..n.
     Builtin(Builtin, Box<Expr>),
@@ -636,15 +637,23 @@ impl Parser {
             }
             Some(Tok::Sym("[")) => {
                 self.pos += 1;
-                let mut items = Vec::new();
+                let mut ints: Vec<i64> = Vec::new();
+                let mut floats: Vec<f64> = Vec::new();
+                let mut is_float = false;
                 if !matches!(self.peek(), Some(Tok::Sym("]"))) {
                     loop {
-                        match self.peek() {
+                        match self.peek().cloned() {
                             Some(Tok::Int(v)) => {
-                                items.push(*v);
+                                ints.push(v);
+                                floats.push(v as f64);
                                 self.pos += 1;
                             }
-                            _ => return Err(err(self.offset(), "list literals hold ints only")),
+                            Some(Tok::Float(v)) => {
+                                is_float = true;
+                                floats.push(v);
+                                self.pos += 1;
+                            }
+                            _ => return Err(err(self.offset(), "list literal: expected number")),
                         }
                         match self.peek() {
                             Some(Tok::Sym(",")) => {
@@ -655,7 +664,11 @@ impl Parser {
                     }
                 }
                 self.eat_sym("]")?;
-                Ok(Expr::ListLit(items))
+                if is_float {
+                    Ok(Expr::FloatListLit(floats))
+                } else {
+                    Ok(Expr::ListLit(ints))
+                }
             }
             Some(Tok::Sym("(")) => {
                 self.pos += 1;

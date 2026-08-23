@@ -149,6 +149,10 @@ pub fn render(e: &Expr) -> String {
         FloatLit(v) => format!("{:.1}", v),
         BoolLit(b) => b.to_string(),
         Var(n) => format!("%{}", n),
+        FloatListLit(items) => {
+            let inner: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+            format!("[{}]", inner.join(", "))
+        }
         ListLit(items) => {
             let inner: Vec<String> = items.iter().map(|v| v.to_string()).collect();
             format!("[{}]", inner.join(", "))

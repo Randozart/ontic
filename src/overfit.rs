@@ -89,6 +89,9 @@ fn walk(e: &Expr, leaked: &HashSet<i64>, st: &mut Stats) {
         // int-typed); they are honest computation constants.
         Expr::FloatLit(_) => {}
         Expr::BoolLit(_) | Expr::Var(_) => {}
+        Expr::FloatListLit(items) => {
+            st.int_literals.extend(items.iter().map(|v| *v as i64));
+        }
         Expr::ListLit(items) => {
             st.int_literals.extend(items.iter().copied());
         }
@@ -166,7 +169,7 @@ fn guard_uses_example_literal(
 fn mentions_var(e: &Expr) -> bool {
     match e {
         Expr::Var(_) => true,
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::ListLit(_) => false,
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::ListLit(_) | Expr::FloatListLit(_) => false,
         Expr::UnOp(_, i) => mentions_var(i),
         Expr::Builtin(_, i) => mentions_var(i),
         Expr::Builtin2(_, a, b) => mentions_var(a) || mentions_var(b),

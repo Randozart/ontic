@@ -211,6 +211,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
         Expr::FloatLit(_) => Ok(Ty::F64),
         Expr::BoolLit(_) => Ok(Ty::Bool),
         Expr::ListLit(_) => Ok(Ty::ListInt),
+        Expr::FloatListLit(_) => Ok(Ty::ListF64),
         Expr::Var(n) => env
             .get(n)
             .cloned()

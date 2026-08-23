@@ -337,3 +337,12 @@
 - Header generated on-the-fly from stored sketch during pack (no filename
   pattern matching). UNPACK GATE: pack→unpack→C consumer → 2.5.
 - 126 tests green.
+
+### 2026-08-23 09:00 — D0-D2 partial: transform kernel vaulted, List<F64> return gap identified
+- transform.ont solved by hand (broadcast %pts * %s + %off), vaulted with
+  artifacts (.so + header). Header now supports list-return via void* ret.
+- FloatListLit added to sketch grammar/parser/display/expr_ty/interp/lower/
+  overfit/sieve (full sweep).
+- GAP IDENTIFIED: List<F64> native return is a Flat-MemRef struct; ctypes
+  segfaults on direct binding. Needs sret-aware wrapper or C shim.
+  Queued for pyous v2.

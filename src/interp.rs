@@ -371,6 +371,7 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
             .cloned()
             .ok_or_else(|| EvalError::Unbound(n.clone())),
         Expr::ListLit(items) => Ok(Value::List(items.clone())),
+        Expr::FloatListLit(items) => Ok(Value::FloatList(items.clone())),
         Expr::Builtin(b, inner) => eval_builtin(*b, inner, env, ctx),
         Expr::Builtin2(b, l, r) => eval_builtin2(*b, l, r, env, ctx),
         Expr::Call(p, args) => eval_call(p, args, env, ctx),

@@ -201,3 +201,70 @@ def gen(spec: str, tier: str = "wrapping", samples: int | None = None,
     kernel.__sieve_meta__ = meta
     kernel.__ptypes__ = ptypes
     return kernel
+
+
+class MemRefF64(ctypes.Structure):
+    """Flat-MemRef descriptor (for struct-return kernels)."""
+    _fields_ = [
+        ("allocated", ctypes.c_void_p),
+        ("aligned", ctypes.c_void_p),
+        ("offset", ctypes.c_long),
+        ("size", ctypes.c_long),
+        ("stride", ctypes.c_long),
+    ]
+
+
+class ListF64Kernel:
+    """Callable wrapper for List<F64> → List<F64> kernels."""
+    def __init__(self, lib, symbol):
+        self._fn = getattr(lib, symbol)
+        self._fn.restype = ctypes.c_void_p  # returns aligned pointer
+        # Args: (pts_ptr, pts_ptr, pts_o, pts_s, pts_st, scalar...)
+
+    def __call__(self, pts, *scalars):
+        import numpy as np
+        arr = np.ascontiguousarray(pts, dtype=np.float64)
+        n = len(arr)
+        ptr = arr.ctypes.data_as(ctypes.c_void_p)
+        # Flat-5 for the list param + any scalars
+        args = [ptr, ptr, ctypes.c_long(0), ctypes.c_long(n), ctypes.c_long(1)]
+        args.extend(ctypes.c_double(s) for s in scalars)
+        raw = self._fn(*args)
+        # raw is void* to the result buffer; size == n for elementwise ops
+        out_t = ctypes.c_double * n
+        buf = out_t.from_address(raw)
+        return np.frombuffer(buf, dtype=np.float64).copy()
+
+
+def gen_list_return(spec: str, tier: str = "wrapping",
+                    samples: int | None = None,
+                    vault_dir: str | None = None):
+    """Genesis for List<F64> → List<F64> kernels."""
+    import numpy as np
+
+    vd = Path(vault_dir or _vault_dir())
+    key = key_for_spec(spec, tier)
+    man_path = vd / f"{key}.json"
+    complete = False
+    if man_path.exists():
+        m = json.loads(man_path.read_text())
+        complete = bool(m.get("artifacts", {}).get("lib"))
+    if not complete:
+        if os.environ.get("ONTIC_AUTO_SOLVE") == "1":
+            tmp = tempfile.NamedTemporaryFile("w", suffix=".ont", delete=False)
+            tmp.write(_render(spec, tier))
+            tmp.close()
+            solve(tmp.name, samples)
+            os.unlink(tmp.name)
+        else:
+            raise GenMissing(f"key {key[:12]} not solved")
+
+    manifest = json.loads(man_path.read_text())
+    so_path = vd / manifest["artifacts"]["lib"]
+    sk = manifest.get("sketch", "")
+    sym = sk.split("@", 1)[1].split("(")[0].split()[0] if "@" in sk else "f"
+
+    lib = ctypes.CDLL(str(so_path))
+    kernel = ListF64Kernel(lib, sym)
+    kernel.__sieve_meta__ = manifest.get("last_solve", {})
+    return kernel

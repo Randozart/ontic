@@ -40,6 +40,10 @@ pub fn expr_display(e: &Expr) -> String {
                 .join(", ")
         ),
         Expr::Var(n) => format!("%{}", n),
+        Expr::FloatListLit(items) => {
+            let inner: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+            format!("[{}]", inner.join(", "))
+        }
         Expr::ListLit(items) => {
             let inner: Vec<String> = items.iter().map(|v| v.to_string()).collect();
             format!("[{}]", inner.join(", "))
@@ -282,6 +286,25 @@ fn emit_expr(
         Expr::BoolLit(b) => Ok(em.const_i64(if *b { 1 } else { 0 })),
         Expr::Var(n) => Ok(lookup(env, n)?.ssa.clone()),
         Expr::ListLit(items) => emit_list_lit(items, em),
+        Expr::FloatListLit(items) => {
+            // Allocate an f64 memref and store each element.
+            let len = em.const_index(items.len());
+            let m = em.fresh("flist");
+            em.line(&format!(
+                "{} = memref.alloc({}) : memref<?xf64>",
+                m, len
+            ));
+            for (i2, item) in items.iter().enumerate() {
+                let v = em.fresh("cf");
+                em.line(&format!("{} = arith.constant {} : f64", v, item));
+                let ix = em.const_index(i2);
+                em.line(&format!(
+                    "memref.store {}, {}[{}] : memref<?xf64>",
+                    v, m, ix
+                ));
+            }
+            Ok(m)
+        }
         Expr::Call(p, args) => emit_call(p, args, env, tyenv, em),
         Expr::Builtin(b, inner) => emit_builtin(*b, inner, env, tyenv, em),
         Expr::Builtin2(crate::sketch::Builtin::Index, l, r) => {
@@ -905,6 +928,7 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
         Expr::FloatLit(_) => Ty::F64,
         Expr::BoolLit(_) => Ty::Bool,
         Expr::ListLit(_) => Ty::ListInt,
+        Expr::FloatListLit(_) => Ty::ListF64,
         Expr::Var(n) => tyenv.get(n).cloned().unwrap_or(Ty::Int),
         Expr::Call(p, _) => tyenv.get(p).cloned().unwrap_or(Ty::Int),
         Expr::Builtin2(crate::sketch::Builtin::Index, l, _) => {
@@ -1323,8 +1347,8 @@ fn c_ret_ty(ty: &Ty) -> Result<&'static str, String> {
     match ty {
         Ty::Int | Ty::Bool => Ok("long"),
         Ty::F64 => Ok("double"),
-        // List-returning functions unsupported by the v0 ABI.
-        _ => Err("header: list-returning kernels unsupported".to_string()),
+        // Flat-MemRef return: 5-field struct, caller reads aligned+size.
+        Ty::ListInt | Ty::ListF64 => Ok("void*"),
     }
 }
 
