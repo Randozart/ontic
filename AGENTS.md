@@ -76,6 +76,9 @@ Patches are unacceptable. There is no "go fast and break things."
     is verified-once stdlib; synthesis owns the transform BETWEEN them.
     File evidence desugars to values at parse time — the sieve never
     touches disk.
+15. **KERNELS ARE ARTIFACTS**: humans edit wishes and recipes; vault entries
+    are immutable build outputs. Never hand-edit generated MLIR/objects/
+    headers — change the wish and re-solve instead.
 
 ## Architecture Pillars
 
