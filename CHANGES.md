@@ -167,3 +167,9 @@
   clang 18 defaults — renamed to `data` (ISSUES.md entry).
 - Gate: test_broadcast_native_parity (%xs*3.0+1.0 through native memref).
 - 96 tests green.
+
+### 2026-08-23 00:00 — Plans: M2 composition + paper-RE track
+- docs/plans/2026-08-22-m2-composition-and-ablation.md (vault-calls, lib
+  graduation, sampler ablation)
+- docs/plans/2026-08-22-paper-reverse-engineering-track.md (3DGS V0-V3,
+  PR0-PR6, Enzyme AD policy, stdlib doctrine)
