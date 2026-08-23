@@ -133,6 +133,105 @@ fn eval_builtin(b: Builtin, inner: &Expr, env: &Env, ctx: Ctx) -> Result<Value, 
     }
 }
 
+
+/// Elementwise broadcast arithmetic. Scalar operands apply to every element;
+/// both-list forms zip (length mismatch is an error). Int elements widen
+/// inside F64 broadcasts.
+fn eval_broadcast(
+    op: BinOp,
+    l: &Value,
+    r: &Value,
+) -> Option<Result<Value, EvalError>> {
+    let f = |a: f64, b: f64| -> f64 {
+        match op {
+            BinOp::Add => a + b,
+            BinOp::Sub => a - b,
+            BinOp::Mul => a * b,
+            BinOp::Div => a / b,
+            _ => a % b,
+        }
+    };
+    let i = |a: i64, b: i64| -> Result<i64, EvalError> {
+        match op {
+            BinOp::Add => a.checked_add(b).ok_or(EvalError::Overflow),
+            BinOp::Sub => a.checked_sub(b).ok_or(EvalError::Overflow),
+            BinOp::Mul => a.checked_mul(b).ok_or(EvalError::Overflow),
+            BinOp::Div => {
+                if b == 0 {
+                    Err(EvalError::DivByZero)
+                } else {
+                    a.checked_div(b).ok_or(EvalError::Overflow)
+                }
+            }
+            _ => {
+                if b == 0 {
+                    Err(EvalError::ModByZero)
+                } else {
+                    a.checked_rem(b).ok_or(EvalError::Overflow)
+                }
+            }
+        }
+    };
+    let widen = |xs: &[i64]| -> Vec<f64> { xs.iter().map(|x| *x as f64).collect() };
+    match (l, r) {
+        (Value::List(a), Value::List(b)) => {
+            if a.len() != b.len() {
+                return Some(Err(EvalError::TypeError(format!(
+                    "broadcast length mismatch: {} vs {}",
+                    a.len(),
+                    b.len()
+                ))));
+            }
+            let out: Result<Vec<i64>, EvalError> =
+                a.iter().zip(b.iter()).map(|(x, y)| i(*x, *y)).collect();
+            Some(out.map(Value::List))
+        }
+        (Value::FloatList(a), Value::FloatList(b)) => {
+            if a.len() != b.len() {
+                return Some(Err(EvalError::TypeError(format!(
+                    "broadcast length mismatch: {} vs {}",
+                    a.len(),
+                    b.len()
+                ))));
+            }
+            Some(Ok(Value::FloatList(
+                a.iter().zip(b.iter()).map(|(x, y)| f(*x, *y)).collect(),
+            )))
+        }
+        (Value::List(a), scalar) | (scalar, Value::List(a))
+            if matches!(scalar, Value::Int(_) | Value::Float(_)) =>
+        {
+            match (op, scalar) {
+                (_, Value::Int(s)) => {
+                    let out: Result<Vec<i64>, EvalError> =
+                        a.iter().map(|x| i(*x, *s)).collect();
+                    Some(out.map(Value::List))
+                }
+                (_, Value::Float(s)) => {
+                    let xf = widen(a);
+                    Some(Ok(Value::FloatList(
+                        xf.iter().map(|x| f(*x, *s)).collect(),
+                    )))
+                }
+                _ => None,
+            }
+        }
+        (Value::FloatList(a), scalar) | (scalar, Value::FloatList(a))
+            if matches!(scalar, Value::Int(_) | Value::Float(_)) =>
+        {
+            let s = match scalar {
+                Value::Int(x) => *x as f64,
+                Value::Float(x) => *x,
+                _ => return None,
+            };
+            Some(Ok(Value::FloatList(
+                a.iter().map(|x| f(*x, s)).collect(),
+            )))
+        }
+        _ => None,
+    }
+}
+
 fn int_of(v: &Value) -> Result<i64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -298,6 +397,14 @@ fn eval_binop(
                     rv
                 ))),
             };
+        }
+    }
+    if matches!(
+        op,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+    ) {
+        if let Some(res) = eval_broadcast(op, &lv, &rv) {
+            return res;
         }
     }
     match op {
@@ -488,5 +595,66 @@ mod float_tests {
             eval_candidate(&c, &[Value::Int(1)], Ctx::checked()),
             Err(EvalError::DivByZero)
         );
+    }
+}
+
+#[cfg(test)]
+mod broadcast_tests {
+    use super::*;
+    use crate::sketch;
+
+    #[test]
+    fn test_list_plus_scalar_broadcast() {
+        let c = sketch::parse("fn @b(%xs: List<Int>) -> List<Int> { %xs + 1 }").unwrap();
+        let v = eval_candidate(
+            &c,
+            &[Value::List(vec![1, 2, 3])],
+            Ctx::checked(),
+        )
+        .unwrap();
+        assert_eq!(v, Value::List(vec![2, 3, 4]));
+    }
+
+    #[test]
+    fn test_float_list_times_int_scalar_widens() {
+        let c = sketch::parse("fn @c(%xs: List<F64>) -> List<F64> { %xs * 2 }").unwrap();
+        let v = eval_candidate(
+            &c,
+            &[Value::FloatList(vec![1.5, 2.5])],
+            Ctx::checked(),
+        )
+        .unwrap();
+        assert_eq!(v, Value::FloatList(vec![3.0, 5.0]));
+    }
+
+    #[test]
+    fn test_zip_broadcast_and_mismatch() {
+        let c =
+            sketch::parse("fn @z(%a: List<F64>, %b: List<F64>) -> List<F64> { %a - %b }").unwrap();
+        let ok = eval_candidate(
+            &c,
+            &[Value::FloatList(vec![3.0, 4.0]), Value::FloatList(vec![1.0, 0.5])],
+            Ctx::checked(),
+        )
+        .unwrap();
+        assert_eq!(ok, Value::FloatList(vec![2.0, 3.5]));
+        assert!(eval_candidate(
+            &c,
+            &[Value::FloatList(vec![1.0]), Value::FloatList(vec![1.0, 2.0])],
+            Ctx::checked(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_sum_sqrt_builtins_semantics() {
+        let c = sketch::parse("fn @s(%xs: List<F64>) -> F64 { sqrt(sum(%xs)) }").unwrap();
+        let v = eval_candidate(
+            &c,
+            &[Value::FloatList(vec![4.0, 9.0, 16.0])],
+            Ctx::checked(),
+        )
+        .unwrap();
+        assert_eq!(v, Value::Float(29.0f64.sqrt()));
     }
 }

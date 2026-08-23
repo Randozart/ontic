@@ -149,3 +149,10 @@
   folds (sentinel init: i64::MIN/MAX, ±inf), numeric transforms via math
   dialect after sitofp promotion. expr_ty extended for Builtin arms.
 - 91 tests green.
+
+### 2026-08-22 03:40 — P2b: broadcasting semantics in the oracle
+- check.rs: list-op-scalar / zip-list typing; Int widens into F64 lists;
+  List<Int> op F64 promotes to List<F64>.
+- interp.rs: eval_broadcast — elementwise arith, scalar application,
+  zip with honest length-mismatch errors.
+- 95 tests green (broadcast + builtin semantics pinned).

@@ -133,13 +133,17 @@ fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Resu
             let rt = infer(r, env)?;
             // Numeric promotion: mixing Int with F64 widens to F64
             // (research-language convention, documented in AGENTS.md).
+            // Broadcasting: list op scalar (or same-kind lists) maps
+            // elementwise; Int scalars widen into F64 lists.
             match (&lt, &rt) {
                 (Ty::Int, Ty::Int) => Ok(Ty::Int),
-                (Ty::F64, _) | (_, Ty::F64)
-                    if matches!(lt, Ty::Int | Ty::F64) && matches!(rt, Ty::Int | Ty::F64) =>
-                {
-                    Ok(Ty::F64)
-                }
+                (Ty::F64, Ty::Int) | (Ty::Int, Ty::F64) | (Ty::F64, Ty::F64) => Ok(Ty::F64),
+                (Ty::ListInt, Ty::ListInt) => Ok(Ty::ListInt),
+                (Ty::ListInt, Ty::Int) | (Ty::Int, Ty::ListInt) => Ok(Ty::ListInt),
+                (Ty::ListF64, Ty::F64) | (Ty::F64, Ty::ListF64)
+                | (Ty::ListF64, Ty::Int) | (Ty::Int, Ty::ListF64)
+                | (Ty::ListF64, Ty::ListF64) => Ok(Ty::ListF64),
+                (Ty::ListInt, Ty::F64) | (Ty::F64, Ty::ListInt) => Ok(Ty::ListF64),
                 _ => Err(format!("arith on {} vs {}", lt.name(), rt.name())),
             }
         }
