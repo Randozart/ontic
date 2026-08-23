@@ -61,6 +61,16 @@ Patches are unacceptable. There is no "go fast and break things."
     visible contract word in the wish (`wrapping`, future `prop` proofs).
     Compiler mercy is forbidden: semantics must be identical between the
     oracle interpreter and emitted native code, tier for tier.
+12. **HINTS ARE ADVICE, NEVER EVIDENCE**: `hint` lines shape forge prompts
+    only. They never touch canonical text, vault keys, sieve verdicts, or
+    any acceptance decision.
+13. **EFFECTS LIVE IN RECIPES, NEVER WISHES**: file/console IO compiles to
+    deterministic driver C at the recipe layer. Wishes stay pure so probes,
+    composition, and native parity remain sound.
+14. **FORMATS ARE TRUSTED WRITERS**: parse/emit machinery (CSV/PLY/OBJ/text)
+    is verified-once stdlib; synthesis owns the transform BETWEEN them.
+    File evidence desugars to values at parse time — the sieve never
+    touches disk.
 
 ## Architecture Pillars
 
