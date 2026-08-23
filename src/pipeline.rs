@@ -111,6 +111,7 @@ pub fn mlir_to_llvmir(mlir_path: &std::path::Path, out_ll: &std::path::Path) -> 
         &[
             mlir_path.to_str().ok_or("bad mlir path")?,
             "--convert-scf-to-cf",
+            "--convert-math-to-llvm",
             "--finalize-memref-to-llvm",
             "--convert-arith-to-llvm",
             "--convert-index-to-llvm",

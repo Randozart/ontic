@@ -93,3 +93,14 @@
 All fixed with regression coverage via live-solve runs. Lesson: the first
 REAL float workload finds gaps no synthetic test imagined — keep live gates
 in the loop early.
+
+### 2026-08-23 — Sieve rejects correct-looking code because SPEC was wrong
+- pyous demo authored rms([2,8]) -> 5.0; true RMS = sqrt(34) = 5.831.
+  Forge produced CORRECT implementations; sieve killed them all against my
+  wrong evidence. Fixed the evidence, not the code. Textbook contract-first:
+  when human and machine disagree, check the human's arithmetic first.
+
+### 2026-08-23 — Ubuntu MLIR lacks implicit dialect loading (again)
+- math.sqrt custom ops rejected by mlir-translate like memref.dim before.
+  Fix: explicit --convert-math-to-llvm pass. Expect more of these; keep a
+  conversion-pass checklist per new dialect used.

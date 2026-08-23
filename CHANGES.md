@@ -275,3 +275,15 @@
 - NEW: `ontic key <file.ont>` — canonical SHA-256 authority for external
   tools (pyous shells out; no second implementation of canonical()).
 - Verified: ontic key output matches vault keys exactly.
+
+### 2026-08-23 06:00 — PY-GATE: pyous bridge + math-dialect lowering fix
+- examples/pyous.py: gen() spec→callable; key authority via `ontic key`
+  subprocess; vault cache-hit requires artifacts.lib; ONTIC_AUTO_SOLVE=1
+  opt-in solve-on-miss; numpy zero-copy Flat-5 args; __sieve_meta__.
+- pipeline.rs: --convert-math-to-llvm pass added (Ubuntu mlir-translate does
+  not auto-register math dialect — same class as memref.dim issue).
+- main.rs: --samples/--seed plumbing restored (regression found live);
+  fcfg hoisted; gemini default model gemini-3.5-flash-lite per provider.
+- Live PY-GATE: cold genesis 14.4s via Gemini (12 candidates, 11 honest
+  kills incl. 5× NaN-on-empty probes), 6 survivors, native bench 924ns,
+  warm cache-hit 6ms, rms([2,8]) exact from Python.
