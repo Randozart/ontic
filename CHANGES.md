@@ -226,3 +226,6 @@
 - docs/reports/2026-08-23-intermediate-report.md: milestones, measured
   results (convergence, lift curve, parity tables, capability boundary +
   architectural closure), honest limitations, roadmap state.
+
+### 2026-08-23 04:10 — Plan: cloud sampler backends + provenance
+- docs/plans/2026-08-23-cloud-samplers.md; .env gitignored.
