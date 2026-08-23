@@ -34,16 +34,57 @@ pub type Env = HashMap<String, Value>;
 /// errors. Default (checked) kills candidates on any overflow so probes can
 /// expose unguarded paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ctx {
+pub struct Tier {
     pub wrapping: bool,
+}
+
+impl Tier {
+    pub fn checked() -> Self {
+        Tier { wrapping: false }
+    }
+    pub fn wrapping() -> Self {
+        Tier { wrapping: true }
+    }
+}
+
+/// A resolvable vault dependency: its parsed candidate plus its own tier.
+#[derive(Debug, Clone)]
+pub struct DepFn {
+    pub cand: crate::sketch::Candidate,
+    pub tier: Tier,
+}
+
+pub type DepMap = std::collections::HashMap<String, DepFn>;
+
+/// Runtime context: semantics tier + resolvable vault dependencies.
+#[derive(Debug, Clone)]
+pub struct Ctx {
+    pub tier: Tier,
+    pub deps: std::sync::Arc<DepMap>,
 }
 
 impl Ctx {
     pub fn checked() -> Self {
-        Ctx { wrapping: false }
+        Ctx {
+            tier: Tier::checked(),
+            deps: std::sync::Arc::new(DepMap::new()),
+        }
     }
     pub fn wrapping() -> Self {
-        Ctx { wrapping: true }
+        Ctx {
+            tier: Tier::wrapping(),
+            deps: std::sync::Arc::new(DepMap::new()),
+        }
+    }
+    /// Tier-only constructor sharing the empty dep table.
+    pub fn of(tier: Tier) -> Self {
+        Ctx {
+            tier,
+            deps: std::sync::Arc::new(DepMap::new()),
+        }
+    }
+    pub fn is_wrapping(&self) -> bool {
+        self.tier.wrapping
     }
 }
 
@@ -68,7 +109,7 @@ fn as_promotable(v: &Value) -> Option<f64> {
 /// Unary builtin semantics. sum/max/min over lists; numeric transforms are
 /// IEEE F64 (Int args promote). max/min on empty lists are errors — there is
 /// no honest answer; probes expose them like division by zero.
-fn eval_builtin(b: Builtin, inner: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
+fn eval_builtin(b: Builtin, inner: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
     let v = eval_ctx(inner, env, ctx)?;
     match b {
         Builtin::Len => match v {
@@ -232,6 +273,37 @@ fn eval_broadcast(
     }
 }
 
+/// Resolve a vault call: bind args against the dep's parameters, evaluate
+/// the dep's stored candidate under the DEP'S OWN tier.
+fn eval_call(
+    path: &str,
+    args: &[Expr],
+    env: &Env,
+    ctx: &Ctx,
+) -> Result<Value, EvalError> {
+    let dep = ctx
+        .deps
+        .get(path)
+        .ok_or_else(|| EvalError::TypeError(format!("undeclared dependency `{}`", path)))?;
+    let params: Vec<Value> = args
+        .iter()
+        .map(|a| eval_ctx(a, env, ctx))
+        .collect::<Result<_, _>>()?;
+    if params.len() != dep.cand.params.len() {
+        return Err(EvalError::TypeError(format!(
+            "`{}` arity {} != {}",
+            path,
+            params.len(),
+            dep.cand.params.len()
+        )));
+    }
+    let mut dep_env: Env = Env::new();
+    for ((n, _), v) in dep.cand.params.iter().zip(params.iter()) {
+        dep_env.insert(n.clone(), v.clone());
+    }
+    eval_ctx(&dep.cand.body, &dep_env, ctx)
+}
+
 fn int_of(v: &Value) -> Result<i64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -241,11 +313,11 @@ fn int_of(v: &Value) -> Result<i64, EvalError> {
 
 /// Evaluate `expr` under `env` in the default (checked) tier.
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
-    eval_ctx(expr, env, Ctx::checked())
+    eval_ctx(expr, env, &Ctx::checked())
 }
 
-/// Evaluate `expr` under `env` with explicit semantics tier.
-pub fn eval_ctx(expr: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
+/// Evaluate `expr` under `env` with explicit semantics tier + dep table.
+pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
     match expr {
         Expr::IntLit(v) => Ok(Value::Int(*v)),
         // IEEE semantics: inf/NaN propagate; only div/mod by zero on INTEGERS errors.
@@ -257,17 +329,14 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
             .ok_or_else(|| EvalError::Unbound(n.clone())),
         Expr::ListLit(items) => Ok(Value::List(items.clone())),
         Expr::Builtin(b, inner) => eval_builtin(*b, inner, env, ctx),
-        Expr::Call(p, _) => Err(EvalError::TypeError(format!(
-            "vault call `{}` not wired in this evaluation context",
-            p
-        ))),
+        Expr::Call(p, args) => eval_call(p, args, env, ctx),
         Expr::UnOp(UnOp::Neg, inner) => {
             let inner_v = eval_ctx(inner, env, ctx)?;
             if let Value::Float(f) = inner_v {
                 return Ok(Value::Float(-f));
             }
             let v = int_of(&inner_v)?;
-            if ctx.wrapping {
+            if ctx.is_wrapping() {
                 Ok(Value::Int(v.wrapping_neg()))
             } else {
                 v.checked_neg().map(Value::Int).ok_or(EvalError::Overflow)
@@ -308,7 +377,7 @@ fn eval_fold(
     init: &Expr,
     body: &Expr,
     env: &Env,
-    ctx: Ctx,
+    ctx: &Ctx,
 ) -> Result<Value, EvalError> {
     let mut running = eval_ctx(init, env, ctx)?;
     let step = |env: &Env, item: Value, running: Value| -> Result<Value, EvalError> {
@@ -338,7 +407,7 @@ fn eval_binop(
     l: &Expr,
     r: &Expr,
     env: &Env,
-    ctx: Ctx,
+    ctx: &Ctx,
 ) -> Result<Value, EvalError> {
     // Short-circuit booleans first.
     if matches!(op, BinOp::And | BinOp::Or) {
@@ -415,7 +484,7 @@ fn eval_binop(
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let a = int_of(&lv)?;
             let b = int_of(&rv)?;
-            let out = match (op, ctx.wrapping) {
+            let out = match (op, ctx.tier.wrapping) {
                 (BinOp::Add, true) => Some(a.wrapping_add(b)),
                 (BinOp::Sub, true) => Some(a.wrapping_sub(b)),
                 (BinOp::Mul, true) => Some(a.wrapping_mul(b)),
@@ -494,7 +563,7 @@ fn op_str(op: BinOp) -> &'static str {
 pub fn eval_candidate(
     candidate: &crate::sketch::Candidate,
     inputs: &[Value],
-    ctx: Ctx,
+    ctx: &Ctx,
 ) -> Result<Value, EvalError> {
     let mut env: Env = HashMap::new();
     for ((name, _), v) in candidate.params.iter().zip(inputs.iter()) {
@@ -510,7 +579,7 @@ mod tests {
 
     fn run(src: &str, inputs: &[Value]) -> Result<Value, EvalError> {
         let c = sketch::parse(src).expect("candidate parses");
-        eval_candidate(&c, inputs, Ctx::checked())
+        eval_candidate(&c, inputs, &Ctx::checked())
     }
 
     #[test]
@@ -588,7 +657,7 @@ mod float_tests {
     fn test_ieee_division_propagates_inf() {
         // IEEE semantics: division by zero yields inf, not an error.
         let c = sketch::parse("fn @d(%a: F64) -> F64 { %a / 0.0 }").unwrap();
-        let v = eval_candidate(&c, &[Value::Float(1.0)], Ctx::checked()).expect("evals");
+        let v = eval_candidate(&c, &[Value::Float(1.0)], &Ctx::checked()).expect("evals");
         assert!(matches!(v, Value::Float(f) if f.is_infinite()));
     }
 
@@ -596,7 +665,7 @@ mod float_tests {
     fn test_int_div_zero_still_errors() {
         let c = sketch::parse("fn @i(%a: Int) -> Int { %a / 0 }").unwrap();
         assert_eq!(
-            eval_candidate(&c, &[Value::Int(1)], Ctx::checked()),
+            eval_candidate(&c, &[Value::Int(1)], &Ctx::checked()),
             Err(EvalError::DivByZero)
         );
     }
@@ -610,24 +679,16 @@ mod broadcast_tests {
     #[test]
     fn test_list_plus_scalar_broadcast() {
         let c = sketch::parse("fn @b(%xs: List<Int>) -> List<Int> { %xs + 1 }").unwrap();
-        let v = eval_candidate(
-            &c,
-            &[Value::List(vec![1, 2, 3])],
-            Ctx::checked(),
-        )
-        .unwrap();
+        let v = eval_candidate(&c, &[Value::List(vec![1, 2, 3])], &Ctx::checked())
+            .unwrap();
         assert_eq!(v, Value::List(vec![2, 3, 4]));
     }
 
     #[test]
     fn test_float_list_times_int_scalar_widens() {
         let c = sketch::parse("fn @c(%xs: List<F64>) -> List<F64> { %xs * 2 }").unwrap();
-        let v = eval_candidate(
-            &c,
-            &[Value::FloatList(vec![1.5, 2.5])],
-            Ctx::checked(),
-        )
-        .unwrap();
+        let v = eval_candidate(&c, &[Value::FloatList(vec![1.5, 2.5])], &Ctx::checked())
+            .unwrap();
         assert_eq!(v, Value::FloatList(vec![3.0, 5.0]));
     }
 
@@ -638,14 +699,14 @@ mod broadcast_tests {
         let ok = eval_candidate(
             &c,
             &[Value::FloatList(vec![3.0, 4.0]), Value::FloatList(vec![1.0, 0.5])],
-            Ctx::checked(),
+            &Ctx::checked(),
         )
         .unwrap();
         assert_eq!(ok, Value::FloatList(vec![2.0, 3.5]));
         assert!(eval_candidate(
             &c,
             &[Value::FloatList(vec![1.0]), Value::FloatList(vec![1.0, 2.0])],
-            Ctx::checked(),
+            &Ctx::checked(),
         )
         .is_err());
     }
@@ -656,7 +717,7 @@ mod broadcast_tests {
         let v = eval_candidate(
             &c,
             &[Value::FloatList(vec![4.0, 9.0, 16.0])],
-            Ctx::checked(),
+            &Ctx::checked(),
         )
         .unwrap();
         assert_eq!(v, Value::Float(29.0f64.sqrt()));

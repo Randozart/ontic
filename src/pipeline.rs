@@ -510,7 +510,7 @@ mod tests {
         let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true).unwrap();
 
         let inputs = vec![Value::List(vec![3, 1, 4, 1, 5, 9, 2, 6])];
-        let expect = interp::eval_candidate(&cand, &inputs, interp::Ctx::wrapping())
+        let expect = interp::eval_candidate(&cand, &inputs, &interp::Ctx::wrapping())
             .expect("interp evaluates");
         let got = eval_native(
             &mlir,
@@ -568,7 +568,7 @@ mod trap_tests {
         let killed = interp::eval_candidate(
             &cand,
             &[Value::List(vec![i64::MAX, 1])],
-            interp::Ctx::checked(),
+            &interp::Ctx::checked(),
         );
         assert!(killed.is_err());
         // ...and native must not return a value either.
@@ -603,7 +603,7 @@ mod float_tests {
         let expect = interp::eval_candidate(
             &cand,
             &[Value::Float(1.5), Value::Float(2.5)],
-            interp::Ctx::checked(),
+            &interp::Ctx::checked(),
         )
         .unwrap();
         let got = eval_native(
@@ -648,7 +648,7 @@ mod listf64_tests {
         assert!(mlir.contains("memref.load") && mlir.contains("arith.addf"));
 
         let inputs = vec![Value::FloatList(vec![1.5, 2.0, -0.5])];
-        let expect = interp::eval_candidate(&cand, &inputs, interp::Ctx::wrapping()).unwrap();
+        let expect = interp::eval_candidate(&cand, &inputs, &interp::Ctx::wrapping()).unwrap();
         let got = eval_native(
             &mlir,
             "dot",
@@ -694,7 +694,7 @@ mod broadcast_tests {
         let expect = interp::eval_candidate(
             &cand,
             &[Value::FloatList(vec![1.0, 2.0])],
-            interp::Ctx::checked(),
+            &interp::Ctx::checked(),
         )
         .unwrap();
         let got = eval_native(
