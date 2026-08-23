@@ -221,3 +221,8 @@
   printf logs. Effects run at driver runtime only; sieve untouched.
 - EG2 gate: e2e writes exact CSV/JSON/log content from a solved function.
 - 103 tests green.
+
+### 2026-08-23 04:00 — Intermediate report
+- docs/reports/2026-08-23-intermediate-report.md: milestones, measured
+  results (convergence, lift curve, parity tables, capability boundary +
+  architectural closure), honest limitations, roadmap state.
