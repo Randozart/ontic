@@ -184,3 +184,15 @@
 - Consumers carry total arms until runtime/emission wiring lands.
 - Lexer lesson recorded: duplicate speculative blocks from scripted edits —
   always grep for the pattern after scripted insertion.
+
+### 2026-08-23 01:40 — M2 step 3: vault resolution + sieve composition
+- sieve.rs: run/run_one take DepMap; S2 uses check_with when deps resolved;
+  ictx carries the dep table.
+- vault.rs: manifests store `wrapping` + `canonical`; find_by_path resolves
+  deps without their source files.
+- main.rs: resolve_deps() builds the flat closure from vault before sieving;
+  both forge and retry rounds thread it.
+- G3 CORE GATE: composed candidate calling Stats.mean survives the full
+  sieve (test_vault_call_composition_survives_sieve); undeclared calls die
+  at S2 with actionable reasons.
+- 98 tests green.

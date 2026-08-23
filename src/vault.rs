@@ -15,6 +15,8 @@ pub struct Entry {
     pub key: String,
     pub name: String,
     pub signature: String,
+    /// Declared tier at solve time (pre-manifest entries default checked).
+    pub wrapping: bool,
     pub sketch_text: String,
     pub mlir: String,
 }
@@ -55,10 +57,13 @@ impl Vault {
             .iter()
             .map(|(n, t)| format!("%{}: {}", n, t.name()))
             .collect();
+        let canonical = wish.canonical();
         let manifest = json!({
             "name": wish.name,
             "path": wish.path,
             "signature": format!("fn {}({}) -> {}", wish.path, params.join(", "), wish.ret.name()),
+            "wrapping": wish.wrapping,
+            "canonical": canonical,
             "sketch": sketch_text,
             "ns_per_call_note": "see solve output; timing is machine-specific",
         });
@@ -70,6 +75,21 @@ impl Vault {
         Ok(key)
     }
 
+    /// Find a solved entry by wish path (latest match wins).
+    /// Dependencies are resolved by path because their full canonical text
+    /// lives only in the manifest — stored at solve time.
+    pub fn find_by_path(&self, path: &str) -> Option<Entry> {
+        let mut best: Option<(String, Entry)> = None;
+        let entries = self.list().ok()?;
+        for e in entries {
+            // Signature starts with "fn <path>(" — match exactly.
+            if signature_path(&e.signature) == path {
+                best = Some((e.key.clone(), e));
+            }
+        }
+        best.map(|(_, e)| e)
+    }
+
     /// Fetch an entry by key.
     pub fn get(&self, key: &str) -> Option<Entry> {
         let mlir = fs::read_to_string(self.mlir_path(key)).ok()?;
@@ -79,6 +99,7 @@ impl Vault {
             key: key.to_string(),
             name: man.get("name")?.as_str()?.to_string(),
             signature: man.get("signature")?.as_str()?.to_string(),
+            wrapping: man.get("wrapping").and_then(|b| b.as_bool()).unwrap_or(false),
             sketch_text: man.get("sketch")?.as_str()?.to_string(),
             mlir,
         })
@@ -140,5 +161,14 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert!(all[0].key <= all[1].key);
         std::fs::remove_dir_all(&tmp).ok();
+    }
+}
+
+/// Extract the wish path from a stored signature line (`fn Path.name(...)`).
+fn signature_path(signature: &str) -> String {
+    let inner = signature.strip_prefix("fn ").unwrap_or(signature);
+    match inner.find('(') {
+        Some(i) => inner[..i].trim().to_string(),
+        None => inner.trim().to_string(),
     }
 }

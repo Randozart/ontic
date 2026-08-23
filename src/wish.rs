@@ -233,6 +233,13 @@ pub fn parse(src: &str) -> Result<Wish, String> {
             continue;
         }
         let ctx = |msg: String| format!("line {}: {}", lineno + 1, msg);
+        if let Some(dep) = line.strip_prefix("use ") {
+            if !path.is_empty() {
+                return Err(ctx("use lines must precede the fn signature".into()));
+            }
+            deps.push(dep.trim().to_string());
+            continue;
+        }
         if let Some(sig) = line.strip_prefix("fn ") {
             let sig = sig.trim();
             let (head, tail) = sig

@@ -2,6 +2,7 @@
 //! survivors, and inspect the `vault`. Hand-rolled arg parsing — no clap.
 
 use ontic::forge::{self, ForgeConfig};
+use ontic::interp;
 use ontic::lower;
 use ontic::pipeline;
 use ontic::program;
@@ -300,7 +301,8 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
         }
     };
 
-    let mut report = match sieve::run(&w, &candidates, &cfg) {
+    let deps = resolve_deps(&w);
+    let mut report = match sieve::run(&w, &candidates, &cfg, &deps) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("wish rejected by sieve preconditions: {}", e);
@@ -328,7 +330,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
                     .enumerate()
                     .map(|(i, t)| (format!("retry-{}", i), t))
                     .collect();
-                match sieve::run(&w, &cands, &cfg) {
+                match sieve::run(&w, &cands, &cfg, &deps) {
                     Ok(r2) => {
                         print_report(&r2);
                         merge_reports(&mut report, r2);
@@ -418,6 +420,31 @@ fn print_native_ranking(report: &sieve::SieveReport) {
             sieve::ast_size(&s.candidate.body)
         );
     }
+}
+
+/// Resolve a wish's declared dependencies against the vault by path.
+/// Flat closure: transitive calls must all be listed in the top wish.
+fn resolve_deps(w: &wish::Wish) -> interp::DepMap {
+    let vault_dir =
+        std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
+    let v = match Vault::open(&vault_dir) {
+        Ok(v) => v,
+        Err(_) => return interp::DepMap::new(),
+    };
+    let mut map = interp::DepMap::new();
+    for path in &w.deps {
+        if let Some(entry) = v.find_by_path(path) {
+            if let Ok(cand) = ontic::sketch::parse(&entry.sketch_text) {
+                let tier = if entry.wrapping {
+                    interp::Tier::wrapping()
+                } else {
+                    interp::Tier::checked()
+                };
+                map.insert(path.clone(), interp::DepFn { cand, tier });
+            }
+        }
+    }
+    map
 }
 
 /// Fold retry results into the primary report deterministically.

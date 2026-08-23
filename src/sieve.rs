@@ -125,11 +125,12 @@ pub fn run(
     wish: &Wish,
     texts: &[(String, String)],
     cfg: &SiegeConfig,
+    deps: &interp::DepMap,
 ) -> Result<SieveReport, String> {
     validate_wish(wish)?;
     let mut report = SieveReport::default();
     for (label, text) in texts {
-        match run_one(wish, text, cfg) {
+        match run_one(wish, text, cfg, deps) {
             Ok(survivor) => report.survivors.push(survivor),
             Err(rej) => report.rejections.push((label.clone(), rej)),
         }
@@ -138,25 +139,53 @@ pub fn run(
     Ok(report)
 }
 
+/// Dependency signature table for the typechecker.
+fn dep_sigs(deps: &interp::DepMap) -> crate::check::DepSigs {
+    deps.iter()
+        .map(|(p, d)| {
+            (
+                p.clone(),
+                (
+                    d.cand.params.iter().map(|(_, t)| t.clone()).collect(),
+                    d.cand.ret.clone(),
+                ),
+            )
+        })
+        .collect()
+}
+
 fn reject(stage: Stage, kind: KillKind, reason: String) -> Rejection {
     Rejection { stage, kind, reason }
 }
 
-fn run_one(wish: &Wish, text: &str, cfg: &SiegeConfig) -> Result<Survivor, Rejection> {
+fn run_one(
+    wish: &Wish,
+    text: &str,
+    cfg: &SiegeConfig,
+    deps: &interp::DepMap,
+) -> Result<Survivor, Rejection> {
     let tier = if wish.wrapping {
         interp::Tier::wrapping()
     } else {
         interp::Tier::checked()
     };
-    let ictx = interp::Ctx::of(tier);
+    let ictx = interp::Ctx {
+        tier,
+        deps: std::sync::Arc::new(deps.clone()),
+    };
     let _ = &ictx;
     // S1 parse
     let cand = sketch::parse(text)
         .map_err(|e| reject(Stage::Parse, KillKind::Invalid, format!("offset {}: {}", e.offset, e.message)))?;
 
-    // S2 well-formedness
-    check::check(&cand)
-        .map_err(|m| reject(Stage::WellFormed, KillKind::Invalid, m))?;
+    // S2 well-formedness (dep-aware when dependencies are resolved)
+    if deps.is_empty() {
+        check::check(&cand).map_err(|m| reject(Stage::WellFormed, KillKind::Invalid, m))?;
+    } else {
+        let sigs = dep_sigs(deps);
+        check::check_with(&cand, &sigs)
+            .map_err(|m| reject(Stage::WellFormed, KillKind::Invalid, m))?;
+    }
 
     // S3 transparent evidence
     eval_set(wish, &cand, &wish.transparent, &ictx).map_err(|(i, m)| {
@@ -388,7 +417,7 @@ fn Ledger.total(%items: List<Int>) -> Int
     fn test_honest_fold_survives_all_stages() {
         let w = sum_wish();
         let texts = vec![("honest".to_string(), HONEST.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.survivors.len(), 1, "{:?}", r.rejections);
         assert!(r.rejections.is_empty());
     }
@@ -398,7 +427,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         let w = sum_wish();
         let table = "fn @t(%items: List<Int>) -> Int { if len(%items) == 3 { fold %x in %items, %a from 0 { %a + %x } } else { if len(%items) == 0 { 0 } else { 5 } } }";
         let texts = vec![("table".to_string(), table.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.survivors.len(), 0);
         assert_eq!(r.rejections[0].1.stage, Stage::HeldOut);
         assert_eq!(r.rejections[0].1.kind, KillKind::Overfit);
@@ -415,7 +444,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         let sneaky =
             "fn @f(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { if %acc == 0 { %x } else { %acc + %x } } }";
         let texts = vec![("sneaky".to_string(), sneaky.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.survivors.len(), 0);
         assert_eq!(r.rejections[0].1.stage, Stage::Probe);
         assert_eq!(r.rejections[0].1.kind, KillKind::InvariantViolation);
@@ -426,7 +455,7 @@ fn Ledger.total(%items: List<Int>) -> Int
     fn test_malformed_candidate_dies_at_s1() {
         let w = sum_wish();
         let texts = vec![("junk".to_string(), "fn @t( {".to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.rejections[0].1.stage, Stage::Parse);
     }
 
@@ -436,7 +465,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         // Internally inconsistent: body is Int, own signature says Bool.
         let bad = "fn @t(%items: List<Int>) -> Bool { len(%items) }";
         let texts = vec![("badty".to_string(), bad.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.rejections[0].1.stage, Stage::WellFormed);
     }
 
@@ -445,7 +474,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         let w = sum_wish();
         let off = "fn @t(%items: List<Int>) -> Int { fold %x in %items, %acc from 1 { %acc + %x } }";
         let texts = vec![("offbyone".to_string(), off.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.rejections[0].1.stage, Stage::Transparent);
         assert_eq!(r.rejections[0].1.kind, KillKind::WrongOutput);
     }
@@ -460,7 +489,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         // blow up at S5 instead.
         let risky = "fn @f(%a: Int, %b: Int) -> Int { %a / %b }";
         let texts = vec![("risky".to_string(), risky.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert!(matches!(
             &r.rejections[0].1.kind,
             KillKind::RuntimeError | KillKind::InvariantViolation
@@ -475,7 +504,7 @@ fn Ledger.total(%items: List<Int>) -> Int
             ("honest".to_string(), HONEST.to_string()),
             ("padded".to_string(), padded.to_string()),
         ];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.survivors.len(), 2);
         for pair in r.survivors.windows(2) {
             assert!(pair[0].ns_per_call <= pair[1].ns_per_call);
@@ -485,8 +514,13 @@ fn Ledger.total(%items: List<Int>) -> Int
     #[test]
     fn test_bad_invariant_is_wish_error_not_candidate_kill() {
         let w = wish::parse("fn f(%a: Int) -> Int\n  | %zz > 0\n  => 1 -> 2\n").unwrap();
-        assert!(run(&w, &[("h".into(), HONEST.into())], &SiegeConfig::default())
-            .is_err());
+        assert!(run(
+            &w,
+            &[("h".into(), HONEST.into())],
+            &SiegeConfig::default(),
+            &interp::DepMap::new()
+        )
+        .is_err());
     }
 
     #[test]
@@ -505,7 +539,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         .unwrap();
         assert!(w.wrapping);
         let texts = vec![("honest".to_string(), HONEST.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.survivors.len(), 1, "{:?}", r.rejections);
     }
 
@@ -519,7 +553,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         .unwrap();
         let big = "fn @f(%items: List<Int>) -> Int { fold %x in %items, %acc from 1 { %acc * 1000000000 } }";
         let texts = vec![("big".to_string(), big.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
         assert_eq!(r.survivors.len(), 0);
         assert_eq!(r.rejections[0].1.stage, Stage::Probe);
         assert_eq!(r.rejections[0].1.kind, KillKind::RuntimeError);
@@ -530,5 +564,60 @@ fn Ledger.total(%items: List<Int>) -> Int
         let plain = wish::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
         let wrap = wish::parse("fn f(%a: Int) -> Int\n  wrapping\n  => 1 -> 2\n").unwrap();
         assert_ne!(plain.canonical(), wrap.canonical());
+    }
+}
+
+#[cfg(test)]
+mod compose_tests {
+    use super::*;
+    use crate::{sketch, wish};
+    use std::collections::HashMap;
+
+    const MEAN_SRC: &str =
+        "fn @mean(%xs: List<F64>) -> F64 { let %n = len(%xs); if %n == 0 { 0.0 } else { sum(%xs) / %n } }";
+    const DEVSQ_SRC: &str = "fn @devsq(%xs: List<F64>) -> F64 { let %m = Stats.mean(%xs); if len(%xs) == 0 { 0.0 } else { sum((%xs - %m) * (%xs - %m)) / len(%xs) } }";
+
+    /// G3 gate: a candidate calling a VAULT function composes through the
+    /// full sieve. The dep executes under its own tier.
+    #[test]
+    fn test_vault_call_composition_survives_sieve() {
+        let w = wish::parse(
+            "use Stats.mean\nfn DevSq(%xs: List<F64>) -> F64\n  | %res >= 0\n  => [2.0,4.0] -> 1.0 ± 1e-9\n  ?? [3.0] -> 0.0 ± 1e-12\n",
+        )
+        .expect("wish parses");
+        assert_eq!(w.deps, vec!["Stats.mean".to_string()]);
+
+        let mut deps: interp::DepMap = HashMap::new();
+        let mean_cand = sketch::parse(MEAN_SRC).unwrap();
+        check::check(&mean_cand).unwrap();
+        deps.insert(
+            "Stats.mean".to_string(),
+            interp::DepFn {
+                cand: mean_cand,
+                tier: interp::Tier::wrapping(),
+            },
+        );
+
+        let texts = vec![("composed".to_string(), DEVSQ_SRC.to_string())];
+        let r = run(&w, &texts, &SiegeConfig::default(), &deps).expect("wish valid");
+        assert_eq!(r.survivors.len(), 1, "{:?}", r.rejections);
+    }
+
+    #[test]
+    fn test_undeclared_call_killed_at_s2() {
+        let w = wish::parse(
+            "fn Bad(%xs: List<F64>) -> F64\n  => [1.0] -> 0.0\n",
+        )
+        .unwrap();
+        // No deps declared; candidate calls anyway.
+        let texts = vec![("bad".to_string(), DEVSQ_SRC.to_string())];
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new())
+            .expect("wish valid");
+        assert_eq!(r.rejections[0].1.stage, Stage::WellFormed);
+        assert!(
+            r.rejections[0].1.reason.contains("requires declared `use`"),
+            "{}",
+            r.rejections[0].1.reason
+        );
     }
 }
