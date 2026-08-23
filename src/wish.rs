@@ -90,6 +90,8 @@ pub struct Wish {
     /// Declared wrapping tier: arithmetic wraps mod 2^64 instead of killing
     /// candidates on overflow. Speed requires declaration (AGENTS rule 11).
     pub wrapping: bool,
+    /// Vault symbols this wish may call: `use Stats.mean` lines.
+    pub deps: Vec<String>,
 }
 
 /// Public wrapper so recipe.rs can reuse the example value grammar for
@@ -221,6 +223,7 @@ pub fn parse(src: &str) -> Result<Wish, String> {
     let mut ret = Ty::Int;
     let mut invariants = Vec::new();
     let mut wrapping = false;
+    let mut deps: Vec<String> = Vec::new();
     let mut transparent = Vec::new();
     let mut opaque = Vec::new();
 
@@ -293,6 +296,7 @@ pub fn parse(src: &str) -> Result<Wish, String> {
         opaque,
         auto_split: false,
         wrapping,
+        deps,
     };
     apply_auto_split(&mut wish);
     validate(&wish)?;
@@ -398,6 +402,9 @@ impl Wish {
         let trans: Vec<String> = self.transparent.iter().map(example_str).collect();
         let _ = &self.opaque; // opaque set deliberately excluded from canonical text
         let mut out = String::new();
+        for d in &self.deps {
+            out.push_str(&format!("use {}\n", d));
+        }
         if self.wrapping {
             out.push_str("wrapping\n");
         }

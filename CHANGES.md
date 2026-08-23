@@ -173,3 +173,14 @@
   graduation, sampler ablation)
 - docs/plans/2026-08-22-paper-reverse-engineering-track.md (3DGS V0-V3,
   PR0-PR6, Enzyme AD policy, stdlib doctrine)
+
+### 2026-08-23 01:00 — M2 step 1: call syntax + wish deps (parser layer)
+- sketch.rs: Expr::Call(path,args); lexer emits CallPath for dotted paths
+  followed by '(' with keyword/builtin guard (collision bug found by tests);
+  GBNF callx/cpath/callargs rules.
+- wish.rs: `use Path` dependency lines; canonical() includes them.
+- check.rs: check_with() types calls against DepSigs with numeric widening
+  into F64 params; bare infer rejects calls honestly.
+- Consumers carry total arms until runtime/emission wiring lands.
+- Lexer lesson recorded: duplicate speculative blocks from scripted edits —
+  always grep for the pattern after scripted insertion.

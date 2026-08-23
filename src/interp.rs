@@ -257,6 +257,10 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
             .ok_or_else(|| EvalError::Unbound(n.clone())),
         Expr::ListLit(items) => Ok(Value::List(items.clone())),
         Expr::Builtin(b, inner) => eval_builtin(*b, inner, env, ctx),
+        Expr::Call(p, _) => Err(EvalError::TypeError(format!(
+            "vault call `{}` not wired in this evaluation context",
+            p
+        ))),
         Expr::UnOp(UnOp::Neg, inner) => {
             let inner_v = eval_ctx(inner, env, ctx)?;
             if let Value::Float(f) = inner_v {

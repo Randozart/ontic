@@ -20,6 +20,14 @@ pub fn expr_display(e: &Expr) -> String {
         Expr::IntLit(v) => v.to_string(),
         Expr::FloatLit(v) => format!("{:e}", v),
         Expr::BoolLit(b) => b.to_string(),
+        Expr::Call(p, args) => format!(
+            "{}({})",
+            p,
+            args.iter()
+                .map(expr_display)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Expr::Var(n) => format!("%{}", n),
         Expr::ListLit(items) => {
             let inner: Vec<String> = items.iter().map(|v| v.to_string()).collect();
@@ -242,6 +250,10 @@ fn emit_expr(
         Expr::BoolLit(b) => Ok(em.const_i64(if *b { 1 } else { 0 })),
         Expr::Var(n) => Ok(lookup(env, n)?.ssa.clone()),
         Expr::ListLit(items) => emit_list_lit(items, em),
+        Expr::Call(p, _) => Err(format!(
+            "lowering: vault call `{}` needs composite-module support (M2 step F)",
+            p
+        )),
         Expr::Builtin(b, inner) => emit_builtin(*b, inner, env, tyenv, em),
         Expr::UnOp(crate::sketch::UnOp::Neg, inner) => {
             let x = emit_expr(inner, env, tyenv, em)?;
@@ -667,6 +679,7 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
         Expr::BoolLit(_) => Ty::Bool,
         Expr::ListLit(_) => Ty::ListInt,
         Expr::Var(n) => tyenv.get(n).cloned().unwrap_or(Ty::Int),
+        Expr::Call(p, _) => tyenv.get(p).cloned().unwrap_or(Ty::Int),
         Expr::Builtin(b, _) if matches!(b, Builtin::Len | Builtin::Sum) => Ty::Int,
         Expr::Builtin(_, _) => Ty::F64,
         Expr::UnOp(crate::sketch::UnOp::Not, _) => Ty::Bool,

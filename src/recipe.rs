@@ -96,6 +96,13 @@ fn split_chunks(src: &str) -> Result<(Vec<String>, Vec<String>), String> {
             prog_lines.push(trimmed.to_string());
             continue;
         }
+        if trimmed.starts_with("use ") && !in_program {
+            // Dependency declarations ride the pending prefix onto the wish.
+            let e = pending.get_or_insert_with(String::new);
+            e.push_str(line);
+            e.push('\n');
+            continue;
+        }
         if trimmed.starts_with("fn ") {
             // A pre-`fn` prefix (e.g. `wrapping`) belongs to this wish.
             wishes.push(pending.take().unwrap_or_default());

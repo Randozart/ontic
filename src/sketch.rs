@@ -3,7 +3,7 @@
 //! sampling) and `Parser` (Rust mirror, stage S1). They MUST change together.
 
 /// Sketch value types. v1: Int (i64), F64, Bool, List<Int>, List<F64>.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ty {
     Int,
     F64,
@@ -77,6 +77,9 @@ pub enum Expr {
     ListLit(Vec<i64>),
     /// Unary builtins: Len/Sum/Max/Min over lists; Sqrt/Exp/Log/Abs numeric.
     Builtin(Builtin, Box<Expr>),
+    /// Vault dependency call: Path.name(arg, ...). Validated against the
+    /// wish's declared `use` deps; executed from the vault at sieve time.
+    Call(String, Vec<Expr>),
     Fold {
         var: String,
         acc: String,
@@ -102,6 +105,8 @@ enum Tok {
     PIdent(String),
     /// `@name` lexed as one token — bare words are keyword-only otherwise.
     AtName(String),
+    /// Dotted vault-call path `Stats.mean` (only lexed when '(' follows).
+    CallPath(String),
     Word(&'static str),
     Sym(&'static str),
 }
@@ -212,13 +217,61 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
         }
         if c.is_ascii_alphabetic() || c == b'_' {
             let start = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
+            let mut j = i;
+            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                j += 1;
             }
+            // Builtin/keyword words never become vault calls, even before '('.
+            let is_keyword = matches!(
+                &src[start..j],
+                "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log"
+                    | "abs" | "fold" | "let" | "if" | "else" | "true"
+                    | "false" | "in" | "from" | "Int" | "F64" | "Bool"
+                    | "List" | "fn"
+            );
+            if !is_keyword {
+                // Speculative dotted-path scan: ident ('.' ident)* then ws+'('
+                // makes it a vault CALL path.
+                i = j;
+                let mut is_call = false;
+                let mut probe = j;
+                loop {
+                    let save = probe;
+                    while probe < b.len() && b[probe].is_ascii_whitespace() {
+                        probe += 1;
+                    }
+                    if probe < b.len() && b[probe] == b'.' {
+                        let mut q = probe + 1;
+                        if q < b.len()
+                            && (b[q].is_ascii_alphabetic() || b[q] == b'_')
+                        {
+                            while q < b.len()
+                                && (b[q].is_ascii_alphanumeric() || b[q] == b'_')
+                            {
+                                q += 1;
+                            }
+                            probe = q;
+                            i = q;
+                            continue;
+                        }
+                        probe = save;
+                        break;
+                    }
+                    if probe < b.len() && b[probe] == b'(' {
+                        is_call = true;
+                    }
+                    break;
+                }
+                if is_call {
+                    out.push(Lexed {
+                        tok: Tok::CallPath(src[start..i].to_string()),
+                        offset: start,
+                    });
+                    continue;
+                }
+            }
+            i = j;
             let word = &src[start..i];
-            // Keywords map to their 'static literals so Tok::Word needs no
-            // borrow of `src`; unknown words are hard S1 errors (catches
-            // typos like `Fold` early).
             let kw: Option<&'static str> = match word {
                 "fn" => Some("fn"),
                 "let" => Some("let"),
@@ -605,6 +658,24 @@ impl Parser {
                 self.eat_sym(")")?;
                 Ok(e)
             }
+            Some(Tok::CallPath(p)) => {
+                self.pos += 1;
+                self.eat_sym("(")?;
+                let mut args = Vec::new();
+                if !matches!(self.peek(), Some(Tok::Sym(")"))) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        match self.peek() {
+                            Some(Tok::Sym(",")) => {
+                                self.pos += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                self.eat_sym(")")?;
+                Ok(Expr::Call(p.clone(), args))
+            }
             Some(Tok::Word(w @ ("len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs"))) => {
                 self.pos += 1;
                 self.eat_sym("(")?;
@@ -711,7 +782,10 @@ addsym      ::= "+" | "-"
 mulx        ::= unx (ws mulsym ws unx)*
 mulsym      ::= "*" | "/" | "%"
 unx         ::= "-" unx | "!" unx | prim
-prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | callx | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+callx       ::= cpath ws "(" ws callargs ws ")"
+cpath       ::= ident ("." ident)*
+callargs    ::= e (ws "," ws e)*
 unop1       ::= "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs"
 pid         ::= "%" [a-zA-Z_] [a-zA-Z0-9_]*
 listlit     ::= "[" ws "]" | "[" ws int (ws "," ws int)* ws "]"

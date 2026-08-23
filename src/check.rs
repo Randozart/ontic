@@ -4,6 +4,9 @@
 use crate::sketch::{BinOp, Builtin, Candidate, Expr, Ty, UnOp};
 use std::collections::HashMap;
 
+/// Dependency signatures for vault calls: path -> (param types, ret).
+pub type DepSigs = HashMap<String, (Vec<Ty>, Ty)>;
+
 /// Static type of a builtin application.
 fn builtin_ty(b: Builtin, t: Ty) -> Result<Ty, String> {
     match b {
@@ -50,9 +53,150 @@ pub fn check(cand: &Candidate) -> Result<(), String> {
     Ok(())
 }
 
+/// Typecheck with declared vault dependencies available for call typing.
+pub fn check_with(cand: &Candidate, deps: &DepSigs) -> Result<(), String> {
+    let mut env: HashMap<String, Ty> = HashMap::new();
+    for (n, t) in &cand.params {
+        if env.insert(n.clone(), t.clone()).is_some() {
+            return Err(format!("duplicate parameter %{}", n));
+        }
+    }
+    for p in deps.keys() {
+        if env.contains_key(p) {
+            return Err(format!("dependency `{}` shadows a parameter", p));
+        }
+    }
+    // Body inference with dep-aware Call typing.
+    let body_ty = infer_dep(&cand.body, &env, deps)?;
+    if body_ty != cand.ret {
+        return Err(format!(
+            "body has type {}, signature demands {}",
+            body_ty.name(),
+            cand.ret.name()
+        ));
+    }
+    Ok(())
+}
+
+/// Dep-aware inference: identical to `infer` except Call arms consult
+/// declared dependency signatures (with numeric widening into F64 params).
+fn infer_dep(
+    e: &Expr,
+    env: &HashMap<String, Ty>,
+    deps: &DepSigs,
+) -> Result<Ty, String> {
+    match e {
+        Expr::Call(path, args) => typecheck_call(path, args, env, deps),
+        Expr::Let(n, value, body) => {
+            let vt = infer_dep(value, env, deps)?;
+            let mut scoped = env.clone();
+            scoped.insert(n.clone(), vt);
+            infer_dep(body, &scoped, deps)
+        }
+        Expr::Fold {
+            var,
+            acc,
+            list,
+            init,
+            body,
+        } => {
+            let list_ty = infer_dep(list, env, deps)?;
+            let elem = match list_ty {
+                Ty::ListInt => Ty::Int,
+                Ty::ListF64 => Ty::F64,
+                other => return Err(format!("fold over {}", other.name())),
+            };
+            let init_ty = infer_dep(init, env, deps)?;
+            let mut scoped = env.clone();
+            scoped.insert(var.clone(), elem);
+            scoped.insert(acc.clone(), init_ty.clone());
+            expect_dep(body, &scoped, &init_ty, deps)
+        }
+        Expr::If(c, t, f) => {
+            expect_ty_in(c, env, &Ty::Bool)?;
+            let tt = infer_dep(t, env, deps)?;
+            let ft = infer_dep(f, env, deps)?;
+            if tt != ft {
+                return Err(format!(
+                    "if branches disagree: {} vs {}",
+                    tt.name(),
+                    ft.name()
+                ));
+            }
+            Ok(tt)
+        }
+        Expr::UnOp(UnOp::Neg, inner) => {
+            let t = infer_dep(inner, env, deps)?;
+            match t {
+                Ty::Int | Ty::F64 => Ok(t),
+                other => Err(format!("neg on {}", other.name())),
+            }
+        }
+        Expr::UnOp(UnOp::Not, inner) => expect_ty_in(inner, env, &Ty::Bool),
+        Expr::BinOp(op, l, r) => infer_binop(*op, l, r, env),
+        leaf => infer(leaf, env),
+    }
+}
+
+fn expect_dep(
+    e: &Expr,
+    env: &HashMap<String, Ty>,
+    want: &Ty,
+    deps: &DepSigs,
+) -> Result<Ty, String> {
+    let got = infer_dep(e, env, deps)?;
+    if got != *want {
+        return Err(format!("expected {}, got {}", want.name(), got.name()));
+    }
+    Ok(got)
+}
+
+/// Typecheck one vault call against declared dependency signatures.
+fn typecheck_call(
+    path: &str,
+    args: &[Expr],
+    env: &HashMap<String, Ty>,
+    deps: &DepSigs,
+) -> Result<Ty, String> {
+    let (want_ps, want_rt) =
+        deps.get(path).ok_or_else(|| format!("call to undeclared dependency `{}`", path))?;
+    if args.len() != want_ps.len() {
+        return Err(format!(
+            "`{}` expects {} args, got {}",
+            path,
+            want_ps.len(),
+            args.len()
+        ));
+    }
+    for (i, (a, w)) in args.iter().zip(want_ps.iter()).enumerate() {
+        let got = infer_dep(a, env, deps)?;
+        let numeric_pair = matches!(
+            (got, *w),
+            (Ty::Int | Ty::F64, Ty::Int | Ty::F64)
+        );
+        let ok = got == *w || (numeric_pair && matches!(w, Ty::F64));
+        if !ok {
+            return Err(format!(
+                "`{}` arg #{} wants {}, got {}",
+                path,
+                i + 1,
+                w.name(),
+                got.name()
+            ));
+        }
+    }
+    Ok(*want_rt)
+}
+
 /// Infer the type of `e` under `env` (let/fold scopes included).
 fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
+    let _ = env;
     match e {
+        // Bare infer has no dep context: honest error unless check_with used.
+        Expr::Call(p, _) => Err(format!(
+            "call to `{}` requires declared `use` dependency (checker context missing)",
+            p
+        )),
         Expr::IntLit(_) => Ok(Ty::Int),
         Expr::FloatLit(_) => Ok(Ty::F64),
         Expr::BoolLit(_) => Ok(Ty::Bool),

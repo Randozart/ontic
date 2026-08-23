@@ -102,6 +102,13 @@ fn walk(e: &Expr, leaked: &HashSet<i64>, st: &mut Stats) {
         Expr::Builtin(_, inner) => {
             walk(inner, leaked, st);
         }
+        // Vault calls are opaque computation: count size, walk arguments.
+        Expr::Call(_, args) => {
+            st.has_len = true;
+            for a in args {
+                walk(a, leaked, st);
+            }
+        }
         Expr::UnOp(_, inner) => walk(inner, leaked, st),
         Expr::If(c, t, f) => {
             walk(c, leaked, st);
@@ -158,6 +165,7 @@ fn mentions_var(e: &Expr) -> bool {
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::ListLit(_) => false,
         Expr::UnOp(_, i) => mentions_var(i),
         Expr::Builtin(_, i) => mentions_var(i),
+        Expr::Call(_, args) => args.iter().any(mentions_var),
         Expr::If(c, t, f) => mentions_var(c) || mentions_var(t) || mentions_var(f),
         Expr::Let(_, t, f) => mentions_var(t) || mentions_var(f),
         Expr::BinOp(_, l, r) => mentions_var(l) || mentions_var(r),
