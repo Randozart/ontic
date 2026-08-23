@@ -354,3 +354,47 @@
 - pyous.py: ListF64Kernel fixed — per-call argtypes built from param
   count; MemRefF64 sret struct return works correctly.
 - First paper-RE artifact: spec → forge → sieve → native → Python → PLY.
+
+### 2026-08-23 — Session summary (2026-08-22 → 2026-08-23)
+
+## What Ontic is now
+
+A DSL whose products are verified native libraries. Users write `.ont`
+specifications; a local transformer proposes implementations; a deterministic
+seven-stage sieve proves them against evidence; output is a shared library +
+C header consumable from Python/C/C++/Rust via FFI.
+
+## Milestones hit
+
+| Gate | Proof |
+|------|-------|
+| M0 scaffold | Full sieve spine; lookup-table rejected at S4 |
+| M1 solve-from-spec | Forge-only candidates vaulted under same key as hand solution |
+| Step A native pipeline | mlir-opt validation mandatory; native benching |
+| Overflow semantics | Three tiers (wrapping/checked/proven); bit-parity gates |
+| Recipes | Linear programs over verified parts; effects layer |
+| Hints | Quarantined guidance channel |
+| P1 floats | F64 + tolerance contracts; IEEE oracle; native f64 parity |
+| P2 broadcasting | Elementwise ops through full stack; math dialect builtins |
+| Cloud samplers | openai/gemini backends with schema-constrained output |
+| Ablation | uniform 0% vs Gemini 83–100% survival |
+| Composition | rms closed via mean-calling devsq (decomposition beats model size) |
+| K-track FFI | Headers (.h), shared libs (.so), .ous pack/unpack |
+| PY-GATE | po.gen() spec→callable; numpy zero-copy; cache-hit <10ms |
+| D2-GATE | coords.txt → verified kernel → valid PLY |
+
+## Key numbers
+
+- 130+ behavioral tests green
+- ~10k lines dependency-light Rust (serde only)
+- Parity table: wrapping tier within striking distance of C -O2
+- Ablation: transformer decisively outperforms type-directed enumeration
+- Cold genesis ~14s (cloud); warm cache-hit <10ms
+
+## Architecture validated
+
+THE WALL held throughout: model output enters only as candidate text.
+Every acceptance decision traces to deterministic Rust. Differential
+gates caught five real bugs before they could ship. The one capability
+boundary found (multi-pass composition) was closed by architecture
+(vault composition), not model upgrades.
