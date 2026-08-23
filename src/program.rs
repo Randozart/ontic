@@ -35,6 +35,7 @@ pub fn fn_symbol(mlir: &str) -> Result<String, String> {
 /// Locals tracked while generating the driver body.
 enum Local {
     List { c_name: String, len: usize },
+    ListF { c_name: String, len: usize },
     Scalar { c_name: String },
     ScalarF { c_name: String },
 }
@@ -98,6 +99,17 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         body.push_str(&format!("  long {} = {}L;\n", cn, *b as i64));
                         locals.push((name.clone(), Local::Scalar { c_name: cn }));
                     }
+                    crate::wish::Value::FloatList(vs) => {
+                        let cn = format!("v{}", seq);
+                        seq += 1;
+                        let items: Vec<String> = vs.iter().map(|x| format!("{:e}", x)).collect();
+                        body.push_str(&format!(
+                            "  double {}[] = {{{}}};\n",
+                            cn,
+                            items.join(", ")
+                        ));
+                        locals.push((name.clone(), Local::ListF { c_name: cn, len: vs.len() }));
+                    }
                 }
             }
             Stmt::BindCall(target, callee, args) => {
@@ -116,6 +128,10 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                                 call_args
                                     .push_str(&format!("{0}, {0}, 0, {1}, 1, ", c_name, len));
                             }
+                            Local::ListF { c_name, len } => {
+                                call_args
+                                    .push_str(&format!("{0}, {0}, 0, {1}, 1, ", c_name, len));
+                            }
                             Local::Scalar { .. } | Local::ScalarF { .. } => {
                                 return Err(format!("%{} is scalar, `{}` wants list", v, callee))
                             }
@@ -127,7 +143,7 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                             Local::ScalarF { c_name } => {
                                 call_args.push_str(&format!("{}, ", c_name))
                             }
-                            Local::List { .. } => {
+                            Local::List { .. } | Local::ListF { .. } => {
                                 return Err(format!("%{} is list, `{}` wants scalar", v, callee))
                             }
                         },
@@ -141,7 +157,8 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                             crate::wish::Value::Bool(b) => {
                                 call_args.push_str(&format!("{}L, ", *b as i64))
                             }
-                            crate::wish::Value::List(_) => {
+                            crate::wish::Value::List(_)
+                            | crate::wish::Value::FloatList(_) => {
                                 return Err(format!("list literal arg to `{}` unsupported", callee))
                             }
                         },
@@ -170,7 +187,7 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         c_name
                     ));
                 }
-                Local::List { .. } => {
+                Local::List { .. } | Local::ListF { .. } => {
                     return Err(format!("cannot print list %{} (v0 prints scalars)", name))
                 }
             },

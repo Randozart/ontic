@@ -80,6 +80,7 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
         Expr::ListLit(items) => Ok(Value::List(items.clone())),
         Expr::Len(inner) => match eval_ctx(inner, env, ctx)? {
             Value::List(vs) => Ok(Value::Int(vs.len() as i64)),
+            Value::FloatList(vs) => Ok(Value::Int(vs.len() as i64)),
             other => Err(EvalError::TypeError(format!("len of non-list {}", other))),
         },
         Expr::UnOp(UnOp::Neg, inner) => {
@@ -131,16 +132,25 @@ fn eval_fold(
     env: &Env,
     ctx: Ctx,
 ) -> Result<Value, EvalError> {
-    let items = match eval_ctx(list, env, ctx)? {
-        Value::List(vs) => vs,
-        other => return Err(EvalError::TypeError(format!("fold over {}", other))),
-    };
     let mut running = eval_ctx(init, env, ctx)?;
-    for item in items {
+    let step = |env: &Env, item: Value, running: Value| -> Result<Value, EvalError> {
         let mut scoped = env.clone();
-        scoped.insert(var.to_string(), Value::Int(item));
+        scoped.insert(var.to_string(), item);
         scoped.insert(acc.to_string(), running);
-        running = eval_ctx(body, &scoped, ctx)?;
+        eval_ctx(body, &scoped, ctx)
+    };
+    match eval_ctx(list, env, ctx)? {
+        Value::List(vs) => {
+            for item in vs {
+                running = step(env, Value::Int(item), running)?;
+            }
+        }
+        Value::FloatList(vs) => {
+            for item in vs {
+                running = step(env, Value::Float(item), running)?;
+            }
+        }
+        other => return Err(EvalError::TypeError(format!("fold over {}", other))),
     }
     Ok(running)
 }

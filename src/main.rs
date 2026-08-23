@@ -373,14 +373,19 @@ fn native_rerank(w: &wish::Wish, survivors: &mut Vec<sieve::Survivor>) {
             w.wrapping,
         ) {
             Ok(mlir) => {
-                let is_list: Vec<bool> = s
+                let kinds: Vec<pipeline::CK> = s
                     .candidate
                     .params
                     .iter()
-                    .map(|(_, t)| matches!(t, sketch::Ty::ListInt))
+                    .map(|(_, t)| match t {
+                        sketch::Ty::ListInt => pipeline::CK::List,
+                        sketch::Ty::ListF64 => pipeline::CK::ListF64,
+                        sketch::Ty::F64 => pipeline::CK::F64,
+                        _ => pipeline::CK::I64,
+                    })
                     .collect();
                 // S7 input sizing: fixed 1024-element probe buffer, 2000 iters.
-                match pipeline::bench_native(&mlir, &s.candidate.name, &is_list, 2_000) {
+                match pipeline::bench_native(&mlir, &s.candidate.name, &kinds, 2_000) {
                     Ok(ns) => measured.push((s.clone(), ns)),
                     Err(e) => eprintln!(
                         "native bench failed for {}: {} (interpreter ranking stands for this candidate)",

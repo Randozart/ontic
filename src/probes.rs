@@ -33,6 +33,11 @@ fn edges(ty: &Ty) -> Vec<Value> {
             Value::List(vec![1]),
             Value::List(vec![-1]),
         ],
+        Ty::ListF64 => vec![
+            Value::FloatList(vec![]),
+            Value::FloatList(vec![1.5]),
+            Value::FloatList(vec![-2.5]),
+        ],
     }
 }
 
@@ -41,6 +46,13 @@ fn sample(ty: &Ty, rng: &mut Rng) -> Value {
         Ty::Int => Value::Int(rng.range_i64(INT_LO, INT_HI)),
         // Deterministic float sampling: integer grid scaled, no denormals.
         Ty::F64 => Value::Float(rng.range_i64(INT_LO * 8, INT_HI * 8) as f64 / 8.0),
+        Ty::ListF64 => {
+            let len = rng.below(LIST_LEN_MAX);
+            let items = (0..len)
+                .map(|_| rng.range_i64(ELEM_LO * 8, ELEM_HI * 8) as f64 / 8.0)
+                .collect();
+            Value::FloatList(items)
+        }
         Ty::Bool => Value::Bool(rng.next_u64() % 2 == 0),
         Ty::ListInt => {
             let len = rng.below(LIST_LEN_MAX);

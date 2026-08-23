@@ -294,10 +294,15 @@ fn check_invariants_on(
 /// Evidence comparison: exact for Int/Bool/List; abs+rel epsilon for F64
 /// outputs (tolerance is contract — cited verbatim in every kill reason).
 fn evidence_holds(want: &Value, got: &Value, tol: f64) -> bool {
+    let f_ok = |w: f64, g: f64| -> bool {
+        let slack = tol + 1e-9 * w.abs();
+        (g - w).abs() <= slack.max(f64::EPSILON * 4.0)
+    };
     match (want, got) {
-        (Value::Float(w), Value::Float(g)) => {
-            let slack = tol + 1e-9 * w.abs();
-            (g - w).abs() <= slack.max(f64::EPSILON * 4.0)
+        (Value::Float(w), Value::Float(g)) => f_ok(*w, *g),
+        (Value::FloatList(ws), Value::FloatList(gs)) => {
+            ws.len() == gs.len()
+                && ws.iter().zip(gs.iter()).all(|(w, g)| f_ok(*w, *g))
         }
         _ => want == got,
     }

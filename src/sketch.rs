@@ -2,13 +2,14 @@
 //! One grammar, two consumers: `GRAMMAR` (GBNF, constrains server-side
 //! sampling) and `Parser` (Rust mirror, stage S1). They MUST change together.
 
-/// Sketch value types. v1: Int (i64), F64, Bool, List<Int>.
+/// Sketch value types. v1: Int (i64), F64, Bool, List<Int>, List<F64>.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Int,
     F64,
     Bool,
     ListInt,
+    ListF64,
 }
 
 impl Ty {
@@ -19,6 +20,7 @@ impl Ty {
             Ty::F64 => "F64",
             Ty::Bool => "Bool",
             Ty::ListInt => "List<Int>",
+            Ty::ListF64 => "List<F64>",
         }
     }
 }
@@ -351,9 +353,19 @@ impl Parser {
             Some(Tok::Word("List")) => {
                 self.pos += 1;
                 self.eat_sym("<")?;
-                self.eat_word("Int")?;
-                self.eat_sym(">")?;
-                Ok(Ty::ListInt)
+                match self.peek() {
+                    Some(Tok::Word("Int")) => {
+                        self.pos += 1;
+                        self.eat_sym(">")?;
+                        Ok(Ty::ListInt)
+                    }
+                    Some(Tok::Word("F64")) => {
+                        self.pos += 1;
+                        self.eat_sym(">")?;
+                        Ok(Ty::ListF64)
+                    }
+                    _ => Err(err(self.offset(), "List element must be Int or F64")),
+                }
             }
             _ => Err(err(self.offset(), "expected type (`Int`, `Bool`, `List<Int>`)")),
         }
@@ -655,7 +667,7 @@ root        ::= name ws "(" ws params ws ")" ws "->" ws type ws "{" ws e ws "}" 
 name        ::= [a-z_] [a-zA-Z0-9_]*
 params      ::= param (ws "," ws param)*
 param       ::= pid ws ":" ws type
-type        ::= "Int" | "F64" | "Bool" | "List" "<" "Int" ">"
+type        ::= "Int" | "F64" | "Bool" | "List" "<" ("Int"| "F64") ">"
 e           ::= letx | ifx | orx
 letx        ::= "let" ws pid ws "=" ws e ws ";" ws e
 ifx         ::= "if" ws e ws "{" ws e ws "}" ws "else" ws "{" ws e ws "}"

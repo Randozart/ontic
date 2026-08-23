@@ -114,3 +114,14 @@
 - pipeline.rs: CK param kinds, f64 differential parity gate.
 - probes.rs: F64 edge/random domains. forge prompt documents IEEE semantics.
 - 88 tests green incl. native f64 bit-parity + no-trap-expansion guard.
+
+### 2026-08-22 01:30 — P1 Layer B: List<F64> end-to-end
+- Ty::ListF64 across sketch/wish/check/probes/lower/pipeline/program.
+- Interpreter: fold binds F64 elements from FloatList; Len accepts both lists.
+- Lowerer: tyenv now mutable and extended at Let/Fold bindings (fixes nested
+  float ops inside folds misclassifying as Int); list_memref() picks
+  memref<?xf64>; mlir_float() formatter guarantees decimal-point mantissas.
+- Evidence: element-wise tolerance comparison for FloatList outputs.
+- Pipeline: CK::ListF64 harness kind (double arrays); bench harness typed by CK.
+- Gate: test_float_list_fold_native_parity — interpreter ≡ native through
+  memref<?xf64>. 89 tests green.

@@ -70,10 +70,20 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             init,
             body,
         } => {
-            expect_ty(list, env, &Ty::ListInt)?;
+            let list_ty = infer(list, env)?;
+            let elem_ty = match list_ty {
+                Ty::ListInt | Ty::ListF64 => Ok(Ty::Int),
+                ref other => Err(format!("fold over {}", other.name())),
+            }?;
+            // Element type follows the list: List<F64> folds bind %v : F64.
+            let elem_ty = if matches!(list_ty, Ty::ListF64) {
+                Ty::F64
+            } else {
+                elem_ty
+            };
             let init_ty = infer(init, env)?;
             let mut scoped = env.clone();
-            scoped.insert(var.clone(), Ty::Int);
+            scoped.insert(var.clone(), elem_ty);
             scoped.insert(acc.clone(), init_ty.clone());
             expect_ty_in(body, &scoped, &init_ty)
         }

@@ -138,6 +138,7 @@ fn mlir_param_type(ty: &Ty) -> &'static str {
         Ty::Int | Ty::Bool => "i64",
         Ty::F64 => "f64",
         Ty::ListInt => "memref<?xi64>",
+        Ty::ListF64 => "memref<?xf64>",
     }
 }
 
@@ -145,8 +146,10 @@ fn mlir_ret_type(ty: &Ty) -> Result<&'static str, String> {
     match ty {
         Ty::Int | Ty::Bool => Ok("i64"),
         Ty::F64 => Ok("f64"),
-        // v0 functions return scalars; list-returning wishes are a planned M2 extension.
-        Ty::ListInt => Err("v0 lowering: list-returning functions not supported".to_string()),
+        // Functions return scalars; list-returning wishes are a planned M2 extension.
+        Ty::ListInt | Ty::ListF64 => {
+            Err("lowering: list-returning functions not supported".to_string())
+        }
     }
 }
 
@@ -188,10 +191,10 @@ pub fn emit_fn(
             ssa: format!("%{}", n),
         })
         .collect();
-    let tyenv0: HashMap<String, Ty> =
+    let mut tyenv0: HashMap<String, Ty> =
         params.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
 
-    let result = emit_expr(body, &mut env, &tyenv0, &mut em)?;
+    let result = emit_expr(body, &mut env, &mut tyenv0, &mut em)?;
     em.line(&format!("return {} : {}", result, out_ty));
     em.indent -= 1;
     em.line("}");
@@ -211,14 +214,18 @@ fn lookup<'a>(env: &'a [Binding], name: &str) -> Result<&'a Binding, String> {
 fn emit_expr(
     e: &Expr,
     env: &mut Vec<Binding>,
-    tyenv: &HashMap<String, Ty>,
+    tyenv: &mut HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
     match e {
         Expr::IntLit(v) => Ok(em.const_i64(*v)),
         Expr::FloatLit(v) => {
             let c = em.fresh("cf");
-            em.line(&format!("{} = arith.constant {:e} : f64", c, v));
+            em.line(&format!(
+                "{} = arith.constant {} : f64",
+                c,
+                mlir_float(*v)
+            ));
             Ok(c)
         }
         Expr::BoolLit(b) => Ok(em.const_i64(if *b { 1 } else { 0 })),
@@ -228,7 +235,7 @@ fn emit_expr(
             let m = emit_expr(inner, env, tyenv, em)?;
             let idx0 = em.const_index(0);
             let dim = em.fresh("dim");
-            let mty = "memref<?xi64>";
+            let mty = list_memref(inner, tyenv);
             // Generic op syntax: Ubuntu LLVM 18.1.3's mlir-opt rejects the
             // custom memref.dim assembly ("expected operation name in
             // quotes") regardless of shape; the generic form parses cleanly
@@ -260,7 +267,9 @@ fn emit_expr(
         }
         Expr::If(c, t, f) => emit_if(c, t, f, env, tyenv, em),
         Expr::Let(n, value, body) => {
+            let v_ty = expr_ty(value, tyenv);
             let v = emit_expr(value, env, tyenv, em)?;
+            tyenv.insert(n.clone(), v_ty);
             env.push(Binding {
                 name: n.clone(),
                 ssa: v,
@@ -302,7 +311,7 @@ fn emit_if(
     t: &Expr,
     f: &Expr,
     env: &mut Vec<Binding>,
-    tyenv: &HashMap<String, Ty>,
+    tyenv: &mut HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
     let cv = emit_expr(c, env, tyenv, em)?;
@@ -337,7 +346,7 @@ fn emit_fold(
     init: &Expr,
     body: &Expr,
     env: &mut Vec<Binding>,
-    tyenv: &HashMap<String, Ty>,
+    tyenv: &mut HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
     let init_v = emit_expr(init, env, tyenv, em)?;
@@ -345,7 +354,7 @@ fn emit_fold(
     let idx0 = em.const_index(0);
     let step = em.const_index(1);
     let dim = em.fresh("dim");
-    let mty = "memref<?xi64>";
+    let mty = list_memref(list, tyenv);
     // Generic op syntax — see Len arm note re Ubuntu mlir-opt memref.dim.
     em.line(&format!(
         "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
@@ -361,9 +370,19 @@ fn emit_fold(
     ));
     em.indent += 1;
 
+    // Load type follows the folded list's element kind.
     let elem = em.fresh("x");
-    em.line(&format!("{} = memref.load {}[{}] : {}", elem, m, iv, mty));
+    if expr_ty(list, tyenv) == Ty::ListF64 {
+        em.line(&format!(
+            "{} = memref.load {}[{}] : memref<?xf64>",
+            elem, m, iv
+        ));
+    } else {
+        em.line(&format!("{} = memref.load {}[{}] : {}", elem, m, iv, mty));
+    }
 
+    tyenv.insert(var.to_string(), if matches!(expr_ty(list, tyenv), Ty::ListF64) { Ty::F64 } else { Ty::Int });
+    tyenv.insert(acc.to_string(), if ty_str == "f64" { Ty::F64 } else { Ty::Int });
     env.push(Binding {
         name: var.to_string(),
         ssa: elem.clone(),
@@ -384,7 +403,7 @@ fn emit_binop(
     l: &Expr,
     r: &Expr,
     env: &mut Vec<Binding>,
-    tyenv: &HashMap<String, Ty>,
+    tyenv: &mut HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
     let lv = emit_expr(l, env, tyenv, em)?;
@@ -489,6 +508,23 @@ fn emit_checked_arith(
 }
 
 
+/// Format an f64 as an MLIR float literal: scientific notation whose
+/// mantissa ALWAYS carries a decimal point (`0e0` parses as op name `e0`).
+fn mlir_float(v: f64) -> String {
+    let s = format!("{:e}", v);
+    match s.split_once('e') {
+        Some((mantissa, exp)) => {
+            let m = if mantissa.contains('.') {
+                mantissa.to_string()
+            } else {
+                format!("{}.0", mantissa)
+            };
+            format!("{}e{}", m, exp)
+        }
+        None => s,
+    }
+}
+
 /// Static type of an expression for emission decisions (mirrors check::infer
 /// for the subset the emitter needs; candidates were typechecked already).
 fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
@@ -512,6 +548,15 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
             }
             _ => Ty::Bool,
         },
+    }
+}
+
+/// MemRef type string for a list-valued expression.
+fn list_memref(e: &Expr, tyenv: &HashMap<String, Ty>) -> &'static str {
+    if matches!(expr_ty(e, tyenv), Ty::ListF64) {
+        "memref<?xf64>"
+    } else {
+        "memref<?xi64>"
     }
 }
 

@@ -21,6 +21,7 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     List(Vec<i64>),
+    FloatList(Vec<f64>),
 }
 
 impl Value {
@@ -31,6 +32,7 @@ impl Value {
             Value::Float(_) => Ty::F64,
             Value::Bool(_) => Ty::Bool,
             Value::List(_) => Ty::ListInt,
+            Value::FloatList(_) => Ty::ListF64,
         }
     }
 }
@@ -41,6 +43,16 @@ impl fmt::Display for Value {
             Value::Int(v) => write!(f, "{}", v),
             Value::Float(v) => write!(f, "{}", v),
             Value::Bool(v) => write!(f, "{}", v),
+            Value::FloatList(vs) => {
+                write!(f, "[")?;
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
             Value::List(vs) => {
                 write!(f, "[")?;
                 for (i, v) in vs.iter().enumerate() {
@@ -104,13 +116,30 @@ fn parse_value(s: &str) -> Result<Value, String> {
     if let Some(inner) = t.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
         let inner = inner.trim();
         if inner.is_empty() {
+            // Empty list is Int-typed by default; typed by usage validation.
             return Ok(Value::List(Vec::new()));
         }
-        let mut items = Vec::new();
+        let is_float = inner
+            .split(',')
+            .any(|p| p.contains('.') || p.contains('e') || p.contains('E'));
+        let mut items_i = Vec::new();
+        let mut items_f = Vec::new();
         for part in inner.split(',') {
-            items.push(parse_int(part.trim())?);
+            let p = part.trim();
+            if is_float {
+                items_f.push(
+                    p.parse::<f64>()
+                        .map_err(|_| format!("bad float `{}`", p))?,
+                );
+            } else {
+                items_i.push(parse_int(p)?);
+            }
         }
-        return Ok(Value::List(items));
+        return Ok(if is_float {
+            Value::FloatList(items_f)
+        } else {
+            Value::List(items_i)
+        });
     }
     Ok(Value::Int(parse_int(t)?))
 }
@@ -283,6 +312,7 @@ fn parse_type(s: &str) -> Result<Ty, String> {
         "F64" => Ok(Ty::F64),
         "Bool" => Ok(Ty::Bool),
         "List<Int>" => Ok(Ty::ListInt),
+        "List<F64>" => Ok(Ty::ListF64),
         other => Err(format!(
             "unsupported type `{}` (v1: Int, F64, Bool, List<Int>)",
             other

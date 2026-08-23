@@ -22,6 +22,8 @@ fn scratch_dir(tag: &str) -> PathBuf {
 pub enum CK {
     /// memref<?xi64> expanded flat (5 args)
     List,
+    /// memref<?xf64> expanded flat (5 args)
+    ListF64,
     /// i64 scalar
     I64,
     /// f64 scalar
@@ -31,7 +33,7 @@ pub enum CK {
 impl CK {
     fn proto(&self) -> &'static str {
         match self {
-            CK::List => "void*, void*, long, long, long",
+            CK::List | CK::ListF64 => "void*, void*, long, long, long",
             CK::I64 => "long",
             CK::F64 => "double",
         }
@@ -172,30 +174,34 @@ pub fn validate_mlir(mlir_path: &std::path::Path) -> Result<(), String> {
 /// params pass as plain longs. The loop accumulates results into `acc`
 /// (printed, so it survives dead-code elimination); the binary times itself
 /// with CLOCK_MONOTONIC and prints `<total_ns> <acc>`.
-pub fn bench_c_source(fn_name: &str, params_is_list: &[bool], iters: usize) -> String {
+pub fn bench_c_source(fn_name: &str, kinds: &[CK], iters: usize) -> String {
     let mut proto = String::new();
     let mut decls = String::new();
     let mut init = String::new();
     let mut call_args = String::new();
-    for (i, is_list) in params_is_list.iter().enumerate() {
-        if *is_list {
-            if !proto.is_empty() {
-                proto.push_str(", ");
+    for (i, k) in kinds.iter().enumerate() {
+        if !proto.is_empty() {
+            proto.push_str(", ");
+        }
+        proto.push_str(k.proto());
+        match k {
+            CK::List | CK::ListF64 => {
+                let t = if matches!(k, CK::List) { "long" } else { "double" };
+                decls.push_str(&format!("  {}* b{} = malloc(N * sizeof({}));\n", t, i, t));
+                init.push_str(&format!(
+                    "    for (long i = 0; i < N; i++) b{0}[i] = ({1})(i % 97);\n",
+                    i, t
+                ));
+                call_args.push_str(&format!("b{}, b{}, 0, N, 1, ", i, i));
             }
-            proto.push_str("void*, void*, long, long, long");
-            decls.push_str(&format!("  long* b{} = malloc(N * sizeof(long));\n", i));
-            init.push_str(&format!(
-                "    for (long i = 0; i < N; i++) b{0}[i] = (i * 7 + 3) % 97;\n",
-                i
-            ));
-            call_args.push_str(&format!("b{}, b{}, 0, N, 1, ", i, i));
-        } else {
-            if !proto.is_empty() {
-                proto.push_str(", ");
+            CK::I64 => {
+                decls.push_str(&format!("  long s{} = 3;\n", i));
+                call_args.push_str(&format!("s{}, ", i));
             }
-            proto.push_str("long");
-            decls.push_str(&format!("  long s{} = 3;\n", i));
-            call_args.push_str(&format!("s{}, ", i));
+            CK::F64 => {
+                decls.push_str(&format!("  double s{} = 3.0;\n", i));
+                call_args.push_str(&format!("s{}, ", i));
+            }
         }
     }
     format!(
@@ -243,6 +249,7 @@ pub fn eval_c_source(
     fn_name: &str,
     kinds: &[CK],
     list_vals: &[i64],
+    list_f64_vals: &[f64],
     scalars_i64: &[i64],
     scalars_f64: &[f64],
     ret_f64: bool,
@@ -268,6 +275,20 @@ pub fn eval_c_source(
                     "b{0}, b{0}, 0, {1}, 1, ",
                     li,
                     list_vals.len()
+                ));
+                li += 1;
+            }
+            CK::ListF64 => {
+                let vals: Vec<String> = list_f64_vals.iter().map(|v| format!("{:e}", v)).collect();
+                decls.push_str(&format!(
+                    "  double d{0}[] = {{{1}}};\n",
+                    li,
+                    vals.join(", ")
+                ));
+                call_args.push_str(&format!(
+                    "d{0}, d{0}, 0, {1}, 1, ",
+                    li,
+                    list_f64_vals.len()
                 ));
                 li += 1;
             }
@@ -317,6 +338,7 @@ pub fn eval_native(
     fn_name: &str,
     kinds: &[CK],
     list_vals: &[i64],
+    list_f64_vals: &[f64],
     scalars_i64: &[i64],
     scalars_f64: &[f64],
     ret_f64: bool,
@@ -334,7 +356,15 @@ pub fn eval_native(
     object_from_ll(&ll_mlir, &o_p)?;
     std::fs::write(
         &c_p,
-        eval_c_source(fn_name, kinds, list_vals, scalars_i64, scalars_f64, ret_f64),
+        eval_c_source(
+            fn_name,
+            kinds,
+            list_vals,
+            list_f64_vals,
+            scalars_i64,
+            scalars_f64,
+            ret_f64,
+        ),
     )
     .map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
@@ -369,7 +399,7 @@ pub fn eval_native(
 pub fn bench_native(
     mlir_text: &str,
     fn_name: &str,
-    params_is_list: &[bool],
+    kinds: &[CK],
     iters: usize,
 ) -> Result<u64, String> {
     let dir = scratch_dir("bench");
@@ -383,7 +413,7 @@ pub fn bench_native(
     std::fs::write(&mlir_p, mlir_text).map_err(|e| e.to_string())?;
     mlir_to_llvmir(&mlir_p, &ll_mlir)?;
     object_from_ll(&ll_mlir, &o_p)?;
-    std::fs::write(&c_p, bench_c_source(fn_name, params_is_list, iters))
+    std::fs::write(&c_p, bench_c_source(fn_name, kinds, iters))
         .map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
     run(
@@ -453,6 +483,7 @@ mod tests {
             &[3, 1, 4, 1, 5, 9, 2, 6],
             &[],
             &[],
+            &[],
             false,
         )
         .expect("native evaluates");
@@ -465,10 +496,10 @@ mod tests {
 
     #[test]
     fn test_bench_harness_source_shape() {
-        let c = bench_c_source("f", &[true, false], 10);
+        let c = bench_c_source("f", &[CK::List, CK::I64], 10);
         assert!(c.contains("extern long f(void*, void*, long, long, long, long);"));
         assert!(c.contains("b0, b0, 0, N, 1, s1"));
-        let c_scalar_only = bench_c_source("g", &[false], 5);
+        let c_scalar_only = bench_c_source("g", &[CK::I64], 5);
         assert!(c_scalar_only.contains("extern long g(long);"));
     }
 }
@@ -492,7 +523,7 @@ mod trap_tests {
         let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false).unwrap();
 
         // Clean inputs: both tiers agree.
-        let got = eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], false)
+        let got = eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], false)
             .expect("clean runs");
         assert_eq!(got, 12.0);
 
@@ -505,7 +536,7 @@ mod trap_tests {
         assert!(killed.is_err());
         // ...and native must not return a value either.
         assert!(
-            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], false).is_err(),
+            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], false).is_err(),
             "native returned a value where the oracle kills"
         );
     }
@@ -544,7 +575,51 @@ mod float_tests {
             &[CK::F64, CK::F64],
             &[],
             &[],
+            &[],
             &[1.5, 2.5],
+            true,
+        )
+        .unwrap();
+        match expect {
+            Value::Float(f) => assert_eq!(got, f),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod listf64_tests {
+    use super::*;
+    use crate::{check, interp, lower, sketch};
+    use crate::wish::Value;
+
+    /// Layer B gate: fold over List<F64> matches the oracle bit-for-bit.
+    #[test]
+    fn test_float_list_fold_native_parity() {
+        if find_tool("mlir-opt").is_none() || find_tool("llc").is_none() {
+            eprintln!("toolchain missing; f64-list parity skipped");
+            return;
+        }
+        let cand = sketch::parse(
+            "fn @dot(%xs: List<F64>) -> F64 { fold %x in %xs, %acc from 0.0 { %acc + %x * 2.0 } }",
+        )
+        .unwrap();
+        crate::check::check(&cand).unwrap();
+        let mlir =
+            lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true).unwrap();
+        assert!(mlir.contains("memref<?xf64>"), "param type not f64");
+        assert!(mlir.contains("memref.load") && mlir.contains("arith.addf"));
+
+        let inputs = vec![Value::FloatList(vec![1.5, 2.0, -0.5])];
+        let expect = interp::eval_candidate(&cand, &inputs, interp::Ctx::wrapping()).unwrap();
+        let got = eval_native(
+            &mlir,
+            "dot",
+            &[CK::ListF64],
+            &[],
+            &[1.5, 2.0, -0.5],
+            &[],
+            &[],
             true,
         )
         .unwrap();
