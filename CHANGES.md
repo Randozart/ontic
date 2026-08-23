@@ -315,3 +315,8 @@
 - examples/dot.ont: Linalg.dot solved+vaulted with header/.so — first
   D-track kernel. Design lesson: partial kernels fail probes; totality via
   explicit guards is the Ontic way.
+
+### 2026-08-23 08:00 — L1: header quality (guards, extern C, ABI note)
+- emit_header: include guards ONTIC_<KEY8>_<NAME>_H, extern "C" wrapper,
+  ABI v1 comment block. Verified under clang AND clang++ consumers.
+- Header filename stays key-suffixed; guard derives from key+name.

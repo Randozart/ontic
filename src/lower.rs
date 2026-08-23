@@ -1335,31 +1335,36 @@ pub fn emit_header(
     name: &str,
     params: &[(String, Ty)],
     ret: &Ty,
+    key8: &str,
 ) -> Result<String, String> {
     let rt = c_ret_ty(ret)?;
     let mut parts: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
-            Ty::ListInt => parts.push(format!(
-                "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st"
-            )),
-            Ty::ListF64 => parts.push(format!(
+            Ty::ListInt | Ty::ListF64 => parts.push(format!(
                 "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st"
             )),
             Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
             Ty::F64 => parts.push(format!("double {n}")),
         }
     }
-    Ok(format!(
-        "// Ontic kernel (verified; do not edit — re-solve instead)\n{} {}({});\n",
-        rt,
-        name,
-        if parts.is_empty() {
-            "void".to_string()
-        } else {
-            parts.join(", ")
-        }
-    ))
+    // Deterministic sanitized guard tokens from key8 + kernel name.
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+            .collect()
+    };
+    let gk = sanitize(key8);
+    let gn = sanitize(name);
+    let args = if parts.is_empty() {
+        "void".to_string()
+    } else {
+        parts.join(", ")
+    };
+    let body = format!(
+        "// Ontic kernel (verified; do not edit - re-solve instead)\n// ABI v1: Flat-MemRef; List<T> param -> (allocated*, aligned*, offset, size, stride)\n#ifndef ONTIC_{gk}_{gn}_H\n#define ONTIC_{gk}_{gn}_H\n\n#ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n{rt} {name}({args});\n\n#ifdef __cplusplus\n}}\n#endif\n\n#endif /* ONTIC_{gk}_{gn}_H */\n"
+    );
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -1373,6 +1378,7 @@ mod header_tests {
             "mean",
             &[("xs".to_string(), Ty::ListF64)],
             &Ty::F64,
+            "deadbeef",
         )
         .unwrap();
         assert!(h.contains("double mean(void* xs_a, void* xs_b, long xs_o, long xs_s, long xs_st);"));
@@ -1389,6 +1395,7 @@ mod header_tests {
                 ("flag".to_string(), Ty::Bool),
             ],
             &Ty::Int,
+            "cafe1234",
         )
         .unwrap();
         assert!(h.contains("long f(void* items_a, void* items_b, long items_o, long items_s, long items_st, long k, long flag);"));
@@ -1396,8 +1403,8 @@ mod header_tests {
 
     #[test]
     fn test_header_deterministic() {
-        let a = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int).unwrap();
-        let b = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int).unwrap();
+        let a = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa").unwrap();
+        let b = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa").unwrap();
         assert_eq!(a, b);
     }
 }

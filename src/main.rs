@@ -733,6 +733,7 @@ fn emit_and_store(
                     &survivor.candidate.name,
                     &survivor.candidate.params,
                     &survivor.candidate.ret,
+                    &key8,
                 ) {
                     Ok(h) => match std::fs::write(&hdr_path, h) {
                         Ok(_) => {
