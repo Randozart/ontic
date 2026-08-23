@@ -120,7 +120,7 @@ fn val_text(v: &Value) -> String {
 /// Prefill strategy: the prompt ends with a literal `fn @`, so the model's
 /// first generated token is already inside the function name. Mellum2 is a
 /// code-completion model; completion-style prompting beats chat instructions.
-pub fn build_prompt(gen: &Gen, feedback: &[String]) -> String {
+pub fn build_prompt(gen: &Gen, feedback: &[String], deps_block: &str) -> String {
     let mut p = String::new();
     p.push_str("Complete one Ontic sketch implementation.\n");
     p.push_str("\n=== SPECIFICATION (notation only — never copy into code) ===\n");
@@ -146,6 +146,10 @@ pub fn build_prompt(gen: &Gen, feedback: &[String]) -> String {
         for h in &gen.hints {
             p.push_str(&format!("- {}\n", h));
         }
+    }
+    if !deps_block.is_empty() {
+        p.push_str("\n=== AVAILABLE FUNCTIONS (call them directly) ===\n");
+        p.push_str(deps_block);
     }
     if !feedback.is_empty() {
         p.push_str("\nRejected attempts and reasons (avoid these mistakes):\n");
@@ -219,6 +223,7 @@ pub fn sample(
     gen: &Gen,
     cfg: &ForgeConfig,
     feedback: &[String],
+    deps_block: &str,
 ) -> Result<(Vec<String>, Usage), String> {
     // Uniform = local type-directed enumeration (ablation baseline).
     if cfg.backend == Backend::Uniform {
@@ -230,9 +235,9 @@ pub fn sample(
         cfg.backend,
         Backend::OpenAICompat | Backend::GeminiNative
     ) {
-        return sample_cloud(gen, cfg, feedback);
+        return sample_cloud(gen, cfg, feedback, deps_block);
     }
-    let prompt = build_prompt(gen, feedback);
+    let prompt = build_prompt(gen, feedback, deps_block);
     let n = cfg.samples.max(1);
     let workers = worker_count().min(n);
     let done = AtomicUsize::new(0);
@@ -304,7 +309,7 @@ pub fn sample(
 
     // Cloud backends take a separate sequential path (curl per sample).
     if cfg.backend != Backend::Llama {
-        return sample_cloud(gen, cfg, feedback);
+        return sample_cloud(gen, cfg, feedback, deps_block);
     }
 
     let mut flat: Vec<(usize, String)> = results.into_iter().flatten().collect();
@@ -322,6 +327,7 @@ fn sample_cloud(
     gen: &Gen,
     cfg: &ForgeConfig,
     feedback: &[String],
+    deps_block: &str,
 ) -> Result<(Vec<String>, Usage), String> {
     let key = std::env::var(&cfg.api_key_env)
         .map_err(|_| format!("missing API key: set ${}", cfg.api_key_env))?;
@@ -333,7 +339,7 @@ fn sample_cloud(
         Backend::GeminiNative => sampler::gemini_url(&cfg.endpoint, &cfg.model),
         _ => format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/')),
     };
-    let llama_style_prompt = build_prompt(gen, feedback);
+    let llama_style_prompt = build_prompt(gen, feedback, deps_block);
     let chat_prompt_text = sampler::chat_prompt(&llama_style_prompt);
 
     let mut texts: Vec<(usize, String)> = Vec::new();
@@ -420,7 +426,7 @@ fn Ledger.total(%items: List<Int>) -> Int
     #[test]
     fn test_prompt_contains_only_transparent_evidence() {
         let w = gen::parse(GEN_SRC).unwrap();
-        let p = build_prompt(&w, &[]);
+        let p = build_prompt(&w, &[], "");
         assert!(p.contains("[1,2,3] -> 6"));
         assert!(p.contains("[] -> 0"));
         assert!(!p.contains("-> 9"), "opaque example leaked into prompt");
@@ -431,7 +437,7 @@ fn Ledger.total(%items: List<Int>) -> Int
     #[test]
     fn test_feedback_round_included_in_prompt() {
         let w = gen::parse(GEN_SRC).unwrap();
-        let p = build_prompt(&w, &["S5-probe/invariant-violation: res < 0".into()]);
+        let p = build_prompt(&w, &["S5-probe/invariant-violation: res < 0".into()], "");
         assert!(p.contains("Rejected attempts"));
         assert!(p.contains("invariant-violation"));
     }
@@ -479,7 +485,7 @@ fn Ledger.total(%items: List<Int>) -> Int
     #[test]
     fn test_prompt_ends_with_prefill_and_hides_opaque() {
         let w = gen::parse(GEN_SRC).unwrap();
-        let p = build_prompt(&w, &[]);
+        let p = build_prompt(&w, &[], "");
         assert!(p.ends_with("\nfn @"));
         assert!(!p.contains("-> 9"), "opaque example leaked into prompt");
     }
@@ -489,4 +495,22 @@ fn Ledger.total(%items: List<Int>) -> Int
 /// the cloud path reads symmetrically with the llama path).
 fn forge_extract_helper(raw: &str) -> String {
     extract_candidate(raw)
+}
+
+#[cfg(test)]
+mod deps_prompt_tests {
+    use super::*;
+    use crate::gen;
+
+    #[test]
+    fn test_dep_block_rendered_into_prompt() {
+        let w = gen::parse("fn f(%xs: List<F64>) -> F64\n  => [1.0] -> 1.0\n").unwrap();
+        let block = "Stats.mean(%xs: List<F64>) -> F64\n";
+        let p = build_prompt(&w, &[], block);
+        assert!(p.contains("AVAILABLE FUNCTIONS"));
+        assert!(p.contains("Stats.mean"));
+        // Empty block leaves no section header.
+        let p2 = build_prompt(&w, &[], "");
+        assert!(!p2.contains("AVAILABLE FUNCTIONS"));
+    }
 }

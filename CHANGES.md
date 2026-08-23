@@ -299,3 +299,9 @@
   rms (hints):     uniform 0/6 (S2/S3 kills) vs gemini 5/6.
 - Verdict: the transformer earns its slot decisively on both trivial and
   hard tasks; type-directed enumeration never produces correct semantics.
+
+### 2026-08-23 07:00 — B: forge prompts advertise available vault functions
+- build_prompt/sample take deps_block: resolved dependencies render as
+  AVAILABLE FUNCTIONS with signatures, enabling model-discovered composition.
+- ablate arm passes empty block (fair: uniform sampler cannot call).
+- Prompt-provenance test added. 120 tests green.

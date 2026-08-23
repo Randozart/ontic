@@ -391,6 +391,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
     let cfg = SiegeConfig::default();
 
     let fcfg = forge_config(opts);
+    let resolved = resolve_deps(&w);
     let candidates = if !opts.hand.is_empty() {
         match load_hand(&opts.hand) {
             Ok(c) => c,
@@ -411,7 +412,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
                 fcfg.samples, fcfg.backend.label(), fcfg.model
             );
         }
-        match forge::sample(&w, &fcfg, &[]) {
+        match forge::sample(&w, &fcfg, &[], &dep_block(&resolved)) {
             Ok((texts, usage)) => {
                 println!(
                     "tokens  : prompt={} completion={}",
@@ -426,8 +427,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
         }
     };
 
-    let resolved = resolve_deps(&w);
-    let first_prompt = forge::build_prompt(&w, &[]);
+    let first_prompt = forge::build_prompt(&w, &[], &dep_block(&resolved));
     let mut report = match sieve::run(&w, &candidates, &cfg, &resolved.map) {
         Ok(r) => r,
         Err(e) => {
@@ -453,7 +453,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             c
         };
         println!("feedback round: {} resamples at T={} ...", fcfg.samples, fcfg.temperature);
-        match forge::sample(&w, &fcfg, &feedback) {
+        match forge::sample(&w, &fcfg, &feedback, &dep_block(&resolved)) {
             Ok((texts, usage)) => {
                 println!(
                     "tokens  : prompt={} completion={} (retry)",
@@ -627,6 +627,27 @@ fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
         }
     }
     ResolvedDeps { map, mlirs, calls }
+}
+
+/// Render the AVAILABLE FUNCTIONS block for forge prompts: each resolved
+/// dependency's signature so the model can discover compositions itself.
+fn dep_block(resolved: &ResolvedDeps) -> String {
+    let mut out = String::new();
+    for (path, dep) in &resolved.map {
+        let params: Vec<String> = dep
+            .cand
+            .params
+            .iter()
+            .map(|(n, t)| format!("%{}: {}", n, t.name()))
+            .collect();
+        out.push_str(&format!(
+            "fn {}({}) -> {}\n",
+            path,
+            params.join(", "),
+            dep.cand.ret.name()
+        ));
+    }
+    out
 }
 
 /// Fold retry results into the primary report deterministically.
@@ -1007,7 +1028,7 @@ fn cmd_ablate(args: &[String]) -> i32 {
             fcfg.backend.label(),
             fcfg.samples
         );
-        let texts = match forge::sample(&w, &fcfg, &[]) {
+        let texts = match forge::sample(&w, &fcfg, &[], &dep_block(&resolved)) {
             Ok((t, _u)) => t,
             Err(e) => {
                 eprintln!("sampler failed: {}", e);
