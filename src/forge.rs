@@ -107,6 +107,12 @@ pub fn build_prompt(wish: &Wish, feedback: &[String]) -> String {
             p.push_str(&format!("=> {} -> {}\n", ins.join(", "), val_text(&ex.output)));
         }
     }
+    if !wish.hints.is_empty() {
+        p.push_str("\n=== AUTHOR GUIDANCE ===\n");
+        for h in &wish.hints {
+            p.push_str(&format!("- {}\n", h));
+        }
+    }
     if !feedback.is_empty() {
         p.push_str("\nRejected attempts and reasons (avoid these mistakes):\n");
         for f in feedback {

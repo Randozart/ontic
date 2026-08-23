@@ -930,12 +930,12 @@ mod tier_tests {
     #[test]
     fn test_checked_tier_expands_wide_check_and_trap() {
         let c = sketch::parse("fn @f(%a: Int, %b: Int) -> Int { %a + %b }").unwrap();
-        let ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, false).unwrap();
+        let ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, false, &CallMap::new()).unwrap();
         assert!(ir.contains("ontic_trap"), "missing trap decl");
         assert!(ir.contains("i128"));
         assert!(ir.contains("scf.if"));
         // Wrapping tier of the same body stays plain.
-        let plain = emit_fn(&c.name, &c.params, &c.ret, &c.body, true).unwrap();
+        let plain = emit_fn(&c.name, &c.params, &c.ret, &c.body, true, &CallMap::new()).unwrap();
         assert!(!plain.contains("i128"));
         assert!(plain.contains("arith.addi"));
     }

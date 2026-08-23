@@ -537,8 +537,8 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
             RetSpec::I64,
+            &[],
         )
         .expect("native evaluates");
         assert_eq!(got, vec![31.0], "sanity");
@@ -574,11 +574,11 @@ mod trap_tests {
         }
         let cand = sketch::parse("fn @f(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { %acc + %x } }").unwrap();
         check::check(&cand).unwrap();
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false, &lower::CallMap::new()).unwrap();
 
         // Clean inputs: both tiers agree.
         let got =
-            eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], &[], RetSpec::I64)
+            eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], RetSpec::I64, &[])
                 .expect("clean runs");
         assert_eq!(got, vec![12.0]);
 
@@ -591,7 +591,7 @@ mod trap_tests {
         assert!(killed.is_err());
         // ...and native must not return a value either.
         assert!(
-            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], &[], RetSpec::I64).is_err(),
+            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], RetSpec::I64, &[]).is_err(),
             "native returned a value where the oracle kills"
         );
     }
@@ -614,7 +614,7 @@ mod float_tests {
         let cand = sketch::parse("fn @m(%a: F64, %b: F64) -> F64 { %a * %b + %a }").unwrap();
         crate::check::check(&cand).unwrap();
         // Checked tier must NOT wrap float math in i128 checks.
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false, &lower::CallMap::new()).unwrap();
         assert!(!mlir.contains("i128"), "float math entered trap expansion");
         assert!(mlir.contains("arith.mulf"));
 
@@ -631,9 +631,9 @@ mod float_tests {
             &[],
             &[],
             &[],
-            &[],
             &[1.5, 2.5],
             RetSpec::F64,
+            &[],
         )
         .unwrap();
         match expect {
@@ -676,8 +676,8 @@ mod listf64_tests {
             &[1.5, 2.0, -0.5],
             &[],
             &[],
-            &[],
             RetSpec::F64,
+            &[],
         )
         .unwrap();
         match expect {
@@ -706,7 +706,7 @@ mod broadcast_tests {
         )
         .unwrap();
         crate::check::check(&cand).unwrap();
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true)
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true, &lower::CallMap::new())
             .expect("lowers");
         assert!(mlir.contains("memref.alloc"), "no result alloc");
         assert!(mlir.contains("arith.mulf"), "no elementwise mulf");
@@ -726,6 +726,7 @@ mod broadcast_tests {
             &[],
             &[],
             RetSpec::ListF64,
+            &[],
         )
         .expect("native runs");
         match expect {

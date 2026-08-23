@@ -92,6 +92,9 @@ pub struct Wish {
     pub wrapping: bool,
     /// Vault symbols this wish may call: `use Stats.mean` lines.
     pub deps: Vec<String>,
+    /// Author guidance for the forge. Advice, never evidence (rule 12):
+    /// flows into prompts only, never into canonical text or verdicts.
+    pub hints: Vec<String>,
 }
 
 /// Public wrapper so recipe.rs can reuse the example value grammar for
@@ -224,6 +227,7 @@ pub fn parse(src: &str) -> Result<Wish, String> {
     let mut invariants = Vec::new();
     let mut wrapping = false;
     let mut deps: Vec<String> = Vec::new();
+    let mut hints: Vec<String> = Vec::new();
     let mut transparent = Vec::new();
     let mut opaque = Vec::new();
 
@@ -233,6 +237,18 @@ pub fn parse(src: &str) -> Result<Wish, String> {
             continue;
         }
         let ctx = |msg: String| format!("line {}: {}", lineno + 1, msg);
+        if let Some(rest) = line.strip_prefix("hint ") {
+            let quoted = rest.trim();
+            let text = quoted
+                .strip_prefix('"')
+                .and_then(|x| x.strip_suffix('"'))
+                .map(|x| x.to_string())
+                .ok_or_else(|| {
+                    ctx(format!("hint must be double-quoted: `{}`", line))
+                })?;
+            hints.push(text);
+            continue;
+        }
         if let Some(dep) = line.strip_prefix("use ") {
             if !path.is_empty() {
                 return Err(ctx("use lines must precede the fn signature".into()));
@@ -304,6 +320,7 @@ pub fn parse(src: &str) -> Result<Wish, String> {
         auto_split: false,
         wrapping,
         deps,
+        hints,
     };
     apply_auto_split(&mut wish);
     validate(&wish)?;
@@ -538,5 +555,39 @@ mod float_tests {
         let w = parse("fn g(%x: F64) -> F64\n  => 1e-9 -> 2.5E3\n").unwrap();
         assert!(matches!(w.transparent[0].output, Value::Float(2500.0)));
         assert!(w.canonical().contains("F64"));
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    const HINTED: &str = "\
+fn Stats.meansqdev(%xs: List<F64>) -> F64
+  | %res >= 0.0
+  hint \"two passes: mean first via let, then fold deviations\"
+  hint \"guard empty list before dividing by len\"
+  => [2.0,4.0] -> 1.0 ± 1e-9
+";
+
+    #[test]
+    fn test_hints_parse_and_preserve_order() {
+        let w = parse(HINTED).unwrap();
+        assert_eq!(w.hints.len(), 2);
+        assert!(w.hints[0].contains("two passes"));
+        assert!(w.hints[1].contains("guard empty"));
+    }
+
+    #[test]
+    fn test_hints_excluded_from_canonical() {
+        let with_h = parse(HINTED).unwrap();
+        let without = parse("fn Stats.meansqdev(%xs: List<F64>) -> F64\n  | %res >= 0.0\n  => [2.0,4.0] -> 1.0 ± 1e-9\n").unwrap();
+        // Same contract ⇒ same vault key regardless of hints.
+        assert_eq!(with_h.canonical(), without.canonical());
+    }
+
+    #[test]
+    fn test_unquoted_hint_rejected() {
+        assert!(parse("fn f(%a: Int) -> Int\n  hint two passes\n  => 1 -> 1\n").is_err());
     }
 }

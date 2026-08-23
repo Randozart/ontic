@@ -367,9 +367,15 @@ end
                 .expect("wish present");
             let cand = sketch::parse(text).expect("candidate parses");
             crate::check::check(&cand).expect("typechecks");
-            let mlir =
-                crate::lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, w.wrapping)
-                    .expect("lowers");
+            let mlir = crate::lower::emit_fn(
+                &cand.name,
+                &cand.params,
+                &cand.ret,
+                &cand.body,
+                w.wrapping,
+                &crate::lower::CallMap::new(),
+            )
+            .expect("lowers");
             v.put(w, text, &mlir).expect("vaults");
         }
 

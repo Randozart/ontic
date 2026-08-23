@@ -206,3 +206,10 @@
   composite module (deps+candidate); validation gate uses composite too.
 - E2E GATE: devsq-composed.ont solved, validated, native-benched, vaulted —
   first fully composed verified function (mean called from devsq).
+
+### 2026-08-23 02:40 — H: author hints (HG1)
+- wish.rs: `hint "text"` lines -> hints Vec; excluded from canonical()
+  (rule 12: advice never evidence).
+- forge.rs prompt gains AUTHOR GUIDANCE block; main.rs check prints hints.
+- Tests: order preservation, canonical stability under hint edits,
+  unquoted rejection. 102 tests green.
