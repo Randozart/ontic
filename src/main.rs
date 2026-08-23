@@ -1,6 +1,7 @@
 //! Ontic CLI: `check` a gen, `solve` it (hand candidates or forge), `bench`
 //! survivors, and inspect the `vault`. Hand-rolled arg parsing — no clap.
 
+use std::process::Command;
 use ontic::forge::{self, ForgeConfig};
 use ontic::check;
 use ontic::interp;
@@ -36,6 +37,8 @@ fn dispatch(args: &[String]) -> i32 {
         Some("vault") => cmd_vault(args),
         Some("lib") => cmd_lib(args),
         Some("ablate") => cmd_ablate(args),
+        Some("pack") => cmd_pack(args),
+        Some("unpack") => cmd_unpack(args),
         Some("key") => match args.get(2) {
             Some(path) => cmd_key(path, None),
             None => usage("key needs a .ont file"),
@@ -67,6 +70,8 @@ USAGE:
   ontic lib [ls|promote <P>|demote <P>]           manage graduated stdlib entries
   ontic lib build <file.ont> [--sampler-backend B] [--samples N]  solve all gens -> one .so+header
   ontic ablate <file.ont> --samples N             uniform-vs-LLM control experiment
+  ontic pack <key|Path> -o <name>.ous             bundle a kernel into .ous
+  ontic unpack <x.ous> -d <dir>                   extract .so/.h/.mlir from bundle
   ontic key <file.ont> [--gen Path]               print canonical SHA-256 key
 
 SOLVE OPTIONS:
@@ -1388,6 +1393,164 @@ fn cmd_ablate(args: &[String]) -> i32 {
             stages[5],
             surv
         );
+    }
+    0
+}
+
+
+/// `ontic pack <key|Path> -o name.ous` — bundle a vault entry.
+fn cmd_pack(args: &[String]) -> i32 {
+    let key_or_path = match args.iter().position(|a| a == "pack").and_then(|p| args.get(p + 1)) {
+        Some(k) => k.clone(),
+        None => return usage("pack needs a key or wish path"),
+    };
+    let out_path = match args.iter().position(|a| a == "-o").and_then(|p| args.get(p + 1)) {
+        Some(o) => o.clone(),
+        None => return usage("pack needs -o <output.ous>"),
+    };
+
+    let vault_dir =
+        std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
+    let v = match Vault::open(&vault_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+
+    // Resolve by key or by path.
+    let entry = if key_or_path.len() >= 16 && !key_or_path.contains('.') {
+        v.get(&key_or_path)
+    } else {
+        v.find_by_path(&key_or_path)
+    };
+    let entry = match entry {
+        Some(e) => e,
+        None => {
+            eprintln!("kernel `{}` not found in vault", key_or_path);
+            return 1;
+        }
+    };
+
+    let obj_name = format!("lib{}-{}.o", entry.name, &entry.key[..8.min(entry.key.len())]);
+    let obj_path = std::path::Path::new(&vault_dir).join(&obj_name);
+    let obj_bytes = match std::fs::read(&obj_path) {
+        Ok(b) => b,
+        Err(_) => {
+            // Object not stored separately; rebuild from mlir.
+            let dir = std::env::temp_dir().join(format!("ontic-pack-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap_or_default();
+            let m_p = dir.join("k.mlir");
+            let ll_p = dir.join("k_llvm.mlir");
+            let o_p = dir.join("k.o");
+            if std::fs::write(&m_p, &entry.mlir).is_err() { return 1; }
+            if ontic::pipeline::mlir_to_llvmir(&m_p, &ll_p).is_err()
+                || ontic::pipeline::object_from_ll(&ll_p, &o_p).is_err()
+            {
+                eprintln!("failed to lower kernel for packing");
+                return 1;
+            }
+            std::fs::read(&o_p).unwrap_or_default()
+        }
+    };
+
+    // Generate header on-the-fly by parsing the stored candidate sketch.
+    let hdr_text = match crate::sketch::parse(&entry.sketch_text)
+        .map_err(|e| format!("sketch parse: {} at {}", e.message, e.offset))
+        .and_then(|cand| {
+            crate::lower::emit_header(
+                &cand.name,
+                &cand.params,
+                &cand.ret,
+                &entry.key[..8.min(entry.key.len())],
+            )
+        }) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("header generation: {}", e);
+            return 1;
+        }
+    };
+
+    let packed = ontic::ous::pack_full(&entry, &obj_bytes, &hdr_text);
+    match std::fs::write(&out_path, &packed) {
+        Ok(_) => {
+            println!("PACKED {} ({} bytes)", out_path, packed.len());
+            0
+        }
+        Err(e) => {
+            eprintln!("write {}: {}", out_path, e);
+            1
+        }
+    }
+}
+
+/// `ontic unpack x.ous -d dir` — extract artifacts from an .ous bundle.
+fn cmd_unpack(args: &[String]) -> i32 {
+    let src_path = match args.iter().position(|a| a == "unpack").and_then(|p| args.get(p + 1)) {
+        Some(s) => s.clone(),
+        None => return usage("unpack needs an .ous file"),
+    };
+    let out_dir = match args.iter().position(|a| a == "-d").and_then(|p| args.get(p + 1)) {
+        Some(d) => d.clone(),
+        None => ".".to_string(),
+    };
+
+    let data = match std::fs::read(&src_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("read {}: {}", src_path, e);
+            return 1;
+        }
+    };
+    let unpacked = match ontic::ous::unpack(&data) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("unpack: {}", e);
+            return 1;
+        }
+    };
+
+    std::fs::create_dir_all(&out_dir).unwrap_or_default();
+
+    let name = unpacked.manifest["name"]
+        .as_str()
+        .unwrap_or("kernel")
+        .to_string();
+    let h_name = format!("{}.h", name);
+    let files: Vec<(&str, Vec<u8>)> = vec![
+        ("manifest.json", serde_json::to_vec_pretty(&unpacked.manifest).unwrap_or_default()),
+        ("sketch.sketch", unpacked.sketch_text.clone().into_bytes()),
+        ("kernel.mlir", unpacked.mlir.clone().into_bytes()),
+        ("kernel.o", unpacked.obj_bytes.clone()),
+        (&h_name, unpacked.header_text.clone().into_bytes()),
+    ];
+    for (fname, bytes) in &files {
+        let p = std::path::Path::new(&out_dir).join(fname);
+        if std::fs::write(&p, bytes).is_err() { return 1; }
+        println!("EXTRACTED {}", p.display());
+    }
+
+    // Build .so directly from the embedded object.
+    let so_path = std::path::Path::new(&out_dir).join(format!("lib{}.so", name));
+    let cc = match ontic::pipeline::find_tool("clang") {
+        Some(c) => c,
+        None => std::path::PathBuf::from("clang"),
+    };
+    let obj_path = std::path::Path::new(&out_dir).join("kernel.o");
+    let out = Command::new(&cc)
+        .arg("-shared")
+        .arg("-O2")
+        .arg(obj_path.to_str().unwrap())
+        .arg("-o")
+        .arg(so_path.to_str().unwrap())
+        .output()
+        .map_err(|e| format!("cc spawn: {}", e));
+    match out {
+        Ok(o) if o.status.success() => println!("LIB     : {}", so_path.display()),
+        Ok(o) => eprintln!("link: {}", String::from_utf8_lossy(&o.stderr)),
+        _ => {}
     }
     0
 }

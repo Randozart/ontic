@@ -328,3 +328,12 @@
 - Both modes now live: per-kernel .so on solve + composite library via
   lib build. Verified: C consumer links composite and calls mean() at 2.5.
 - split_module_funcs: proper func.func chunk extraction from module text.
+
+### 2026-08-23 08:40 — L3: .ous single-file kernel bundle
+- src/ous.rs: OUS1 magic, length-prefixed sections (MANIFEST/SKETCH/MLIR/
+  OBJ/HEADER), hand-rolled reader/writer. Pack_full/unpack roundtrip tests.
+- main.rs: ontic pack <key|Path> -o x.ous; ontic unpack x.ous -d dir
+  (extracts artifacts + links .so from embedded object).
+- Header generated on-the-fly from stored sketch during pack (no filename
+  pattern matching). UNPACK GATE: pack→unpack→C consumer → 2.5.
+- 126 tests green.
