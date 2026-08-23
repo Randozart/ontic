@@ -138,3 +138,14 @@
 - examples/rms.ont opened as live benchmark: two-stage fold (deviations from
   mean) + empty guard. Current status: all candidates honestly killed at S3
   with genuine near-misses (sumsq=20, mean-sq=10, NaN-on-empty). OPEN target.
+
+### 2026-08-22 03:05 — P2a: unary builtins (sum/max/min/sqrt/exp/log/abs)
+- sketch.rs: Builtin op + 8 grammar keywords (unop1 GBNF rule).
+- check.rs: builtin typing — reductions over lists, numeric transforms F64
+  with implicit Int promotion.
+- interp.rs: oracle semantics; max/min of empty lists are honest errors
+  (probes expose them like div-by-zero).
+- lower.rs: emit_builtin — Len via generic dim, reductions as synthesized
+  folds (sentinel init: i64::MIN/MAX, ±inf), numeric transforms via math
+  dialect after sitofp promotion. expr_ty extended for Builtin arms.
+- 91 tests green.

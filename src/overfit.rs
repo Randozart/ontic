@@ -92,8 +92,14 @@ fn walk(e: &Expr, leaked: &HashSet<i64>, st: &mut Stats) {
         Expr::ListLit(items) => {
             st.int_literals.extend(items.iter().copied());
         }
-        Expr::Len(inner) => {
+        // Sum/max/min are real computation; numeric transforms too.
+        Expr::Builtin(crate::sketch::Builtin::Sum, inner)
+        | Expr::Builtin(crate::sketch::Builtin::Max, inner)
+        | Expr::Builtin(crate::sketch::Builtin::Min, inner) => {
             st.has_len = true;
+            walk(inner, leaked, st);
+        }
+        Expr::Builtin(_, inner) => {
             walk(inner, leaked, st);
         }
         Expr::UnOp(_, inner) => walk(inner, leaked, st),
@@ -151,7 +157,7 @@ fn mentions_var(e: &Expr) -> bool {
         Expr::Var(_) => true,
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::ListLit(_) => false,
         Expr::UnOp(_, i) => mentions_var(i),
-        Expr::Len(i) => mentions_var(i),
+        Expr::Builtin(_, i) => mentions_var(i),
         Expr::If(c, t, f) => mentions_var(c) || mentions_var(t) || mentions_var(f),
         Expr::Let(_, t, f) => mentions_var(t) || mentions_var(f),
         Expr::BinOp(_, l, r) => mentions_var(l) || mentions_var(r),

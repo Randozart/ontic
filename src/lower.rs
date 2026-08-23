@@ -10,7 +10,7 @@
 //! (division/modulo by zero) — and any candidate whose errors are reachable
 //! by probes is already rejected before lowering ever runs.
 
-use crate::sketch::{BinOp, Expr, Ty};
+use crate::sketch::{BinOp, Builtin, Expr, Ty};
 use std::collections::HashMap;
 
 /// Pretty-print an expression back to sketch surface syntax.
@@ -25,7 +25,20 @@ pub fn expr_display(e: &Expr) -> String {
             let inner: Vec<String> = items.iter().map(|v| v.to_string()).collect();
             format!("[{}]", inner.join(", "))
         }
-        Expr::Len(i) => format!("len({})", expr_display(i)),
+        Expr::Builtin(b, i) => format!(
+            "{}({})",
+            match b {
+                Builtin::Len => "len",
+                Builtin::Sum => "sum",
+                Builtin::Max => "max",
+                Builtin::Min => "min",
+                Builtin::Sqrt => "sqrt",
+                Builtin::Exp => "exp",
+                Builtin::Log => "log",
+                Builtin::Abs => "abs",
+            },
+            expr_display(i)
+        ),
         Expr::UnOp(crate::sketch::UnOp::Neg, i) => format!("(-{})", expr_display(i)),
         Expr::UnOp(crate::sketch::UnOp::Not, i) => format!("!{}", expr_display(i)),
         Expr::If(c, t, f) => format!(
@@ -231,26 +244,7 @@ fn emit_expr(
         Expr::BoolLit(b) => Ok(em.const_i64(if *b { 1 } else { 0 })),
         Expr::Var(n) => Ok(lookup(env, n)?.ssa.clone()),
         Expr::ListLit(items) => emit_list_lit(items, em),
-        Expr::Len(inner) => {
-            let m = emit_expr(inner, env, tyenv, em)?;
-            let idx0 = em.const_index(0);
-            let dim = em.fresh("dim");
-            let mty = list_memref(inner, tyenv);
-            // Generic op syntax: Ubuntu LLVM 18.1.3's mlir-opt rejects the
-            // custom memref.dim assembly ("expected operation name in
-            // quotes") regardless of shape; the generic form parses cleanly
-            // everywhere. See ISSUES.md 2026-08-22.
-            em.line(&format!(
-                "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
-                dim, m, idx0, mty
-            ));
-            let cast = em.fresh("len");
-            em.line(&format!(
-                "{} = arith.index_cast {} : index to i64",
-                cast, dim
-            ));
-            Ok(cast)
-        }
+        Expr::Builtin(b, inner) => emit_builtin(*b, inner, env, tyenv, em),
         Expr::UnOp(crate::sketch::UnOp::Neg, inner) => {
             let x = emit_expr(inner, env, tyenv, em)?;
             let z = em.const_i64(0);
@@ -304,6 +298,112 @@ fn emit_list_lit(items: &[i64], em: &mut Emitter) -> Result<String, String> {
         ));
     }
     Ok(m)
+}
+
+
+/// Emit unary builtins. Len reads the memref dim; sum/max/min lower to
+/// synthesized folds (`arith.maxsi`/`maximumf` style sentinels); numeric
+/// transforms call the math dialect after implicit Int->F64 promotion.
+fn emit_builtin(
+    b: Builtin,
+    inner: &Expr,
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    match b {
+        Builtin::Len => {
+            let m = emit_expr(inner, env, tyenv, em)?;
+            let idx0 = em.const_index(0);
+            let dim = em.fresh("dim");
+            let mty = list_memref(inner, tyenv);
+            em.line(&format!(
+                "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+                dim, m, idx0, mty
+            ));
+            let cast = em.fresh("len");
+            em.line(&format!(
+                "{} = arith.index_cast {} : index to i64",
+                cast, dim
+            ));
+            Ok(cast)
+        }
+        Builtin::Sum | Builtin::Max | Builtin::Min => {
+            let is_f = matches!(expr_ty(inner, tyenv), Ty::ListF64);
+            let tag = em.fresh(match b {
+                Builtin::Sum => "sum",
+                Builtin::Max => "max",
+                _ => "min",
+            });
+            let var = format!("e{}", em.counter);
+            let acc = format!("a{}", em.counter);
+            let init = match (b, is_f) {
+                (Builtin::Sum, false) => Expr::IntLit(0),
+                (Builtin::Sum, true) => Expr::FloatLit(0.0),
+                (_, false) => Expr::IntLit(if matches!(b, Builtin::Max) { i64::MIN } else { i64::MAX }),
+                (_, true) => Expr::FloatLit(if matches!(b, Builtin::Max) {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                }),
+            };
+            let elem = Expr::Var(var.clone());
+            let body = match b {
+                Builtin::Sum => Expr::BinOp(
+                    if is_f { BinOp::Add } else { BinOp::Add },
+                    Box::new(Expr::Var(acc.clone())),
+                    Box::new(elem),
+                ),
+                Builtin::Max => Expr::If(
+                    Box::new(Expr::BinOp(
+                        if is_f { BinOp::Gt } else { BinOp::Gt },
+                        Box::new(elem.clone()),
+                        Box::new(Expr::Var(acc.clone())),
+                    )),
+                    Box::new(elem),
+                    Box::new(Expr::Var(acc.clone())),
+                ),
+                _ => Expr::If(
+                    Box::new(Expr::BinOp(
+                        BinOp::Lt,
+                        Box::new(elem.clone()),
+                        Box::new(Expr::Var(acc.clone())),
+                    )),
+                    Box::new(elem),
+                    Box::new(Expr::Var(acc.clone())),
+                ),
+            };
+            emit_fold(
+                &var,
+                &acc,
+                inner,
+                &Box::new(init),
+                &Box::new(body),
+                env,
+                tyenv,
+                em,
+            )
+        }
+        Builtin::Sqrt | Builtin::Exp | Builtin::Log | Builtin::Abs => {
+            let x = emit_expr(inner, env, tyenv, em)?;
+            let xf = if expr_ty(inner, tyenv) == Ty::F64 {
+                x
+            } else {
+                let w = em.fresh("widen");
+                em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, x));
+                w
+            };
+            let out = em.fresh("math");
+            let op = match b {
+                Builtin::Sqrt => "math.sqrt",
+                Builtin::Exp => "math.exp",
+                Builtin::Log => "math.log",
+                _ => "math.absf",
+            };
+            em.line(&format!("{} = {} {} : f64", out, op, xf));
+            Ok(out)
+        }
+    }
 }
 
 fn emit_if(
@@ -557,7 +657,8 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
         Expr::BoolLit(_) => Ty::Bool,
         Expr::ListLit(_) => Ty::ListInt,
         Expr::Var(n) => tyenv.get(n).cloned().unwrap_or(Ty::Int),
-        Expr::Len(_) => Ty::Int,
+        Expr::Builtin(b, _) if matches!(b, Builtin::Len | Builtin::Sum) => Ty::Int,
+        Expr::Builtin(_, _) => Ty::F64,
         Expr::UnOp(crate::sketch::UnOp::Not, _) => Ty::Bool,
         Expr::UnOp(crate::sketch::UnOp::Neg, i) => expr_ty(i, tyenv),
         Expr::If(_, t, _) => expr_ty(t, tyenv),

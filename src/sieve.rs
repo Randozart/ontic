@@ -344,7 +344,7 @@ pub fn ast_size(e: &Expr) -> usize {
     1 + match e {
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::Var(_)
         | Expr::ListLit(_) => 0,
-        Expr::Len(i) | Expr::UnOp(_, i) => ast_size(i),
+        Expr::Builtin(_, i) | Expr::UnOp(_, i) => ast_size(i),
         Expr::If(c, t, f) => ast_size(c) + ast_size(t) + ast_size(f),
         Expr::Let(_, v, b) => ast_size(v) + ast_size(b),
         Expr::Fold {

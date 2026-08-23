@@ -115,8 +115,8 @@ pub fn build_prompt(wish: &Wish, feedback: &[String]) -> String {
     }
     p.push_str("\n=== LANGUAGE RULES ===\n");
     p.push_str("Output exactly one function; nothing else.\n");
-    p.push_str("Example of the format on a DIFFERENT task:\n");
-    p.push_str("fn @square_mean(%ns: List<Int>) -> Int { let %n = len(%ns); let %s = fold %v in %ns, %acc from 0 { %acc + %v * %v }; %s / %n }\n");
+    p.push_str("Example of the format on a DIFFERENT task (note: two passes via two folds bound with let):\n");
+    p.push_str("fn @sq_over_sum(%ns: List<Int>) -> Int { let %total = fold %v in %ns, %a from 0 { %a + %v }; let %sq = fold %v in %ns, %b from 0 { %b + %v * %v }; %sq / %total }\n");
     p.push_str("The | , => , ?? , +- tolerance marks above are SPECIFICATION notation. Do not emit them.\n");
     p.push_str("Iterate only via fold: fold %v in <list>, %acc from <init> { <body> }.\n");
     p.push_str("The body must have exactly the signature's return type.\n");

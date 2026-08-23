@@ -1,7 +1,7 @@
 //! The oracle: tree-walking evaluator defining sketch semantics.
 //! If this and the MLIR lowering disagree, this module wins (AGENTS.md rule 6).
 
-use crate::sketch::{BinOp, Expr, UnOp};
+use crate::sketch::{BinOp, Builtin, Expr, UnOp};
 use crate::wish::Value;
 use std::collections::HashMap;
 
@@ -64,6 +64,75 @@ fn as_promotable(v: &Value) -> Option<f64> {
     }
 }
 
+
+/// Unary builtin semantics. sum/max/min over lists; numeric transforms are
+/// IEEE F64 (Int args promote). max/min on empty lists are errors — there is
+/// no honest answer; probes expose them like division by zero.
+fn eval_builtin(b: Builtin, inner: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
+    let v = eval_ctx(inner, env, ctx)?;
+    match b {
+        Builtin::Len => match v {
+            Value::List(vs) => Ok(Value::Int(vs.len() as i64)),
+            Value::FloatList(vs) => Ok(Value::Int(vs.len() as i64)),
+            other => Err(EvalError::TypeError(format!("len of non-list {}", other))),
+        },
+        Builtin::Sum => match v {
+            Value::List(vs) => Ok(Value::Int(vs.iter().sum())),
+            Value::FloatList(vs) => Ok(Value::Float(vs.iter().sum())),
+            other => Err(EvalError::TypeError(format!("sum of {}", other))),
+        },
+        Builtin::Max | Builtin::Min => {
+            let take = |items: Vec<i64>| -> Result<Value, EvalError> {
+                if items.is_empty() {
+                    return Err(EvalError::TypeError("max/min of empty list".to_string()));
+                }
+                let m = if matches!(b, Builtin::Max) {
+                    items.iter().max().copied()
+                } else {
+                    items.iter().min().copied()
+                };
+                m.map(Value::Int).ok_or_else(|| EvalError::Overflow)
+            };
+            match v {
+                Value::List(vs) => take(vs),
+                Value::FloatList(vs) => {
+                    if vs.is_empty() {
+                        return Err(EvalError::TypeError(
+                            "max/min of empty list".to_string(),
+                        ));
+                    }
+                    let m = if matches!(b, Builtin::Max) {
+                        vs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                    } else {
+                        vs.iter().cloned().fold(f64::INFINITY, f64::min)
+                    };
+                    Ok(Value::Float(m))
+                }
+                other => Err(EvalError::TypeError(format!("max/min of {}", other))),
+            }
+        }
+        Builtin::Sqrt | Builtin::Exp | Builtin::Log | Builtin::Abs => {
+            let x = match v {
+                Value::Float(f) => f,
+                Value::Int(i) => i as f64,
+                other => {
+                    return Err(EvalError::TypeError(format!(
+                        "numeric builtin on {}",
+                        other
+                    )))
+                }
+            };
+            let out = match b {
+                Builtin::Sqrt => x.sqrt(),
+                Builtin::Exp => x.exp(),
+                Builtin::Log => x.ln(),
+                _ => x.abs(),
+            };
+            Ok(Value::Float(out))
+        }
+    }
+}
+
 fn int_of(v: &Value) -> Result<i64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -88,11 +157,7 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: Ctx) -> Result<Value, EvalError> {
             .cloned()
             .ok_or_else(|| EvalError::Unbound(n.clone())),
         Expr::ListLit(items) => Ok(Value::List(items.clone())),
-        Expr::Len(inner) => match eval_ctx(inner, env, ctx)? {
-            Value::List(vs) => Ok(Value::Int(vs.len() as i64)),
-            Value::FloatList(vs) => Ok(Value::Int(vs.len() as i64)),
-            other => Err(EvalError::TypeError(format!("len of non-list {}", other))),
-        },
+        Expr::Builtin(b, inner) => eval_builtin(*b, inner, env, ctx),
         Expr::UnOp(UnOp::Neg, inner) => {
             let inner_v = eval_ctx(inner, env, ctx)?;
             if let Value::Float(f) = inner_v {

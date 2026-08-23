@@ -1,8 +1,28 @@
 //! Stage S2: sketch typechecker. Rejects ill-typed candidates before any
 //! evaluation, so the oracle only sees well-formed programs.
 
-use crate::sketch::{BinOp, Candidate, Expr, Ty, UnOp};
+use crate::sketch::{BinOp, Builtin, Candidate, Expr, Ty, UnOp};
 use std::collections::HashMap;
+
+/// Static type of a builtin application.
+fn builtin_ty(b: Builtin, t: Ty) -> Result<Ty, String> {
+    match b {
+        Builtin::Len => match t {
+            Ty::ListInt | Ty::ListF64 => Ok(Ty::Int),
+            other => Err(format!("len of {}", other.name())),
+        },
+        Builtin::Sum | Builtin::Max | Builtin::Min => match t {
+            Ty::ListInt => Ok(Ty::Int),
+            Ty::ListF64 => Ok(Ty::F64),
+            other => Err(format!("{:?} of {}", b, other.name())),
+        },
+        // Numeric transforms are F64-only; Int arguments promote implicitly.
+        Builtin::Sqrt | Builtin::Exp | Builtin::Log | Builtin::Abs => match t {
+            Ty::Int | Ty::F64 => Ok(Ty::F64),
+            other => Err(format!("numeric builtin on {}", other.name())),
+        },
+    }
+}
 
 /// Public type-inference entry: lowerers and tools query expression types
 /// under a signature environment (params + optional %res).
@@ -41,12 +61,9 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             .get(n)
             .cloned()
             .ok_or_else(|| format!("unbound variable %{}", n)),
-        Expr::Len(inner) => {
+        Expr::Builtin(b, inner) => {
             let t = infer(inner, env)?;
-            match t {
-                Ty::ListInt | Ty::ListF64 => Ok(Ty::Int),
-                other => Err(format!("len of {}", other.name())),
-            }
+            builtin_ty(*b, t)
         }
         Expr::UnOp(UnOp::Neg, inner) => expect_ty(inner, env, &Ty::Int),
         Expr::UnOp(UnOp::Not, inner) => expect_ty(inner, env, &Ty::Bool),

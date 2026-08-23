@@ -43,6 +43,19 @@ pub enum BinOp {
     Mod,
 }
 
+/// Unary builtin operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    Len,
+    Sum,
+    Max,
+    Min,
+    Sqrt,
+    Exp,
+    Log,
+    Abs,
+}
+
 /// Unary operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
@@ -62,7 +75,8 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(String, Box<Expr>, Box<Expr>),
     ListLit(Vec<i64>),
-    Len(Box<Expr>),
+    /// Unary builtins: Len/Sum/Max/Min over lists; Sqrt/Exp/Log/Abs numeric.
+    Builtin(Builtin, Box<Expr>),
     Fold {
         var: String,
         acc: String,
@@ -213,6 +227,13 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "true" => Some("true"),
                 "false" => Some("false"),
                 "len" => Some("len"),
+                "sum" => Some("sum"),
+                "max" => Some("max"),
+                "min" => Some("min"),
+                "sqrt" => Some("sqrt"),
+                "exp" => Some("exp"),
+                "log" => Some("log"),
+                "abs" => Some("abs"),
                 "fold" => Some("fold"),
                 "in" => Some("in"),
                 "from" => Some("from"),
@@ -584,12 +605,22 @@ impl Parser {
                 self.eat_sym(")")?;
                 Ok(e)
             }
-            Some(Tok::Word("len")) => {
+            Some(Tok::Word(w @ ("len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs"))) => {
                 self.pos += 1;
                 self.eat_sym("(")?;
                 let e = self.parse_expr()?;
                 self.eat_sym(")")?;
-                Ok(Expr::Len(Box::new(e)))
+                let op = match w {
+                    "len" => Builtin::Len,
+                    "sum" => Builtin::Sum,
+                    "max" => Builtin::Max,
+                    "min" => Builtin::Min,
+                    "sqrt" => Builtin::Sqrt,
+                    "exp" => Builtin::Exp,
+                    "log" => Builtin::Log,
+                    _ => Builtin::Abs,
+                };
+                Ok(Expr::Builtin(op, Box::new(e)))
             }
             Some(Tok::Word("fold")) => self.parse_fold(),
             other => {
@@ -680,7 +711,8 @@ addsym      ::= "+" | "-"
 mulx        ::= unx (ws mulsym ws unx)*
 mulsym      ::= "*" | "/" | "%"
 unx         ::= "-" unx | "!" unx | prim
-prim        ::= int | float | "true" | "false" | pid | listlit | "len" ws "(" ws e ws ")" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+unop1       ::= "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs"
 pid         ::= "%" [a-zA-Z_] [a-zA-Z0-9_]*
 listlit     ::= "[" ws "]" | "[" ws int (ws "," ws int)* ws "]"
 int         ::= "-"? [0-9]+
@@ -728,7 +760,24 @@ mod tests {
     #[test]
     fn test_list_literal_and_len() {
         let c = parse("fn @h() -> Int { len([7, 8, 9]) }").expect("parses");
-        assert!(matches!(c.body, Expr::Len(_)));
+        assert!(matches!(
+            c.body,
+            Expr::Builtin(Builtin::Len, _)
+        ));
+    }
+
+    #[test]
+    fn test_math_builtins_parse() {
+        let c = parse("fn @s(%x: F64) -> F64 { sqrt(%x) + exp(%x) + log(%x) + abs(%x) }")
+            .expect("parses");
+        assert!(matches!(c.body, Expr::BinOp(_, _, _)));
+    }
+
+    #[test]
+    fn test_reduction_builtins_parse() {
+        let c = parse("fn @r(%xs: List<Int>) -> Int { sum(%xs) + max(%xs) + min(%xs) }")
+            .expect("parses");
+        assert!(matches!(c.body, Expr::BinOp(_, _, _)));
     }
 
     #[test]
