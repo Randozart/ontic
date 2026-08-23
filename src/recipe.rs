@@ -27,6 +27,19 @@ pub enum Stmt {
     BindCall(String, String, Vec<CallArg>),
     /// `print(%v)`
     Print(String),
+    /// `write %v -> "path.csv"` — CSV: scalar row / list column.
+    Write(String, String),
+    /// `dump %v -> "out.json"` — JSON object {"name": value}.
+    Dump(String, String),
+    /// `log "text %var ..."` — console with interpolation.
+    Log(Vec<LogSeg>),
+}
+
+/// One segment of a log template.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogSeg {
+    Text(String),
+    Var(String),
 }
 
 /// Call-site argument.
@@ -168,6 +181,25 @@ fn parse_program(lines: &[String]) -> Result<Program, String> {
 
 /// Parse one statement inside the program body.
 fn parse_stmt(line: &str) -> Result<Stmt, String> {
+    if let Some(rest) = line.strip_prefix("write") {
+        let (var_s, path_s) = rest
+            .split_once("->")
+            .ok_or_else(|| format!("write needs `-> \"path\"`: `{}`", line))?;
+        let var = parse_var_ref(var_s.trim())?;
+        let path = unquote(path_s.trim(), "write target")?;
+        return Ok(Stmt::Write(var, path));
+    }
+    if let Some(rest) = line.strip_prefix("dump") {
+        let (var_s, path_s) = rest
+            .split_once("->")
+            .ok_or_else(|| format!("dump needs `-> \"path\"`: `{}`", line))?;
+        let var = parse_var_ref(var_s.trim())?;
+        let path = unquote(path_s.trim(), "dump target")?;
+        return Ok(Stmt::Dump(var, path));
+    }
+    if let Some(rest) = line.strip_prefix("log ") {
+        return Ok(Stmt::Log(parse_log_template(rest.trim())?));
+    }
     if let Some(rest) = line.strip_prefix("print") {
         let var = rest.trim();
         let name = var.strip_prefix('(')
@@ -206,6 +238,51 @@ fn parse_stmt(line: &str) -> Result<Stmt, String> {
         return Ok(Stmt::BindCall(target, callee.trim().to_string(), args));
     }
     Err(format!("unrecognized statement `{}`", line))
+}
+
+fn unquote(s: &str, what: &str) -> Result<String, String> {
+    s.strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .map(|x| x.to_string())
+        .filter(|x| !x.is_empty())
+        .ok_or_else(|| format!("{} must be a double-quoted path", what))
+}
+
+/// Split a log template into text and %var segments.
+fn parse_log_template(s: &str) -> Result<Vec<LogSeg>, String> {
+    let quoted = s
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .ok_or_else(|| format!("log template must be double-quoted: `{}`", s))?;
+    let mut segs = Vec::new();
+    let mut text = String::new();
+    let mut chars = quoted.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let mut name = String::new();
+            while let Some(&n) = chars.peek() {
+                if n.is_ascii_alphanumeric() || n == '_' {
+                    name.push(n);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !text.is_empty() {
+                segs.push(LogSeg::Text(std::mem::take(&mut text)));
+            }
+            if name.is_empty() {
+                return Err("log template has bare %".to_string());
+            }
+            segs.push(LogSeg::Var(name));
+        } else {
+            text.push(c);
+        }
+    }
+    if !text.is_empty() {
+        segs.push(LogSeg::Text(text));
+    }
+    Ok(segs)
 }
 
 /// `%name` reference without the sigil.
@@ -282,6 +359,16 @@ pub fn typecheck(prog: &Program, wishes: &[Wish]) -> Result<(), String> {
             }
             Stmt::Print(name) => {
                 lookup(&locals, name)?;
+            }
+            Stmt::Write(name, _) | Stmt::Dump(name, _) => {
+                lookup(&locals, name)?;
+            }
+            Stmt::Log(segs) => {
+                for seg in segs {
+                    if let LogSeg::Var(n) = seg {
+                        lookup(&locals, n)?;
+                    }
+                }
             }
         }
     }

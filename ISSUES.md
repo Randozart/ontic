@@ -72,3 +72,10 @@
   clang 18's default std, silently dropping the member. Generated C now uses
   base/data/off/size/stride field names. Lesson: audit GENERATED code against
   the newest compiler dialects, not just our grammar.
+
+### 2026-08-23 — Shared llama-server instability blocks long forge runs
+- Two sessions lost to connection resets/refusals on :8279/:8287 mid-batch.
+- Mitigations in place (retry/backoff/abandoned-sample tolerance); full
+  batch completion still requires a stable endpoint.
+- HG2 (rms retry with hints) partially observed: hints visibly steered
+  candidates toward two-pass shapes before outage. Re-run pending stability.

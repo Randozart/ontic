@@ -213,3 +213,11 @@
 - forge.rs prompt gains AUTHOR GUIDANCE block; main.rs check prints hints.
 - Tests: order preservation, canonical stability under hint edits,
   unquoted rejection. 102 tests green.
+
+### 2026-08-23 03:20 — E: recipe effects (write/dump/log)
+- recipe.rs: Write/Dump/Log statements; log templates interpolate %vars;
+  typechecking validates targets.
+- program.rs: deterministic C codegen — CSV rows, {"name": value} JSON,
+  printf logs. Effects run at driver runtime only; sieve untouched.
+- EG2 gate: e2e writes exact CSV/JSON/log content from a solved function.
+- 103 tests green.

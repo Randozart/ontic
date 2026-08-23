@@ -5,7 +5,7 @@
 //! `ontic run` never executes unsieved code.
 
 use crate::pipeline::{self, find_tool};
-use crate::recipe::{CallArg, OntFile, Stmt};
+use crate::recipe::{CallArg, LogSeg, OntFile, Stmt};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -177,6 +177,64 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                 ));
                 locals.push((target.clone(), Local::Scalar { c_name: tn }));
             }
+            Stmt::Write(name, path) => {
+                // CSV: one value per line. Scalars only in v0.
+                let c_name = scalar_local(&locals, name)?;
+                body.push_str(&format!(
+                    "  {{ FILE* f = fopen(\"{p}\", \"w\"); if (!f) return 2; fprintf(f, \"%ld\\n\", {v}); fclose(f); }}\n",
+                    p = c_escape(path),
+                    v = c_name
+                ));
+            }
+            Stmt::Dump(name, path) => {
+                // {"<name>": <value>}\n — quotes escaped for the C literal.
+                let c_name = scalar_local(&locals, name)?;
+                let p = c_escape(path);
+                let key = c_escape(name);
+                // Key baked into the literal: exactly one %ld consumes v.
+                let fmt = format!("{{\\\"{k}\\\": %ld}}\\n", k = key);
+                body.push_str(&format!(
+                    "  {{ FILE* f = fopen(\"{p}\", \"w\"); if (!f) return 2; fprintf(f, \"{fmt}\", {v}); fclose(f); }}\n",
+                    p = p,
+                    fmt = fmt,
+                    v = c_name
+                ));
+            }
+            Stmt::Log(segs) => {
+                let mut fmt = String::new();
+                let mut args: Vec<String> = Vec::new();
+                for seg in segs {
+                    match seg {
+                        LogSeg::Text(t) => fmt.push_str(&c_escape(t).replace("\\n", "\n")),
+                        LogSeg::Var(n) => match lookup(&locals, n)? {
+                            Local::Scalar { c_name } => {
+                                fmt.push_str("%ld");
+                                args.push(c_name.clone());
+                            }
+                            Local::ScalarF { c_name } => {
+                                fmt.push_str("%.17g");
+                                args.push(c_name.clone());
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "log cannot print lists (%{}) in v0",
+                                    n
+                                ))
+                            }
+                        },
+                    }
+                }
+                let arg_s = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", args.join(", "))
+                };
+                body.push_str(&format!(
+                    "  printf(\"{}\\n\"{});\n",
+                    c_escape(&fmt),
+                    arg_s
+                ));
+            }
             Stmt::Print(name) => match lookup(&locals, name)? {
                 Local::Scalar { c_name } => {
                     body.push_str(&format!("  printf(\"%ld\\n\", {});\n", c_name));
@@ -200,6 +258,37 @@ long ontic_trap(void) {{ abort(); }}\n\n\
 int main(void) {{\n{}  return 0;\n}}\n",
         protos, body
     ))
+}
+
+/// Escape a Rust string into a C string literal body (no surrounding quotes).
+fn c_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '%'
+                if false =>
+            {
+                // percent is legal in plain text; only printf FORMAT strings
+                // need escaping, and we only escape the template separately.
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Require a scalar local and return its C name.
+fn scalar_local<'a>(locals: &'a [(String, Local)], name: &str) -> Result<&'a str, String> {
+    match lookup(locals, name)? {
+        Local::Scalar { c_name } => Ok(c_name),
+        Local::ScalarF { c_name } => Ok(c_name),
+        Local::List { .. } | Local::ListF { .. } => Err(format!(
+            "effect target `%{} ` must be scalar in v0 (list effects come with P3)",
+            name
+        )),
+    }
 }
 
 fn c_symbol(name: &str) -> String {
@@ -381,5 +470,69 @@ end
 
         let lines = run_in(&file, vault_dir.to_str().expect("dir")).expect("runs");
         assert_eq!(lines, vec!["6", "42"]);
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+    use crate::vault::Vault;
+    use crate::{pipeline, recipe};
+
+    /// EG2 gate: write/dump/log effects produce deterministic driver output.
+    #[test]
+    fn test_effects_end_to_end() {
+        if pipeline::find_tool("mlir-opt").is_none() || pipeline::find_tool("llc").is_none() {
+            eprintln!("toolchain missing; effects e2e skipped");
+            return;
+        }
+        let src = "\
+fn Twice(%n: Int) -> Int
+  => 21 -> 42
+
+program FX
+  use Twice
+start
+  %v = Twice(21)
+  log \"computed %v\"
+  write %v -> \"out.csv\"
+  dump %v -> \"out.json\"
+end
+";
+        let file = recipe::parse_ont(src).expect("parses");
+
+        // Solve Twice into an isolated vault.
+        let vault_dir = scratch();
+        let v = Vault::open(&vault_dir).expect("vault opens");
+        let w = &file.wishes[0];
+        let cand = crate::sketch::parse("fn @Twice(%n: Int) -> Int { %n * 2 }").unwrap();
+        crate::check::check(&cand).unwrap();
+        let mlir = crate::lower::emit_fn(
+            &cand.name,
+            &cand.params,
+            &cand.ret,
+            &cand.body,
+            w.wrapping,
+            &crate::lower::CallMap::new(),
+        )
+        .unwrap();
+        v.put(w, "fn @Twice(%n: Int) -> Int { %n * 2 }", &mlir).unwrap();
+
+        // Run from a working dir containing the effect outputs.
+        let workdir = scratch();
+        let bin_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&workdir).unwrap();
+        let lines = run_in(&file, vault_dir.to_str().unwrap()).expect("runs");
+        std::env::set_current_dir(bin_dir).unwrap();
+
+        assert_eq!(lines, vec!["computed 42"]);
+        assert_eq!(
+            std::fs::read_to_string(workdir.join("out.csv")).unwrap(),
+            "42\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workdir.join("out.json")).unwrap(),
+            "{\"v\": 42}\n"
+        );
     }
 }

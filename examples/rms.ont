@@ -2,6 +2,8 @@
 // Evidence uses tolerance: floating-point evidence is a contract.
 fn Stats.meansqdev(%xs: List<F64>) -> F64
   | %res >= 0.0
+  hint "two passes: first let %m = sum(%xs) / len(%xs); then fold deviations (%x - %m) * (%x - %m), divided by len"
+  hint "guard the empty list: if len == 0 return 0.0"
   => [2.0, 4.0] -> 1.0 ± 1e-9
   => [] -> 0.0 ± 0
   ?? [3.0] -> 0.0 ± 1e-12

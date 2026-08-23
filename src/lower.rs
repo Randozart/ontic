@@ -356,11 +356,6 @@ fn emit_builtin(
         }
         Builtin::Sum | Builtin::Max | Builtin::Min => {
             let is_f = matches!(expr_ty(inner, tyenv), Ty::ListF64);
-            let tag = em.fresh(match b {
-                Builtin::Sum => "sum",
-                Builtin::Max => "max",
-                _ => "min",
-            });
             let var = format!("e{}", em.counter);
             let acc = format!("a{}", em.counter);
             let init = match (b, is_f) {
@@ -473,7 +468,7 @@ fn emit_call(
     match target.ret {
         Ty::F64 => {
             let mut parts = Vec::new();
-            for ((ssa, pt)) in &prepared {
+            for (ssa, pt) in &prepared {
                 match pt {
                     Ty::ListF64 | Ty::ListInt => parts.push(format!(
                         "{}: {}",
@@ -958,7 +953,6 @@ fn emit_broadcast(
     em: &mut Emitter,
 ) -> Result<String, String> {
     let out_ty = broadcast_result_ty(lt.clone(), rt.clone());
-    let elem_ty = if matches!(out_ty, Ty::ListF64) { "f64" } else { "i64" };
     let mty_out = if matches!(out_ty, Ty::ListF64) {
         "memref<?xf64>"
     } else {

@@ -236,7 +236,6 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 let mut is_call = false;
                 let mut probe = j;
                 loop {
-                    let save = probe;
                     while probe < b.len() && b[probe].is_ascii_whitespace() {
                         probe += 1;
                     }
@@ -254,8 +253,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                             i = q;
                             continue;
                         }
-                        probe = save;
-                        break;
+                        break; // '.' not followed by ident: not a call path
                     }
                     if probe < b.len() && b[probe] == b'(' {
                         is_call = true;
