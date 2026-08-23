@@ -1,5 +1,9 @@
 # Ontic — Agent Guidelines
 
+> **Vocabulary note (2026-08-23):** specifications were formerly called
+> "wishes"; the project-wide term is now **gen** (`Gen` type, `gen.rs`,
+> `.ont` gen files). Historical documents retain the old term by design.
+
 **2026-08-22:** Initial operating manual. Derived from the briev-lang
 (brief-compiler-dogfood) operating contract; adapted to Ontic's division of
 labour between deterministic verification and stochastic generation.
