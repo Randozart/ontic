@@ -398,3 +398,12 @@ Every acceptance decision traces to deterministic Rust. Differential
 gates caught five real bugs before they could ship. The one capability
 boundary found (multi-pass composition) was closed by architecture
 (vault composition), not model upgrades.
+
+### 2026-08-23 08:50 — PR1 partial: dot vaulted, matvec gap identified
+- Linalg.dot solved with guarded candidate (total function handling
+  mismatched lengths via explicit if/else).
+- Input-relationship invariant removed (probe generator doesn't respect
+  input constraints yet — queued for M3).
+- MatVec NOT expressible: requires constructing List<F64> from computed
+  scalars; sketch list literals only accept number tokens. Queued as
+  language extension (expression-list literals or cons/append builtins).

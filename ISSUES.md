@@ -104,3 +104,16 @@ in the loop early.
 - math.sqrt custom ops rejected by mlir-translate like memref.dim before.
   Fix: explicit --convert-math-to-llvm pass. Expect more of these; keep a
   conversion-pass checklist per new dialect used.
+
+### 2026-08-23 — Probe generator ignores input-relationship invariants
+- Invariant `len(%a) == len(%b)` declared but probes generate mismatched
+  lengths → candidate crashes before invariant can be checked.
+- Workaround: remove input-constraining invariants; make kernels total via
+  explicit guards. Proper fix: constraint-aware probe generation (parse
+  invariants, filter violating inputs). Queued for M3.
+
+### 2026-08-23 — MatVec not expressible in v0 sketch grammar
+- Matrix-vector product requires constructing List<F64> from computed
+  scalars. Sketch grammar supports list literals only with NUMBER tokens,
+  not arbitrary expressions. Need: expression-list literals or list cons/
+  append builtins. Queued as language extension.
