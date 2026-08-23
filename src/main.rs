@@ -34,6 +34,10 @@ fn dispatch(args: &[String]) -> i32 {
         Some("bench") => cmd_bench(args),
         Some("vault") => cmd_vault(args),
         Some("lib") => cmd_lib(args),
+        Some("key") => match args.get(2) {
+            Some(path) => cmd_key(path, None),
+            None => usage("key needs a .ont file"),
+        },
         Some("--help") | Some("-h") | Some("help") | None => {
             print_help();
             0
@@ -59,6 +63,7 @@ USAGE:
   ontic run <file.ont>                            execute a recipe over vaulted fns
   ontic vault [--dir D]                           list verified functions
   ontic lib [ls|promote <Path>|demote <Path>]     manage graduated stdlib entries
+  ontic key <file.ont> [--gen Path]               print canonical SHA-256 key
 
 SOLVE OPTIONS:
   --hand <file>     candidate sketch file (repeatable; skips forge)
@@ -81,7 +86,7 @@ fn load_file(path: &str) -> Result<recipe::OntFile, String> {
 }
 
 /// Pick a gen by path (default: first).
-fn pick_wish<'a>(f: &'a recipe::OntFile, want: Option<&str>) -> Result<gen::Gen, String> {
+fn pick_gen<'a>(f: &'a recipe::OntFile, want: Option<&str>) -> Result<gen::Gen, String> {
     match want {
         Some(p) => f
             .gens
@@ -98,7 +103,7 @@ fn pick_wish<'a>(f: &'a recipe::OntFile, want: Option<&str>) -> Result<gen::Gen,
 }
 
 fn cmd_check(path: &str) -> i32 {
-    match load_file(path).and_then(|f| pick_wish(&f, None)) {
+    match load_file(path).and_then(|f| pick_gen(&f, None)) {
         Ok(w) => {
             println!("gen      : {}", w.path);
             println!("params    : {}", w.params.len());
@@ -372,7 +377,7 @@ fn cmd_bench(args: &[String]) -> i32 {
 /// Shared solve/bench pipeline. When `store` is true the winner is lowered
 /// to MLIR and written to the vault.
 fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
-    let w = match load_file(&opts.wish_path).and_then(|f| pick_wish(&f, opts.wish_sel.as_deref()))
+    let w = match load_file(&opts.wish_path).and_then(|f| pick_gen(&f, opts.wish_sel.as_deref()))
     {
         Ok(w) => w,
         Err(e) => {
@@ -851,6 +856,22 @@ fn build_shared_lib(
 }
 
 
+
+/// `ontic key <file.ont> [--gen Path]` — print the canonical SHA-256 for
+/// a gen. Sole key authority: external tools (pyous) shell out to this
+/// instead of reimplementing canonical serialization.
+fn cmd_key(path: &str, sel: Option<&str>) -> i32 {
+    match load_file(path).and_then(|f| pick_gen(&f, sel)) {
+        Ok(g) => {
+            println!("{}", Vault::key_for(&g));
+            0
+        }
+        Err(e) => {
+            eprintln!("invalid gen: {}", e);
+            1
+        }
+    }
+}
 
 /// Path of the graduation manifest (which gens form the stdlib).
 fn lib_manifest_path() -> String {

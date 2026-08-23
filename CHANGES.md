@@ -268,3 +268,10 @@
     live run); fcfg hoisted out of candidates branch
 - Default cloud model updated per provider guidance: gemini-3.5-flash-lite.
 - ONTIC_DEBUG=1 dumps raw reassembled candidates.
+
+### 2026-08-23 05:20 — Vocabulary: wish -> gen (project-wide)
+- Mechanical sweep across src/docs/examples; module gen.rs; Gen type;
+  --gen selector; historical docs untouched; AGENTS vocabulary note.
+- NEW: `ontic key <file.ont>` — canonical SHA-256 authority for external
+  tools (pyous shells out; no second implementation of canonical()).
+- Verified: ontic key output matches vault keys exactly.
