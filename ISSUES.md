@@ -66,3 +66,9 @@
 - Stats.meansqdev requires two dependent folds (mean, then deviation sum) +
   empty guard. All candidates honestly rejected at S3 with near-misses.
   Not a sieve bug — a capability boundary being measured honestly.
+
+### 2026-08-22 — C23 reserved word broke generated drivers
+- Struct member named `aligned` compiled as an alignment SPECIFIER under
+  clang 18's default std, silently dropping the member. Generated C now uses
+  base/data/off/size/stride field names. Lesson: audit GENERATED code against
+  the newest compiler dialects, not just our grammar.

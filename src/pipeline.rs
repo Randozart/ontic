@@ -17,6 +17,15 @@ fn scratch_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ontic-{}-{}-{}", tag, std::process::id(), n))
 }
 
+/// What a differential driver prints about the return value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RetSpec {
+    I64,
+    F64,
+    /// memref<?xf64> descriptor returned by value; print first 4 elements.
+    ListF64,
+}
+
 /// Harness-level ABI kind per function parameter / return.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CK {
@@ -252,7 +261,7 @@ pub fn eval_c_source(
     list_f64_vals: &[f64],
     scalars_i64: &[i64],
     scalars_f64: &[f64],
-    ret_f64: bool,
+    ret: RetSpec,
 ) -> String {
     let mut proto = String::new();
     let mut decls = String::new();
@@ -304,10 +313,35 @@ pub fn eval_c_source(
             }
         }
     }
-    let ret_t = if ret_f64 { "double" } else { "long" };
-    let fmt = if ret_f64 { "%.17g" } else { "%ld" };
+    let call_args_tail = call_args.trim_end_matches(", ");
+    let (ret_t, fmt) = match ret {
+        RetSpec::I64 => ("long", "%ld"),
+        RetSpec::F64 => ("double", "%.17g"),
+        RetSpec::ListF64 => (
+            "MR",
+            "",
+        ),
+    };
+    let mr_def = "typedef struct { void* base; void* data; long off; long size; long stride; } MR;";
+    let body = match ret {
+        RetSpec::ListF64 => format!(
+            "  MR r = {fname}({args});\n  long n = r.size < 4 ? r.size : 4;\n  printf(\"%ld\", n);\n  double* p = (double*)r.data;\n  for (long i = 0; i < n; i++) printf(\" %.17g\", p[i]);\n  printf(\"\\n\");",
+            fname = fn_name,
+            args = call_args_tail
+        ),
+        _ => format!(
+            "  {ret_t} v = {fname}({args});\n  printf(\"{fmt}\\n\", v);",
+            ret_t = ret_t,
+            fmt = fmt,
+            fname = fn_name,
+            args = call_args_tail
+        ),
+    };
     format!(
         r#"#include <stdio.h>
+#include <stdlib.h>
+
+{mr_def}
 
 extern {ret_t} {fname}({proto});
 
@@ -318,16 +352,16 @@ long ontic_trap(void) {{
 
 int main(void) {{
 {decls}
-  printf("{fmt}\n", {fname}({call_args_tail}));
+{body}
   return 0;
 }}
 "#,
+        mr_def = mr_def,
         ret_t = ret_t,
         fname = fn_name,
         proto = proto,
         decls = decls,
-        fmt = fmt,
-        call_args_tail = call_args.trim_end_matches(", "),
+        body = body,
     )
 }
 
@@ -341,8 +375,8 @@ pub fn eval_native(
     list_f64_vals: &[f64],
     scalars_i64: &[i64],
     scalars_f64: &[f64],
-    ret_f64: bool,
-) -> Result<f64, String> {
+    ret: RetSpec,
+) -> Result<Vec<f64>, String> {
     let dir = scratch_dir("eval");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mlir_p = dir.join("cand.mlir");
@@ -363,7 +397,7 @@ pub fn eval_native(
             list_f64_vals,
             scalars_i64,
             scalars_f64,
-            ret_f64,
+            ret,
         ),
     )
     .map_err(|e| e.to_string())?;
@@ -388,10 +422,12 @@ pub fn eval_native(
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| "bad differential output".to_string())
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let vals: Result<Vec<f64>, _> = text
+        .split_whitespace()
+        .map(|t| t.parse::<f64>())
+        .collect();
+    vals.map_err(|_| format!("bad differential output `{}`", text))
 }
 
 /// Full native measurement: write mlir, lower, emit object, build harness,
@@ -484,11 +520,11 @@ mod tests {
             &[],
             &[],
             &[],
-            false,
+            RetSpec::I64,
         )
         .expect("native evaluates");
-        assert_eq!(got, 31.0, "sanity");
-        assert_eq!(got, match expect {
+        assert_eq!(got, vec![31.0], "sanity");
+        assert_eq!(got[0], match expect {
             Value::Int(v) => v as f64,
             other => panic!("unexpected {:?}", other),
         });
@@ -523,9 +559,10 @@ mod trap_tests {
         let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false).unwrap();
 
         // Clean inputs: both tiers agree.
-        let got = eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], false)
-            .expect("clean runs");
-        assert_eq!(got, 12.0);
+        let got =
+            eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], RetSpec::I64)
+                .expect("clean runs");
+        assert_eq!(got, vec![12.0]);
 
         // Overflowing inputs: interpreter kills...
         let killed = interp::eval_candidate(
@@ -536,7 +573,7 @@ mod trap_tests {
         assert!(killed.is_err());
         // ...and native must not return a value either.
         assert!(
-            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], false).is_err(),
+            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], RetSpec::I64).is_err(),
             "native returned a value where the oracle kills"
         );
     }
@@ -577,11 +614,11 @@ mod float_tests {
             &[],
             &[],
             &[1.5, 2.5],
-            true,
+            RetSpec::F64,
         )
         .unwrap();
         match expect {
-            Value::Float(f) => assert_eq!(got, f),
+            Value::Float(f) => assert_eq!(got, vec![f]),
             other => panic!("unexpected {:?}", other),
         }
     }
@@ -620,11 +657,65 @@ mod listf64_tests {
             &[1.5, 2.0, -0.5],
             &[],
             &[],
-            true,
+            RetSpec::F64,
         )
         .unwrap();
         match expect {
-            Value::Float(f) => assert_eq!(got, f),
+            Value::Float(f) => assert_eq!(got, vec![f]),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod broadcast_tests {
+    use super::*;
+    use crate::{check, interp, lower, sketch};
+    use crate::wish::Value;
+
+    /// P2 gate: a broadcasting function returns a memref descriptor natively;
+    /// elements must match the oracle elementwise.
+    #[test]
+    fn test_broadcast_native_parity() {
+        if find_tool("mlir-opt").is_none() || find_tool("llc").is_none() {
+            eprintln!("toolchain missing; broadcast parity skipped");
+            return;
+        }
+        let cand = sketch::parse(
+            "fn @scale(%xs: List<F64>) -> List<F64> { %xs * 3.0 + 1.0 }",
+        )
+        .unwrap();
+        crate::check::check(&cand).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true)
+            .expect("lowers");
+        assert!(mlir.contains("memref.alloc"), "no result alloc");
+        assert!(mlir.contains("arith.mulf"), "no elementwise mulf");
+
+        let expect = interp::eval_candidate(
+            &cand,
+            &[Value::FloatList(vec![1.0, 2.0])],
+            interp::Ctx::checked(),
+        )
+        .unwrap();
+        let got = eval_native(
+            &mlir,
+            "scale",
+            &[CK::ListF64],
+            &[],
+            &[1.0, 2.0],
+            &[],
+            &[],
+            RetSpec::ListF64,
+        )
+        .expect("native runs");
+        match expect {
+            Value::FloatList(fs) => {
+                // Driver prints count then up to 4 elements.
+                assert_eq!(got[0] as usize, fs.len());
+                for (g, f) in got[1..].iter().zip(fs.iter()) {
+                    assert_eq!(g, f);
+                }
+            }
             other => panic!("unexpected {:?}", other),
         }
     }

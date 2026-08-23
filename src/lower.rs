@@ -159,10 +159,8 @@ fn mlir_ret_type(ty: &Ty) -> Result<&'static str, String> {
     match ty {
         Ty::Int | Ty::Bool => Ok("i64"),
         Ty::F64 => Ok("f64"),
-        // Functions return scalars; list-returning wishes are a planned M2 extension.
-        Ty::ListInt | Ty::ListF64 => {
-            Err("lowering: list-returning functions not supported".to_string())
-        }
+        Ty::ListInt => Ok("memref<?xi64>"),
+        Ty::ListF64 => Ok("memref<?xf64>"),
     }
 }
 
@@ -534,6 +532,18 @@ fn emit_binop(
     if is_comparison(op) {
         return emit_cmp(op, &lv_s, &rv_s, any_float, em);
     }
+    // Broadcasting: either operand a list -> elementwise loop over a fresh
+    // result memref. Scalar operands are loaded per-iteration.
+    let l_listy = matches!(lt, Ty::ListInt | Ty::ListF64);
+    let r_listy = matches!(rt, Ty::ListInt | Ty::ListF64);
+    if (l_listy || r_listy)
+        && matches!(
+            op,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+        )
+    {
+        return emit_broadcast(op, l, r, &lv_s, &rv_s, &lt, &rt, tyenv, em);
+    }
     if any_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
         let out = em.fresh("opf");
         let stmt = match op {
@@ -664,14 +674,31 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
         Expr::If(_, t, _) => expr_ty(t, tyenv),
         Expr::Let(_, _, b) => expr_ty(b, tyenv),
         Expr::Fold { init, .. } => expr_ty(init, tyenv),
-        Expr::BinOp(op, l, _) => match op {
+        Expr::BinOp(op, l, r) => match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                // Arith result type follows its left operand (candidates are
-                // pre-typechecked, so operands agree).
-                expr_ty(l, tyenv)
+                let lt = expr_ty(l, tyenv);
+                let rt = expr_ty(r, tyenv);
+                broadcast_result_ty(lt, rt)
             }
             _ => Ty::Bool,
         },
+    }
+}
+
+/// Result type of arithmetic over two operand types (broadcast rules,
+/// mirroring check.rs).
+fn broadcast_result_ty(lt: Ty, rt: Ty) -> Ty {
+    use Ty::*;
+    let num = |t: &Ty| matches!(t, Int | F64);
+    let any_f = matches!(lt, F64 | ListF64) || matches!(rt, F64 | ListF64);
+    match (&lt, &rt) {
+        (ListInt, ListInt) => ListInt,
+        (ListInt, t) | (t, ListInt) if num(t) && any_f => ListF64,
+        (ListInt, t) | (t, ListInt) if num(t) => ListInt,
+        (ListF64, _) | (_, ListF64) if num(&lt) || num(&rt) || matches!(lt, ListF64) || matches!(rt, ListF64) => {
+            ListF64
+        }
+        _ => if any_f { F64 } else { Int },
     }
 }
 
@@ -795,5 +822,188 @@ mod tier_tests {
         let plain = emit_fn(&c.name, &c.params, &c.ret, &c.body, true).unwrap();
         assert!(!plain.contains("i128"));
         assert!(plain.contains("arith.addi"));
+    }
+}
+
+/// Broadcasting lowering: guard equal lengths (trap on mismatch — the oracle
+/// errors there), allocate a result memref, elementwise loop with stores.
+/// Scalar operands are re-loaded per iteration; Int elements widen via
+/// arith.sitofp when the result is F64.
+#[allow(clippy::too_many_arguments)]
+fn emit_broadcast(
+    op: BinOp,
+    l: &Expr,
+    r: &Expr,
+    lv_ssa: &str,
+    rv_ssa: &str,
+    lt: &Ty,
+    rt: &Ty,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let out_ty = broadcast_result_ty(lt.clone(), rt.clone());
+    let elem_ty = if matches!(out_ty, Ty::ListF64) { "f64" } else { "i64" };
+    let mty_out = if matches!(out_ty, Ty::ListF64) {
+        "memref<?xf64>"
+    } else {
+        "memref<?xi64>"
+    };
+
+    // Size source: whichever operand is a list.
+    let (size_ssa, mty_in) = if matches!(lt, Ty::ListInt | Ty::ListF64) {
+        (
+            lv_ssa.to_string(),
+            if matches!(lt, Ty::ListF64) {
+                "memref<?xf64>"
+            } else {
+                "memref<?xi64>"
+            },
+        )
+    } else {
+        (
+            rv_ssa.to_string(),
+            if matches!(rt, Ty::ListF64) {
+                "memref<?xf64>"
+            } else {
+                "memref<?xi64>"
+            },
+        )
+    };
+    let idx0 = em.const_index(0);
+    let step = em.const_index(1);
+    let dim = em.fresh("bdim");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim, size_ssa, idx0, mty_in
+    ));
+
+    // Length guard when both operands are lists: mismatch traps, matching
+    // the oracle's zip-mismatch error.
+    if matches!(lt, Ty::ListInt | Ty::ListF64) && matches!(rt, Ty::ListInt | Ty::ListF64) {
+        let mty_r = if matches!(rt, Ty::ListF64) {
+            "memref<?xf64>"
+        } else {
+            "memref<?xi64>"
+        };
+        let dim_r = em.fresh("brdim");
+        em.line(&format!(
+            "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+            dim_r, rv_ssa, idx0, mty_r
+        ));
+        let eq = em.fresh("beq");
+        em.line(&format!(
+            "{} = arith.cmpi eq, {}, {} : index",
+            eq, dim, dim_r
+        ));
+        let guard = em.fresh("bguard");
+        em.line(&format!("{} = scf.if {} -> (i64) {{", guard, eq));
+        em.indent += 1;
+        let zero = em.const_i64(0);
+        em.line(&format!("scf.yield {} : i64", zero));
+        em.indent -= 1;
+        em.line("} else {");
+        em.indent += 1;
+        let trapped = em.fresh("trap");
+        em.line(&format!(
+            "{} = func.call @ontic_trap() : () -> i64",
+            trapped
+        ));
+        em.line(&format!("scf.yield {} : i64", trapped));
+        em.indent -= 1;
+        em.line("}");
+    }
+
+    let alloc = em.fresh("balloc");
+    em.line(&format!(
+        "{} = memref.alloc({}) : {}",
+        alloc, dim, mty_out
+    ));
+
+    let iv = em.fresh("bi");
+    // No iter_args: results flow through the result memref stores.
+    em.line(&format!("scf.for {} = {} to {} step {} {{", iv, idx0, dim, step));
+    em.indent += 1;
+
+    let l_elem = if matches!(lt, Ty::ListInt | Ty::ListF64) {
+        let x = em.fresh("bx");
+        em.line(&format!(
+            "{} = memref.load {}[{}] : {}",
+            x, lv_ssa, iv, list_memref(l, tyenv)
+        ));
+        x
+    } else {
+        lv_ssa.to_string()
+    };
+    let r_elem = if matches!(rt, Ty::ListInt | Ty::ListF64) {
+        let y = em.fresh("by");
+        em.line(&format!(
+            "{} = memref.load {}[{}] : {}",
+            y, rv_ssa, iv, list_memref(r, tyenv)
+        ));
+        y
+    } else {
+        rv_ssa.to_string()
+    };
+
+    // Elementwise op (widen ints into f64 results).
+    let (a, b) = if matches!(out_ty, Ty::ListF64) {
+        let a = elem_to_f64(l_elem, &lt_scalar_kind(lt), em);
+        let b = elem_to_f64(r_elem, &lt_scalar_kind(rt), em);
+        (a, b)
+    } else {
+        (l_elem, r_elem)
+    };
+
+    let val = em.fresh("bv");
+    let stmt = match (matches!(out_ty, Ty::ListF64), op) {
+        (_, BinOp::Add) if matches!(out_ty, Ty::ListF64) => {
+            format!("{} = arith.addf {}, {} : f64", val, a, b)
+        }
+        (_, BinOp::Sub) if matches!(out_ty, Ty::ListF64) => {
+            format!("{} = arith.subf {}, {} : f64", val, a, b)
+        }
+        (_, BinOp::Mul) if matches!(out_ty, Ty::ListF64) => {
+            format!("{} = arith.mulf {}, {} : f64", val, a, b)
+        }
+        (_, BinOp::Div) if matches!(out_ty, Ty::ListF64) => {
+            format!("{} = arith.divf {}, {} : f64", val, a, b)
+        }
+        (true, _) => format!("{} = arith.remf {}, {} : f64", val, a, b),
+        (_, BinOp::Add) => format!("{} = arith.addi {}, {} : i64", val, a, b),
+        (_, BinOp::Sub) => format!("{} = arith.subi {}, {} : i64", val, a, b),
+        (_, BinOp::Mul) => format!("{} = arith.muli {}, {} : i64", val, a, b),
+        (_, BinOp::Div) => format!("{} = arith.divsi {}, {} : i64", val, a, b),
+        _ => format!("{} = arith.remsi {}, {} : i64", val, a, b),
+    };
+    em.line(&stmt);
+    em.line(&format!(
+        "memref.store {}, {}[{}] : {}",
+        val, alloc, iv, mty_out
+    ));
+    // Bare scf.for has no yield; the alloc carries the result.
+    em.indent -= 1;
+    em.line("}");
+    Ok(alloc)
+}
+
+/// Element kind fed to elem_to_f64: lists contribute their ELEMENT type;
+/// scalars are already their own type.
+fn lt_scalar_kind(t: &Ty) -> Ty {
+    match t {
+        Ty::ListF64 => Ty::F64,
+        Ty::ListInt => Ty::Int,
+        other => other.clone(),
+    }
+}
+
+/// Widen an int-typed element value to f64 in place.
+fn elem_to_f64(x: String, t: &Ty, em: &mut Emitter) -> String {
+    match t {
+        Ty::Int => {
+            let w = em.fresh("widen");
+            em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, x));
+            w
+        }
+        _ => x,
     }
 }

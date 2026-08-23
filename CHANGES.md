@@ -156,3 +156,14 @@
 - interp.rs: eval_broadcast — elementwise arith, scalar application,
   zip with honest length-mismatch errors.
 - 95 tests green (broadcast + builtin semantics pinned).
+
+### 2026-08-22 04:10 — P2c: broadcast lowering + list-returning functions
+- lower.rs: functions return memref<?xT>; emit_broadcast — length guard
+  (trap on mismatch, matching oracle zip error), result alloc, bare
+  scf.for elementwise loop, sitofp widening into F64 results.
+- pipeline.rs: RetSpec (I64/F64/ListF64); differential drivers print list
+  descriptors (count + first 4 elems).
+- C23 gotcha: struct member named `aligned` is a reserved specifier under
+  clang 18 defaults — renamed to `data` (ISSUES.md entry).
+- Gate: test_broadcast_native_parity (%xs*3.0+1.0 through native memref).
+- 96 tests green.
