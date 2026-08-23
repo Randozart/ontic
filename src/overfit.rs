@@ -7,7 +7,7 @@
 //! no real computation).
 
 use crate::sketch::{BinOp, Candidate, Expr};
-use crate::wish::Example;
+use crate::gen::Example;
 use std::collections::HashSet;
 
 /// Scanner thresholds. One struct, one place — never scattered literals.
@@ -66,10 +66,10 @@ fn example_literals(transparent: &[Example]) -> HashSet<i64> {
     for ex in transparent {
         for v in ex.inputs.iter().chain(std::iter::once(&ex.output)) {
             match v {
-                crate::wish::Value::Int(i) => {
+                crate::gen::Value::Int(i) => {
                     out.insert(*i);
                 }
-                crate::wish::Value::List(vs) => {
+                crate::gen::Value::List(vs) => {
                     out.extend(vs.iter().copied());
                 }
                 _ => {}
@@ -231,18 +231,18 @@ pub fn scan(cand: &Candidate, transparent: &[Example], cfg: &OverfitConfig) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{sketch, wish};
+    use crate::{sketch, gen};
 
     fn examples() -> Vec<Example> {
         vec![
-            wish::Example {
-                inputs: vec![wish::Value::List(vec![1, 2, 3])],
-                output: wish::Value::Int(6),
+            gen::Example {
+                inputs: vec![gen::Value::List(vec![1, 2, 3])],
+                output: gen::Value::Int(6),
              tol: 0.0,
             },
-            wish::Example {
-                inputs: vec![wish::Value::List(vec![4, 5])],
-                output: wish::Value::Int(9),
+            gen::Example {
+                inputs: vec![gen::Value::List(vec![4, 5])],
+                output: gen::Value::Int(9),
              tol: 0.0,
             },
         ]
@@ -274,8 +274,8 @@ mod tests {
         )
         .unwrap();
         let exs = vec![
-            Example { inputs: vec![wish::Value::Int(1)], output: wish::Value::Int(2), tol: 0.0 },
-            Example { inputs: vec![wish::Value::Int(4)], output: wish::Value::Int(9), tol: 0.0 },
+            Example { inputs: vec![gen::Value::Int(1)], output: gen::Value::Int(2), tol: 0.0 },
+            Example { inputs: vec![gen::Value::Int(4)], output: gen::Value::Int(9), tol: 0.0 },
         ];
         let v = scan(&c, &exs, &OverfitConfig::default());
         assert!(matches!(v, OverfitVerdict::Suspicious(_)), "got {:?}", v);
@@ -286,8 +286,8 @@ mod tests {
         // Comparing against non-example constant is honest branching.
         let c = sketch::parse("fn @t(%n: Int) -> Int { if %n > 100 { 100 } else { %n * 2 } }").unwrap();
         let exs = vec![
-            Example { inputs: vec![wish::Value::Int(3)], output: wish::Value::Int(6), tol: 0.0 },
-            Example { inputs: vec![wish::Value::Int(7)], output: wish::Value::Int(14), tol: 0.0 },
+            Example { inputs: vec![gen::Value::Int(3)], output: gen::Value::Int(6), tol: 0.0 },
+            Example { inputs: vec![gen::Value::Int(7)], output: gen::Value::Int(14), tol: 0.0 },
         ];
         assert_eq!(scan(&c, &exs, &OverfitConfig::default()), OverfitVerdict::Clean);
     }

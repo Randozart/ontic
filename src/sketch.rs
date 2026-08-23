@@ -78,7 +78,7 @@ pub enum Expr {
     /// Unary builtins: Len/Sum/Max/Min over lists; Sqrt/Exp/Log/Abs numeric.
     Builtin(Builtin, Box<Expr>),
     /// Vault dependency call: Path.name(arg, ...). Validated against the
-    /// wish's declared `use` deps; executed from the vault at sieve time.
+    /// gen's declared `use` deps; executed from the vault at sieve time.
     Call(String, Vec<Expr>),
     Fold {
         var: String,
@@ -725,7 +725,7 @@ impl Parser {
     }
 }
 
-/// Parse a standalone expression (used for wish invariants).
+/// Parse a standalone expression (used for gen invariants).
 pub fn parse_expr_str(src: &str) -> Result<Expr, ParseError> {
     let toks = lex(src)?;
     if toks.is_empty() {

@@ -1,10 +1,10 @@
 //! Vault: content-addressed store of verified implementations.
-//! Key = SHA-256 of the wish's canonical text (transparent evidence only —
+//! Key = SHA-256 of the gen's canonical text (transparent evidence only —
 //! opaque sets are sieve-internal and never enter keys). Entries are plain
 //! files: `<key>.mlir` + `<key>.json` manifest.
 
 use crate::sha256::sha256_hex;
-use crate::wish::Wish;
+use crate::gen::Gen;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,9 +34,9 @@ impl Vault {
         Ok(Vault { dir })
     }
 
-    /// Content address of a wish — canonical text is the identity payload.
-    pub fn key_for(wish: &Wish) -> String {
-        sha256_hex(wish.canonical().as_bytes())
+    /// Content address of a gen — canonical text is the identity payload.
+    pub fn key_for(gen: &Gen) -> String {
+        sha256_hex(gen.canonical().as_bytes())
     }
 
     fn mlir_path(&self, key: &str) -> PathBuf {
@@ -51,25 +51,25 @@ impl Vault {
     /// `extra_meta` merges into the manifest (e.g. solve provenance).
     pub fn put_meta(
         &self,
-        wish: &Wish,
+        gen: &Gen,
         sketch_text: &str,
         mlir: &str,
         extra_meta: &serde_json::Value,
     ) -> Result<String, String> {
-        let key = Self::key_for(wish);
+        let key = Self::key_for(gen);
         fs::write(self.mlir_path(&key), mlir)
             .map_err(|e| format!("mlir write failed: {}", e))?;
-        let params: Vec<String> = wish
+        let params: Vec<String> = gen
             .params
             .iter()
             .map(|(n, t)| format!("%{}: {}", n, t.name()))
             .collect();
-        let canonical = wish.canonical();
+        let canonical = gen.canonical();
         let manifest = json!({
-            "name": wish.name,
-            "path": wish.path,
-            "signature": format!("fn {}({}) -> {}", wish.path, params.join(", "), wish.ret.name()),
-            "wrapping": wish.wrapping,
+            "name": gen.name,
+            "path": gen.path,
+            "signature": format!("fn {}({}) -> {}", gen.path, params.join(", "), gen.ret.name()),
+            "wrapping": gen.wrapping,
             "canonical": canonical,
             "sketch": sketch_text,
             "ns_per_call_note": "see solve output; timing is machine-specific",
@@ -84,11 +84,11 @@ impl Vault {
     }
 
     /// Store without provenance metadata.
-    pub fn put(&self, wish: &Wish, sketch_text: &str, mlir: &str) -> Result<String, String> {
-        self.put_meta(wish, sketch_text, mlir, &serde_json::Value::Null)
+    pub fn put(&self, gen: &Gen, sketch_text: &str, mlir: &str) -> Result<String, String> {
+        self.put_meta(gen, sketch_text, mlir, &serde_json::Value::Null)
     }
 
-    /// Find a solved entry by wish path (latest match wins).
+    /// Find a solved entry by gen path (latest match wins).
     /// Dependencies are resolved by path because their full canonical text
     /// lives only in the manifest — stored at solve time.
     pub fn find_by_path(&self, path: &str) -> Option<Entry> {
@@ -151,15 +151,15 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wish;
+    use crate::gen;
 
-    const WISH_SRC: &str = "fn f(%a: Int) -> Int\n  => 1 -> 2\n";
+    const GEN_SRC: &str = "fn f(%a: Int) -> Int\n  => 1 -> 2\n";
 
     #[test]
     fn test_key_is_sha256_of_canonical_and_stable() {
-        let w = wish::parse(WISH_SRC).unwrap();
+        let w = gen::parse(GEN_SRC).unwrap();
         let k1 = Vault::key_for(&w);
-        let w2 = wish::parse(&w.canonical()).unwrap();
+        let w2 = gen::parse(&w.canonical()).unwrap();
         assert_eq!(k1, Vault::key_for(&w2));
         assert_eq!(k1.len(), 64);
     }
@@ -168,7 +168,7 @@ mod tests {
     fn test_put_get_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("ontic-vault-test-{}", std::process::id()));
         let v = Vault::open(&tmp).expect("opens");
-        let w = wish::parse(WISH_SRC).unwrap();
+        let w = gen::parse(GEN_SRC).unwrap();
         let key = v.put(&w, "fn @f(%a: Int) -> Int { %a * 2 }", "module { }").unwrap();
         let e = v.get(&key).expect("entry exists");
         assert_eq!(e.name, "f");
@@ -181,8 +181,8 @@ mod tests {
     fn test_list_sorted_by_key() {
         let tmp = std::env::temp_dir().join(format!("ontic-vault-list-{}", std::process::id()));
         let v = Vault::open(&tmp).expect("opens");
-        let w1 = wish::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
-        let w2 = wish::parse("fn f(%a: Int) -> Int\n  => 1 -> 3\n").unwrap();
+        let w1 = gen::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
+        let w2 = gen::parse("fn f(%a: Int) -> Int\n  => 1 -> 3\n").unwrap();
         v.put(&w1, "s1", "m1").unwrap();
         v.put(&w2, "s2", "m2").unwrap();
         let all = v.list().unwrap();
@@ -192,7 +192,7 @@ mod tests {
     }
 }
 
-/// Extract the wish path from a stored signature line (`fn Path.name(...)`).
+/// Extract the gen path from a stored signature line (`fn Path.name(...)`).
 fn signature_path(signature: &str) -> String {
     let inner = signature.strip_prefix("fn ").unwrap_or(signature);
     match inner.find('(') {

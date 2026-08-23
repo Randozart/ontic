@@ -2,7 +2,7 @@
 //! If this and the MLIR lowering disagree, this module wins (AGENTS.md rule 6).
 
 use crate::sketch::{BinOp, Builtin, Expr, UnOp};
-use crate::wish::Value;
+use crate::gen::Value;
 use std::collections::HashMap;
 
 /// Evaluation failure — any of these kills a candidate at S3–S5.
@@ -29,7 +29,7 @@ impl std::fmt::Display for EvalError {
 
 pub type Env = HashMap<String, Value>;
 
-/// Evaluation semantics tier. `wrapping` mirrors a wish's declared wrapping
+/// Evaluation semantics tier. `wrapping` mirrors a gen's declared wrapping
 /// clause: arithmetic wraps mod 2^64 and only division/modulo-by-zero are
 /// errors. Default (checked) kills candidates on any overflow so probes can
 /// expose unguarded paths.

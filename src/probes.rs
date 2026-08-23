@@ -5,7 +5,7 @@
 
 use crate::rng::Rng;
 use crate::sketch::Ty;
-use crate::wish::{Value, Wish};
+use crate::gen::{Value, Gen};
 
 /// Probe-domain bounds for v0 integer values.
 pub const INT_LO: i64 = -1000;
@@ -67,14 +67,14 @@ fn sample(ty: &Ty, rng: &mut Rng) -> Value {
 /// Generate a deterministic probe plan: up to `edge_budget` edge combinations
 /// followed by `count` random rows.
 ///
-/// Edge combination cap keeps multi-param wishes from exploding; selection is
+/// Edge combination cap keeps multi-param gens from exploding; selection is
 /// round-robin over per-param edge lists so coverage stays spread evenly.
-pub fn generate(wish: &Wish, count: usize, seed: u64, edge_budget: usize) -> Vec<Vec<Value>> {
+pub fn generate(gen: &Gen, count: usize, seed: u64, edge_budget: usize) -> Vec<Vec<Value>> {
     let mut rows: Vec<Vec<Value>> = Vec::new();
-    if wish.params.is_empty() {
+    if gen.params.is_empty() {
         return rows;
     }
-    let per_param: Vec<Vec<Value>> = wish.params.iter().map(|(_, t)| edges(t)).collect();
+    let per_param: Vec<Vec<Value>> = gen.params.iter().map(|(_, t)| edges(t)).collect();
     let mut cursor = vec![0usize; per_param.len()];
     for _ in 0..edge_budget {
         let row: Vec<Value> = per_param
@@ -103,7 +103,7 @@ pub fn generate(wish: &Wish, count: usize, seed: u64, edge_budget: usize) -> Vec
     let mut rng = Rng::new(seed);
     for _ in 0..count {
         rows.push(
-            wish.params
+            gen.params
                 .iter()
                 .map(|(_, t)| sample(t, &mut rng))
                 .collect(),
@@ -115,10 +115,10 @@ pub fn generate(wish: &Wish, count: usize, seed: u64, edge_budget: usize) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wish;
+    use crate::gen;
 
-    fn ledger_wish() -> Wish {
-        wish::parse("fn f(%items: List<Int>) -> Int\n  => [1] -> 1\n  => [2] -> 2\n").unwrap()
+    fn ledger_wish() -> Gen {
+        gen::parse("fn f(%items: List<Int>) -> Int\n  => [1] -> 1\n  => [2] -> 2\n").unwrap()
     }
 
     #[test]

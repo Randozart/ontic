@@ -1,12 +1,12 @@
 //! Recipes: linear programs over verified functions.
 //!
 //! THE WALL preserved: recipe glue is deterministic text; every computation
-//! lives in sieved, vault-verified wishes. One `.ont` may hold many `fn`
-//! wishes plus at most one `program` block.
+//! lives in sieved, vault-verified gens. One `.ont` may hold many `fn`
+//! gens plus at most one `program` block.
 //!
 //! ```text
 //! program Demo
-//!   wish Ledger.total
+//!   gen Ledger.total
 //! start
 //!   %xs = [1,2,3]
 //!   %r  = Ledger.total(%xs)
@@ -15,13 +15,13 @@
 //! ```
 
 use crate::sketch::Ty;
-use crate::wish::{self, Wish};
+use crate::gen::{self, Gen};
 
 /// One linear statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// `%x = [1,2,3]` / `%x = 7`
-    BindLit(String, wish::Value),
+    BindLit(String, gen::Value),
     /// `%r = Path.name(%a, 7)` — callee must be a declared dependency;
     /// args are variables or literals.
     BindCall(String, String, Vec<CallArg>),
@@ -46,7 +46,7 @@ pub enum LogSeg {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallArg {
     Var(String),
-    Lit(wish::Value),
+    Lit(gen::Value),
 }
 
 impl CallArg {
@@ -62,23 +62,23 @@ impl CallArg {
 #[derive(Debug, Clone)]
 pub struct Program {
     pub name: String,
-    /// Declared dependencies, in order. Each must resolve to a verified wish.
+    /// Declared dependencies, in order. Each must resolve to a verified gen.
     pub deps: Vec<String>,
     pub body: Vec<Stmt>,
 }
 
-/// A whole `.ont` file: possibly several wishes plus an optional program.
+/// A whole `.ont` file: possibly several gens plus an optional program.
 #[derive(Debug, Clone)]
 pub struct OntFile {
-    pub wishes: Vec<Wish>,
+    pub gens: Vec<Gen>,
     pub program: Option<Program>,
 }
 
-/// Split raw `.ont` text into wish chunks and an optional program block.
-/// A line starting with `fn ` begins a new wish chunk; indented continuation
+/// Split raw `.ont` text into gen chunks and an optional program block.
+/// A line starting with `fn ` begins a new gen chunk; indented continuation
 /// lines (`|`, `=>`, `??`, `wrapping`) join the open chunk.
 fn split_chunks(src: &str) -> Result<(Vec<String>, Vec<String>), String> {
-    let mut wishes: Vec<String> = Vec::new();
+    let mut gens: Vec<String> = Vec::new();
     let mut prog_lines: Vec<String> = Vec::new();
     let mut in_program = false;
     let mut pending: Option<String> = None;
@@ -110,34 +110,34 @@ fn split_chunks(src: &str) -> Result<(Vec<String>, Vec<String>), String> {
             continue;
         }
         if trimmed.starts_with("use ") && !in_program {
-            // Dependency declarations ride the pending prefix onto the wish.
+            // Dependency declarations ride the pending prefix onto the gen.
             let e = pending.get_or_insert_with(String::new);
             e.push_str(line);
             e.push('\n');
             continue;
         }
         if trimmed.starts_with("fn ") {
-            // A pre-`fn` prefix (e.g. `wrapping`) belongs to this wish.
-            wishes.push(pending.take().unwrap_or_default());
-            let last = wishes.last_mut().expect("chunk exists");
+            // A pre-`fn` prefix (e.g. `wrapping`) belongs to this gen.
+            gens.push(pending.take().unwrap_or_default());
+            let last = gens.last_mut().expect("chunk exists");
             if !last.is_empty() {
                 last.push('\n');
             }
-        } else if wishes.is_empty() {
-            // Buffer pre-signature lines; validated by wish::parse later.
+        } else if gens.is_empty() {
+            // Buffer pre-signature lines; validated by gen::parse later.
             let e = pending.get_or_insert_with(String::new);
             e.push_str(line);
             e.push('\n');
             continue;
         }
-        let last = wishes.last_mut().expect("chunk exists");
+        let last = gens.last_mut().expect("chunk exists");
         last.push_str(line);
         last.push('\n');
     }
     if in_program {
         return Err("program block missing `end`".to_string());
     }
-    Ok((wishes, prog_lines))
+    Ok((gens, prog_lines))
 }
 
 /// Parse the program block lines into a Program.
@@ -293,12 +293,12 @@ fn parse_var_ref(s: &str) -> Result<String, String> {
         .ok_or_else(|| format!("expected %variable, got `{}`", s))
 }
 
-/// Reuse the wish example-value scanner for literals.
-fn wish_value_from_str(s: &str) -> Result<wish::Value, String> {
+/// Reuse the gen example-value scanner for literals.
+fn wish_value_from_str(s: &str) -> Result<gen::Value, String> {
     // Values share syntax with examples; wrap as a tiny fake example and
     // borrow its parser to avoid duplicating grammar.
     let ex = format!("=> {} -> 0", s);
-    let parsed = crate::wish::parse_example_line_pub(&ex)?;
+    let parsed = crate::gen::parse_example_line_pub(&ex)?;
     Ok(parsed.inputs.into_iter().next().expect("one value"))
 }
 
@@ -307,15 +307,15 @@ fn wish_value_from_str(s: &str) -> Result<wish::Value, String> {
 // ---------------------------------------------------------------------------
 
 /// Type of every live local after checking the whole program.
-pub fn typecheck(prog: &Program, wishes: &[Wish]) -> Result<(), String> {
-    // Dependency resolution: same-file wishes by full path.
-    let mut sigs: Vec<&Wish> = Vec::new();
+pub fn typecheck(prog: &Program, gens: &[Gen]) -> Result<(), String> {
+    // Dependency resolution: same-file gens by full path.
+    let mut sigs: Vec<&Gen> = Vec::new();
     for dep in &prog.deps {
-        match wishes.iter().find(|w| &w.path == dep) {
+        match gens.iter().find(|w| &w.path == dep) {
             Some(w) => sigs.push(w),
             None => {
                 return Err(format!(
-                    "dependency `{}` not found among same-file wishes",
+                    "dependency `{}` not found among same-file gens",
                     dep
                 ))
             }
@@ -392,24 +392,24 @@ fn lookup(locals: &[(String, Ty)], name: &str) -> Result<Ty, String> {
         .ok_or_else(|| format!("undefined variable `%{}`", name))
 }
 
-/// Parse a full `.ont` file: many wishes, optional program.
+/// Parse a full `.ont` file: many gens, optional program.
 pub fn parse_ont(src: &str) -> Result<OntFile, String> {
     let (chunks, prog_lines) = split_chunks(src)?;
     if chunks.is_empty() {
-        return Err("no wishes in file".to_string());
+        return Err("no gens in file".to_string());
     }
-    let mut wishes = Vec::new();
+    let mut gens = Vec::new();
     for chunk in &chunks {
-        wishes.push(wish::parse(chunk)?);
+        gens.push(gen::parse(chunk)?);
     }
     let program = if prog_lines.is_empty() {
         None
     } else {
         Some(parse_program(&prog_lines)?)
     };
-    let file = OntFile { wishes, program };
+    let file = OntFile { gens, program };
     if let Some(prog) = &file.program {
-        typecheck(prog, &file.wishes)?;
+        typecheck(prog, &file.gens)?;
     }
     Ok(file)
 }
@@ -443,14 +443,14 @@ end
     #[test]
     fn test_parse_multi_wish_file_with_program() {
         let f = parse_ont(FILE).expect("parses");
-        assert_eq!(f.wishes.len(), 2);
+        assert_eq!(f.gens.len(), 2);
         let prog = f.program.expect("has program");
         assert_eq!(prog.name, "Demo");
         assert_eq!(prog.deps, vec!["Ledger.total", "Twice"]);
         assert_eq!(prog.body.len(), 5);
         assert_eq!(
             prog.body[0],
-            Stmt::BindLit("xs".into(), wish::Value::List(vec![1, 2, 3]))
+            Stmt::BindLit("xs".into(), gen::Value::List(vec![1, 2, 3]))
         );
         assert_eq!(
             prog.body[1],
@@ -464,13 +464,13 @@ end
     }
 
     #[test]
-    fn test_wishes_remain_individually_valid() {
+    fn test_gens_remain_individually_valid() {
         let f = parse_ont(FILE).expect("parses");
-        assert_eq!(f.wishes[0].name, "total");
-        assert!(f.wishes[0].wrapping);
-        assert_eq!(f.wishes[1].name, "Twice");
-        assert!(!f.wishes[1].wrapping);
-        assert_eq!(f.wishes[0].transparent.len(), 2);
+        assert_eq!(f.gens[0].name, "total");
+        assert!(f.gens[0].wrapping);
+        assert_eq!(f.gens[1].name, "Twice");
+        assert!(!f.gens[1].wrapping);
+        assert_eq!(f.gens[0].transparent.len(), 2);
     }
 
     #[test]

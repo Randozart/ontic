@@ -1,4 +1,4 @@
-//! Ontic CLI: `check` a wish, `solve` it (hand candidates or forge), `bench`
+//! Ontic CLI: `check` a gen, `solve` it (hand candidates or forge), `bench`
 //! survivors, and inspect the `vault`. Hand-rolled arg parsing — no clap.
 
 use ontic::forge::{self, ForgeConfig};
@@ -10,7 +10,7 @@ use ontic::recipe;
 use ontic::sketch;
 use ontic::sieve::{self, SiegeConfig};
 use ontic::vault::Vault;
-use ontic::wish;
+use ontic::gen;
 
 fn main() {
     // .env is the lowest-precedence source; real env always wins.
@@ -33,6 +33,7 @@ fn dispatch(args: &[String]) -> i32 {
         Some("solve") => cmd_solve(args),
         Some("bench") => cmd_bench(args),
         Some("vault") => cmd_vault(args),
+        Some("lib") => cmd_lib(args),
         Some("--help") | Some("-h") | Some("help") | None => {
             print_help();
             0
@@ -52,11 +53,12 @@ fn print_help() {
         "ontic — stochastic specification compiler
 
 USAGE:
-  ontic check <file.ont>                          validate a wish, report probe strength
+  ontic check <file.ont>                          validate a gen, report probe strength
   ontic solve <file.ont> [opts]                   sieve candidates; winner -> vault as MLIR
   ontic bench <file.ont> [opts]                   rank survivors with timings only
   ontic run <file.ont>                            execute a recipe over vaulted fns
   ontic vault [--dir D]                           list verified functions
+  ontic lib [ls|promote <Path>|demote <Path>]     manage graduated stdlib entries
 
 SOLVE OPTIONS:
   --hand <file>     candidate sketch file (repeatable; skips forge)
@@ -66,39 +68,39 @@ SOLVE OPTIONS:
     );
 }
 
-/// Load and fully validate a wish file.
-/// Load an .ont file (single wish OR multi-wish + program) and validate
-/// every wish in it.
+/// Load and fully validate a gen file.
+/// Load an .ont file (single gen OR multi-gen + program) and validate
+/// every gen in it.
 fn load_file(path: &str) -> Result<recipe::OntFile, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path, e))?;
     let f = recipe::parse_ont(&src)?;
-    for w in &f.wishes {
+    for w in &f.gens {
         sieve::validate_wish(w)?;
     }
     Ok(f)
 }
 
-/// Pick a wish by path (default: first).
-fn pick_wish<'a>(f: &'a recipe::OntFile, want: Option<&str>) -> Result<wish::Wish, String> {
+/// Pick a gen by path (default: first).
+fn pick_wish<'a>(f: &'a recipe::OntFile, want: Option<&str>) -> Result<gen::Gen, String> {
     match want {
         Some(p) => f
-            .wishes
+            .gens
             .iter()
             .find(|w| w.path == p)
             .map(|w| w.clone())
-            .ok_or_else(|| format!("no wish `{}` in file", p)),
+            .ok_or_else(|| format!("no gen `{}` in file", p)),
         None => f
-            .wishes
+            .gens
             .first()
             .map(|w| w.clone())
-            .ok_or_else(|| "file has no wishes".to_string()),
+            .ok_or_else(|| "file has no gens".to_string()),
     }
 }
 
 fn cmd_check(path: &str) -> i32 {
     match load_file(path).and_then(|f| pick_wish(&f, None)) {
         Ok(w) => {
-            println!("wish      : {}", w.path);
+            println!("gen      : {}", w.path);
             println!("params    : {}", w.params.len());
             println!("invariants: {}", w.invariants.len());
             println!("tier      : {}", if w.wrapping { "wrapping" } else { "checked" });
@@ -119,7 +121,7 @@ fn cmd_check(path: &str) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("invalid wish: {}", e);
+            eprintln!("invalid gen: {}", e);
             1
         }
     }
@@ -127,7 +129,7 @@ fn cmd_check(path: &str) -> i32 {
 
 use ontic::probes;
 
-fn probes_count(w: &wish::Wish, cfg: &SiegeConfig) -> usize {
+fn probes_count(w: &gen::Gen, cfg: &SiegeConfig) -> usize {
     probes::generate(w, cfg.probe_count, cfg.seed, cfg.edge_budget).len()
 }
 
@@ -204,7 +206,7 @@ fn forge_config(opts: &SolveOpts) -> ForgeConfig {
 /// Extract repeated --hand paths plus scalar options from raw args.
 struct SolveOpts {
     wish_path: String,
-    /// Optional `--wish Path` selector for multi-wish files.
+    /// Optional `--gen Path` selector for multi-gen files.
     wish_sel: Option<String>,
     hand: Vec<String>,
     samples: usize,
@@ -297,11 +299,11 @@ fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
                         .clone(),
                 );
             }
-            "--wish" => {
+            "--gen" => {
                 i += 1;
                 opts.wish_sel = Some(
                     args.get(i)
-                        .ok_or_else(|| "--wish needs a wish path".to_string())?
+                        .ok_or_else(|| "--gen needs a gen path".to_string())?
                         .clone(),
                 );
             }
@@ -374,7 +376,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
     {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("invalid wish: {}", e);
+            eprintln!("invalid gen: {}", e);
             return 1;
         }
     };
@@ -421,7 +423,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
     let mut report = match sieve::run(&w, &candidates, &cfg, &resolved.map) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("wish rejected by sieve preconditions: {}", e);
+            eprintln!("gen rejected by sieve preconditions: {}", e);
             return 1;
         }
     };
@@ -486,7 +488,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
 /// When the LLVM toolchain is present, re-time every survivor on real
 /// compiled objects and re-rank by that. Interpreter timing remains the
 /// fallback ordering; the native table is the honest one.
-fn native_rerank(w: &wish::Wish, resolved: &ResolvedDeps, survivors: &mut Vec<sieve::Survivor>) {
+fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<sieve::Survivor>) {
     let dep_mlirs: Vec<String> = resolved.mlirs.clone();
     if pipeline::find_tool("mlir-opt").is_none() || pipeline::find_tool("llc").is_none() {
         println!("native bench: toolchain missing, interpreter ranking stands");
@@ -554,8 +556,8 @@ fn print_native_ranking(report: &sieve::SieveReport) {
     }
 }
 
-/// Resolve a wish's declared dependencies against the vault by path.
-/// Flat closure: transitive calls must all be listed in the top wish.
+/// Resolve a gen's declared dependencies against the vault by path.
+/// Flat closure: transitive calls must all be listed in the top gen.
 /// Resolved dependency set: runtime table + raw MLIR modules for linking.
 struct ResolvedDeps {
     map: interp::DepMap,
@@ -573,7 +575,7 @@ impl ResolvedDeps {
     }
 }
 
-fn resolve_deps(w: &wish::Wish) -> ResolvedDeps {
+fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
     let vault_dir =
         std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
     let v = match Vault::open(&vault_dir) {
@@ -630,7 +632,7 @@ fn merge_reports(base: &mut sieve::SieveReport, extra: sieve::SieveReport) {
 
 /// Lower the winner, best-effort validate with mlir-opt, store in vault.
 fn emit_and_store(
-    w: &wish::Wish,
+    w: &gen::Gen,
     survivor: &sieve::Survivor,
     resolved: &ResolvedDeps,
     fcfg: &ForgeConfig,
@@ -678,6 +680,53 @@ fn emit_and_store(
             return 1;
         }
     };
+    // Kernel artifacts: header + shared library, built from the composite
+    // (candidate + deps) so linked .so files are self-contained.
+    let key8 = {
+        let k = ontic::vault::Vault::key_for(w);
+        k[..8.min(k.len())].to_string()
+    };
+    let header_name = format!("{}-{}.h", survivor.candidate.name, key8);
+    let lib_name = format!("lib{}-{}.so", survivor.candidate.name, key8);
+    let mut artifacts = serde_json::Map::new();
+
+    if pipeline::find_tool("llc").is_some() && pipeline::find_tool("clang").is_some() {
+        match build_shared_lib(
+            &validation_text,
+            &survivor.candidate.name,
+            &resolved.mlirs,
+            &vault_dir,
+            &lib_name,
+        ) {
+            Ok(()) => {
+                let hdr_path = std::path::Path::new(&vault_dir).join(&header_name);
+                match lower::emit_header(
+                    &survivor.candidate.name,
+                    &survivor.candidate.params,
+                    &survivor.candidate.ret,
+                ) {
+                    Ok(h) => match std::fs::write(&hdr_path, h) {
+                        Ok(_) => {
+                            println!("HEADER  : {}", hdr_path.display());
+                            println!("LIB     : {}/{}", vault_dir, lib_name);
+                            artifacts.insert(
+                                "header".to_string(),
+                                serde_json::Value::String(header_name.clone()),
+                            );
+                            artifacts.insert(
+                                "lib".to_string(),
+                                serde_json::Value::String(lib_name.clone()),
+                            );
+                        }
+                        Err(e) => eprintln!("header write failed: {}", e),
+                    },
+                    Err(e) => eprintln!("header generation failed: {}", e),
+                }
+            }
+            Err(e) => eprintln!("shared library build failed: {}", e),
+        }
+    }
+
     // Prompt provenance (rule 12 companion): recorded with the solve so
     // prompts become regression-testable artifacts.
     let model_label = if matches!(fcfg.backend, forge::Backend::Llama) {
@@ -685,7 +734,7 @@ fn emit_and_store(
     } else {
         format!("{} {}", fcfg.backend.label(), fcfg.model)
     };
-    let meta = serde_json::json!({
+    let mut meta_val = serde_json::json!({
         "last_solve": {
             "sampler": fcfg.backend.label(),
             "model": model_label,
@@ -696,6 +745,10 @@ fn emit_and_store(
             "prompt": first_prompt,
         }
     });
+    if !artifacts.is_empty() {
+        meta_val["artifacts"] = serde_json::Value::Object(artifacts);
+    }
+    let meta = meta_val;
     match v.put_meta(w, &survivor.source_text, &mlir, &meta) {
         Ok(key) => {
             println!("VAULTED {} ({})", w.path, key);
@@ -728,8 +781,17 @@ fn cmd_vault(args: &[String]) -> i32 {
             if entries.is_empty() {
                 println!("vault empty at {}", dir);
             }
+            let promoted = read_lib_manifest();
             for e in entries {
-                println!("{}  {}  {}", &e.key[..12.min(e.key.len())], e.name, e.signature);
+                let path = {
+                    let inner = e.signature.strip_prefix("fn ").unwrap_or(&e.signature);
+                    match inner.find('(') {
+                        Some(i) => inner[..i].trim().to_string(),
+                        None => inner.trim().to_string(),
+                    }
+                };
+                let badge = if promoted.iter().any(|p| *p == path) { " [LIB]" } else { "" };
+                println!("{}  {}{}  {}", &e.key[..12.min(e.key.len())], e.name, badge, e.signature);
             }
             0
         }
@@ -771,5 +833,107 @@ fn cmd_run(path: &str) -> i32 {
             eprintln!("{}", e);
             1
         }
+    }
+}
+
+
+/// Compile a composite MLIR module into a self-contained shared library
+/// inside `vault_dir` (thin wrapper over pipeline::build_shared_so).
+fn build_shared_lib(
+    composite_mlir: &str,
+    _fn_name: &str,
+    _dep_mlirs: &[String],
+    vault_dir: &str,
+    lib_name: &str,
+) -> Result<(), String> {
+    let so_p = std::path::Path::new(vault_dir).join(lib_name);
+    ontic::pipeline::build_shared_so(composite_mlir, &so_p)
+}
+
+
+
+/// Path of the graduation manifest (which gens form the stdlib).
+fn lib_manifest_path() -> String {
+    let dir = std::env::var("ONTIC_LIB_DIR").unwrap_or_else(|_| ".ontic".to_string());
+    format!("{}/lib.manifest", dir.trim_end_matches('/'))
+}
+
+fn read_lib_manifest() -> Vec<String> {
+    std::fs::read_to_string(lib_manifest_path())
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn write_lib_manifest(entries: &[String]) -> Result<(), String> {
+    let mut sorted: Vec<String> = entries.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    std::fs::create_dir_all(
+        std::path::Path::new(&lib_manifest_path())
+            .parent()
+            .unwrap_or(std::path::Path::new(".")),
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::write(lib_manifest_path(), sorted.join("\n") + "\n")
+        .map_err(|e| e.to_string())
+}
+
+/// `ontic lib ...` — graduation of verified gens into the stdlib.
+fn cmd_lib(args: &[String]) -> i32 {
+    match args.get(2).map(|s| s.as_str()) {
+        Some("ls") | None => {
+            let promoted = read_lib_manifest();
+            if promoted.is_empty() {
+                println!("stdlib empty (promote with: ontic lib promote <Path>)");
+            }
+            for p in promoted {
+                println!("{}", p);
+            }
+            0
+        }
+        Some("promote") => match args.get(3) {
+            Some(p) => {
+                let mut m = read_lib_manifest();
+                if m.iter().any(|x| x == p) {
+                    println!("already promoted: {}", p);
+                    return 0;
+                }
+                m.push(p.clone());
+                match write_lib_manifest(&m) {
+                    Ok(_) => {
+                        println!("PROMOTED {}", p);
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        1
+                    }
+                }
+            }
+            None => usage("lib promote needs a gen path"),
+        },
+        Some("demote") => match args.get(3) {
+            Some(p) => {
+                let m = read_lib_manifest();
+                let kept: Vec<String> = m.into_iter().filter(|x| x != p).collect();
+                match write_lib_manifest(&kept) {
+                    Ok(_) => {
+                        println!("DEMOTED {}", p);
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        1
+                    }
+                }
+            }
+            None => usage("lib demote needs a gen path"),
+        },
+        Some(other) => usage(&format!("unknown lib command `{}`", other)),
     }
 }

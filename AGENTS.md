@@ -36,7 +36,7 @@ Patches are unacceptable. There is no "go fast and break things."
 2. **CONTRACT-FIRST**: invariants (`|`) are the source of truth. Never edit
    an invariant to make a candidate pass. If all candidates fail, the answer
    is more/better candidates or a proven-unsatisfiable report — never a
-   weakened wish.
+   weakened gen.
 3. **OPAQUE STAYS OPAQUE**: held-out examples (`??`) and auto-hidden examples
    must never reach a forge prompt, log line, cache key comment, or test
    fixture visible to sampling. Leakage invalidates the overfit guarantee.
@@ -63,22 +63,22 @@ Patches are unacceptable. There is no "go fast and break things."
     verdicts and vault keys remain deterministic. Prompt provenance is
     stored per solve so runs stay auditable.
 11. **SPEED REQUIRES DECLARATION**: the fast path never exists without a
-    visible contract word in the wish (`wrapping`, future `prop` proofs).
+    visible contract word in the gen (`wrapping`, future `prop` proofs).
     Compiler mercy is forbidden: semantics must be identical between the
     oracle interpreter and emitted native code, tier for tier.
 12. **HINTS ARE ADVICE, NEVER EVIDENCE**: `hint` lines shape forge prompts
     only. They never touch canonical text, vault keys, sieve verdicts, or
     any acceptance decision.
-13. **EFFECTS LIVE IN RECIPES, NEVER WISHES**: file/console IO compiles to
-    deterministic driver C at the recipe layer. Wishes stay pure so probes,
+13. **EFFECTS LIVE IN RECIPES, NEVER GENES**: file/console IO compiles to
+    deterministic driver C at the recipe layer. Gens stay pure so probes,
     composition, and native parity remain sound.
 14. **FORMATS ARE TRUSTED WRITERS**: parse/emit machinery (CSV/PLY/OBJ/text)
     is verified-once stdlib; synthesis owns the transform BETWEEN them.
     File evidence desugars to values at parse time — the sieve never
     touches disk.
-15. **KERNELS ARE ARTIFACTS**: humans edit wishes and recipes; vault entries
+15. **KERNELS ARE ARTIFACTS**: humans edit gens and recipes; vault entries
     are immutable build outputs. Never hand-edit generated MLIR/objects/
-    headers — change the wish and re-solve instead.
+    headers — change the gen and re-solve instead.
 
 ## Architecture Pillars
 
@@ -91,7 +91,7 @@ Patches are unacceptable. There is no "go fast and break things."
   mlir-cpu-runner when available).
 - **Vault entries are contracts, not code trust.** Callers of a vault symbol
   rely on its `[pre][post]`, never on its body. Bodies are never re-verified;
-  wishes are re-solved when their canonical text changes (SHA-256 key).
+  gens are re-solved when their canonical text changes (SHA-256 key).
 - **Machine-readable failures.** Every sieve kill produces a structured
   reason (`SieveRejection { stage, detail }`) consumed by the forge feedback
   round and by `ontic check`. Human prose is a rendering, not the format.
@@ -126,7 +126,7 @@ struct, defaulted once, overridable per CLI flag — never scattered literals.
 
 - **Flat control flow** — max 2 nesting levels; guard clauses; named helpers.
 - **Intent comments** before every function (what + why, one line minimum).
-- **Params ≤ 6** — bundle into context structs (`Wish`, `SiegeConfig`,
+- **Params ≤ 6** — bundle into context structs (`Gen`, `SiegeConfig`,
   `ForgeRequest`).
 - **Complexity ≤ 15** cyclomatic/cognitive; split stages rather than branch.
 - **HashMap iteration determinism** — sort keys before anything that reaches
@@ -142,7 +142,7 @@ struct, defaulted once, overridable per CLI flag — never scattered literals.
 ```bash
 cargo build                 # build
 cargo test --lib            # full behavioral suite (pre-commit gate)
-cargo run -- check examples/ledger.ont    # validate a wish, report probe strength
+cargo run -- check examples/ledger.ont    # validate a gen, report probe strength
 cargo run -- solve examples/ledger.ont    # sieve pipeline (hand candidates / forge)
 cargo run -- bench examples/ledger.ont    # rank survivors with timings
 cargo run -- run examples/demo.ont        # execute a recipe over the vault

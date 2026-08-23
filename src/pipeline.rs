@@ -4,7 +4,7 @@
 //! subprocess. Tool discovery: ONTIC_MLIR_BIN dir override, then common
 //! llvm-prefix dirs, then PATH. Every stage reports clean errors.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -509,7 +509,7 @@ pub fn bench_native(
 mod tests {
     use super::*;
     use crate::{check, interp, lower, sketch};
-    use crate::wish::Value;
+    use crate::gen::Value;
 
     const SUM_SRC: &str =
         "fn @total(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { %acc + %x } }";
@@ -562,7 +562,7 @@ mod tests {
 mod trap_tests {
     use super::*;
     use crate::{check, interp, lower, sketch};
-    use crate::wish::Value;
+    use crate::gen::Value;
 
     /// Checked-tier honesty gate: native traps exactly where the interpreter
     /// kills. Overflowing inputs must fail natively; clean inputs agree.
@@ -601,7 +601,7 @@ mod trap_tests {
 mod float_tests {
     use super::*;
     use crate::{check, interp, lower, sketch};
-    use crate::wish::Value;
+    use crate::gen::Value;
 
     /// P1 gate: F64 candidates lower to arith.mulf/cmpf-style IR (never the
     /// integer trap path) and match the interpreter bit-for-bit natively.
@@ -647,7 +647,7 @@ mod float_tests {
 mod listf64_tests {
     use super::*;
     use crate::{check, interp, lower, sketch};
-    use crate::wish::Value;
+    use crate::gen::Value;
 
     /// Layer B gate: fold over List<F64> matches the oracle bit-for-bit.
     #[test]
@@ -691,7 +691,7 @@ mod listf64_tests {
 mod broadcast_tests {
     use super::*;
     use crate::{check, interp, lower, sketch};
-    use crate::wish::Value;
+    use crate::gen::Value;
 
     /// P2 gate: a broadcasting function returns a memref descriptor natively;
     /// elements must match the oracle elementwise.
@@ -740,4 +740,35 @@ mod broadcast_tests {
             other => panic!("unexpected {:?}", other),
         }
     }
+}
+
+
+/// Compile a (composite) MLIR module into a self-contained shared library.
+/// The module must already contain every dependency function.
+pub fn build_shared_so(composite_mlir: &str, out_so: &Path) -> Result<(), String> {
+    let dir = scratch_dir("so");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mlir_p = dir.join("composite.mlir");
+    let _ = &dir;
+    let _ = &mlir_p;
+    let ll_mlir = dir.join("composite_llvm.mlir");
+    let o_p = dir.join("composite.o");
+    std::fs::write(&mlir_p, composite_mlir)
+        .map_err(|e| format!("write {}: {}", mlir_p.display(), e))?;
+    mlir_to_llvmir(&mlir_p, &ll_mlir)
+        .map_err(|e| format!("lower-to-llvm: {}", e))?;
+    object_from_ll(&ll_mlir, &o_p)
+        .map_err(|e| format!("object: {}", e))?;
+    let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
+    run(
+        &cc,
+        &[
+            "-shared",
+            "-O2",
+            o_p.to_str().ok_or("bad obj")?,
+            "-o",
+            out_so.to_str().ok_or("bad so")?,
+        ],
+        "shared link",
+    )
 }

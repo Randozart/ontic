@@ -1,4 +1,4 @@
-//! Wish parsing: `.ont` specification files.
+//! Gen parsing: `.ont` specification files.
 //!
 //! ```text
 //! fn Ledger.total(%items: List<Int>) -> Int
@@ -25,7 +25,7 @@ pub enum Value {
 }
 
 impl Value {
-    /// The wish-level type of this value.
+    /// The gen-level type of this value.
     pub fn ty(&self) -> Ty {
         match self {
             Value::Int(_) => Ty::Int,
@@ -76,9 +76,9 @@ pub struct Example {
     pub tol: f64,
 }
 
-/// Parsed wish with the transparent/opaque split already applied.
+/// Parsed gen with the transparent/opaque split already applied.
 #[derive(Debug, Clone)]
-pub struct Wish {
+pub struct Gen {
     pub path: String,
     pub name: String,
     pub params: Vec<(String, Ty)>,
@@ -90,7 +90,7 @@ pub struct Wish {
     /// Declared wrapping tier: arithmetic wraps mod 2^64 instead of killing
     /// candidates on overflow. Speed requires declaration (AGENTS rule 11).
     pub wrapping: bool,
-    /// Vault symbols this wish may call: `use Stats.mean` lines.
+    /// Vault symbols this gen may call: `use Stats.mean` lines.
     pub deps: Vec<String>,
     /// Author guidance for the forge. Advice, never evidence (rule 12):
     /// flows into prompts only, never into canonical text or verdicts.
@@ -219,8 +219,8 @@ fn parse_example_line(line: &str, what: &str) -> Result<Example, String> {
     })
 }
 
-/// Parse a full `.ont` wish. Applies auto-split when no explicit `??` exist.
-pub fn parse(src: &str) -> Result<Wish, String> {
+/// Parse a full `.ont` gen. Applies auto-split when no explicit `??` exist.
+pub fn parse(src: &str) -> Result<Gen, String> {
     let mut path = String::new();
     let mut params: Vec<(String, Ty)> = Vec::new();
     let mut ret = Ty::Int;
@@ -309,7 +309,7 @@ pub fn parse(src: &str) -> Result<Wish, String> {
         return Err("missing `fn` signature".to_string());
     }
 
-    let mut wish = Wish {
+    let mut gen = Gen {
         name: path.rsplit('.').next().unwrap_or(&path).to_string(),
         path,
         params,
@@ -322,9 +322,9 @@ pub fn parse(src: &str) -> Result<Wish, String> {
         deps,
         hints,
     };
-    apply_auto_split(&mut wish);
-    validate(&wish)?;
-    Ok(wish)
+    apply_auto_split(&mut gen);
+    validate(&gen)?;
+    Ok(gen)
 }
 
 fn parse_pident(s: &str) -> Result<String, String> {
@@ -349,47 +349,47 @@ fn parse_type(s: &str) -> Result<Ty, String> {
 }
 
 /// Deterministic auto-hide: keep first ceil(n/2), hide last floor(n/2).
-fn apply_auto_split(wish: &mut Wish) {
-    if !wish.opaque.is_empty() || wish.transparent.len() < 4 {
+fn apply_auto_split(gen: &mut Gen) {
+    if !gen.opaque.is_empty() || gen.transparent.len() < 4 {
         return;
     }
-    let n = wish.transparent.len();
+    let n = gen.transparent.len();
     let hide = n / 2;
     let keep = n - hide;
-    let hidden: Vec<Example> = wish.transparent.drain(keep..).collect();
-    wish.opaque = hidden;
-    wish.auto_split = true;
+    let hidden: Vec<Example> = gen.transparent.drain(keep..).collect();
+    gen.opaque = hidden;
+    gen.auto_split = true;
 }
 
 /// Structural validation: arity/type agreement of every example.
-fn validate(wish: &Wish) -> Result<(), String> {
-    if wish.transparent.is_empty() {
-        return Err(format!("wish `{}` has no transparent examples", wish.path));
+fn validate(gen: &Gen) -> Result<(), String> {
+    if gen.transparent.is_empty() {
+        return Err(format!("gen `{}` has no transparent examples", gen.path));
     }
-    check_set(wish, &wish.transparent, "transparent")?;
-    check_set(wish, &wish.opaque, "opaque")
+    check_set(gen, &gen.transparent, "transparent")?;
+    check_set(gen, &gen.opaque, "opaque")
 }
 
-fn check_set(wish: &Wish, set: &[Example], label: &str) -> Result<(), String> {
+fn check_set(gen: &Gen, set: &[Example], label: &str) -> Result<(), String> {
     for ex in set {
-        if ex.inputs.len() != wish.params.len() {
+        if ex.inputs.len() != gen.params.len() {
             return Err(format!(
-                "wish `{}`: {} example arity {} != signature arity {}",
-                wish.path,
+                "gen `{}`: {} example arity {} != signature arity {}",
+                gen.path,
                 label,
                 ex.inputs.len(),
-                wish.params.len()
+                gen.params.len()
             ));
         }
-        for ((v, (_, t)), idx) in ex.inputs.iter().zip(wish.params.iter()).zip(0..) {
+        for ((v, (_, t)), idx) in ex.inputs.iter().zip(gen.params.iter()).zip(0..) {
             // Empty list literals are polymorphic; they adopt the declared
             // element type of the parameter they feed.
             let polymorphic_empty =
                 matches!(v, Value::List(vs) if vs.is_empty()) && matches!(t, Ty::ListF64);
             if v.ty() != *t && !polymorphic_empty {
                 return Err(format!(
-                    "wish `{}`: {} example param #{} is {}, expected {}",
-                    wish.path,
+                    "gen `{}`: {} example param #{} is {}, expected {}",
+                    gen.path,
                     label,
                     idx + 1,
                     v.ty().name(),
@@ -397,20 +397,20 @@ fn check_set(wish: &Wish, set: &[Example], label: &str) -> Result<(), String> {
                 ));
             }
         }
-        if ex.output.ty() != wish.ret {
+        if ex.output.ty() != gen.ret {
             return Err(format!(
-                "wish `{}`: {} example output is {}, expected {}",
-                wish.path,
+                "gen `{}`: {} example output is {}, expected {}",
+                gen.path,
                 label,
                 ex.output.ty().name(),
-                wish.ret.name()
+                gen.ret.name()
             ));
         }
     }
     Ok(())
 }
 
-impl Wish {
+impl Gen {
     /// Canonical deterministic serialization — the vault hash key payload.
     pub fn canonical(&self) -> String {
         let params: Vec<String> = self

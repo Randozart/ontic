@@ -321,8 +321,8 @@ fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Resu
     }
 }
 
-/// Validate wish invariants against the signature environment (`%params` +
-/// `%res`). A wish whose invariants do not typecheck is malformed spec, not a
+/// Validate gen invariants against the signature environment (`%params` +
+/// `%res`). A gen whose invariants do not typecheck is malformed spec, not a
 /// candidate failure — reported before any sampling happens.
 pub fn check_invariants(
     invariants: &[Expr],

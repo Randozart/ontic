@@ -10,7 +10,7 @@ use crate::lower::expr_display;
 use crate::overfit::{self, OverfitConfig, OverfitVerdict};
 use crate::probes;
 use crate::sketch::{self, Candidate, Expr};
-use crate::wish::{Example, Value, Wish};
+use crate::gen::{Example, Value, Gen};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -114,23 +114,23 @@ pub struct SieveReport {
     pub rejections: Vec<(String, Rejection)>,
 }
 
-/// Validate wish-level preconditions before any candidate is examined:
+/// Validate gen-level preconditions before any candidate is examined:
 /// invariants must typecheck against signature + `%res`.
-pub fn validate_wish(wish: &Wish) -> Result<(), String> {
-    check::check_invariants(&wish.invariants, &wish.params, &wish.ret)
+pub fn validate_wish(gen: &Gen) -> Result<(), String> {
+    check::check_invariants(&gen.invariants, &gen.params, &gen.ret)
 }
 
 /// Run the full pipeline over labeled candidate texts.
 pub fn run(
-    wish: &Wish,
+    gen: &Gen,
     texts: &[(String, String)],
     cfg: &SiegeConfig,
     deps: &interp::DepMap,
 ) -> Result<SieveReport, String> {
-    validate_wish(wish)?;
+    validate_wish(gen)?;
     let mut report = SieveReport::default();
     for (label, text) in texts {
-        match run_one(wish, text, cfg, deps) {
+        match run_one(gen, text, cfg, deps) {
             Ok(survivor) => report.survivors.push(survivor),
             Err(rej) => report.rejections.push((label.clone(), rej)),
         }
@@ -159,12 +159,12 @@ fn reject(stage: Stage, kind: KillKind, reason: String) -> Rejection {
 }
 
 fn run_one(
-    wish: &Wish,
+    gen: &Gen,
     text: &str,
     cfg: &SiegeConfig,
     deps: &interp::DepMap,
 ) -> Result<Survivor, Rejection> {
-    let tier = if wish.wrapping {
+    let tier = if gen.wrapping {
         interp::Tier::wrapping()
     } else {
         interp::Tier::checked()
@@ -188,7 +188,7 @@ fn run_one(
     }
 
     // S3 transparent evidence
-    eval_set(wish, &cand, &wish.transparent, &ictx).map_err(|(i, m)| {
+    eval_set(gen, &cand, &gen.transparent, &ictx).map_err(|(i, m)| {
         reject(
             Stage::Transparent,
             KillKind::WrongOutput,
@@ -197,7 +197,7 @@ fn run_one(
     })?;
 
     // S4 held-out evidence
-    eval_set(wish, &cand, &wish.opaque, &ictx).map_err(|(i, m)| {
+    eval_set(gen, &cand, &gen.opaque, &ictx).map_err(|(i, m)| {
         reject(
             Stage::HeldOut,
             KillKind::Overfit,
@@ -209,17 +209,17 @@ fn run_one(
     })?;
 
     // S5 probes
-    run_probes(wish, &cand, cfg, &ictx)?;
+    run_probes(gen, &cand, cfg, &ictx)?;
 
     // S6 shape scan
     if let OverfitVerdict::Suspicious(m) =
-        overfit::scan(&cand, &wish.transparent, &cfg.overfit)
+        overfit::scan(&cand, &gen.transparent, &cfg.overfit)
     {
         return Err(reject(Stage::Shape, KillKind::Overfit, m));
     }
 
     // S7 bench
-    let ns = bench(wish, &cand, cfg.bench_iters, &ictx);
+    let ns = bench(gen, &cand, cfg.bench_iters, &ictx);
     Ok(Survivor {
         candidate: cand,
         source_text: text.to_string(),
@@ -229,15 +229,15 @@ fn run_one(
 
 /// Evaluate every example against `cand`; on mismatch return (index, why).
 fn eval_set(
-    wish: &Wish,
+    gen: &Gen,
     cand: &Candidate,
     set: &[Example],
     ctx: &interp::Ctx,
 ) -> Result<(), (usize, String)> {
-    let _ = wish;
+    let _ = gen;
     for (i, ex) in set.iter().enumerate() {
-        if ex.inputs.len() != wish.params.len() {
-            continue; // arity already validated at wish level
+        if ex.inputs.len() != gen.params.len() {
+            continue; // arity already validated at gen level
         }
         let got =
             interp::eval_candidate(cand, &ex.inputs, ctx).map_err(|e| (i, e.to_string()))?;
@@ -260,12 +260,12 @@ fn eval_set(
 /// S5: seeded probe rows; runtime errors and invariant violations kill with
 /// a recorded counterexample.
 fn run_probes(
-    wish: &Wish,
+    gen: &Gen,
     cand: &Candidate,
     cfg: &SiegeConfig,
     ctx: &interp::Ctx,
 ) -> Result<(), Rejection> {
-    let rows = probes::generate(wish, cfg.probe_count, cfg.seed, cfg.edge_budget);
+    let rows = probes::generate(gen, cfg.probe_count, cfg.seed, cfg.edge_budget);
     for row in rows {
         let res = match interp::eval_candidate(cand, &row, &ctx) {
             Ok(v) => v,
@@ -277,7 +277,7 @@ fn run_probes(
                 ))
             }
         };
-        if let Some(reason) = check_invariants_on(wish, &row, &res, ctx) {
+        if let Some(reason) = check_invariants_on(gen, &row, &res, ctx) {
             return Err(reject(Stage::Probe, KillKind::InvariantViolation, reason));
         }
     }
@@ -287,17 +287,17 @@ fn run_probes(
 /// Evaluate every invariant under env(params → inputs, "res" → result).
 /// Returns None when all hold; otherwise a counterexample reason string.
 fn check_invariants_on(
-    wish: &Wish,
+    gen: &Gen,
     inputs: &[Value],
     res: &Value,
     ctx: &interp::Ctx,
 ) -> Option<String> {
     let mut env: Env = HashMap::new();
-    for ((name, _), v) in wish.params.iter().zip(inputs.iter()) {
+    for ((name, _), v) in gen.params.iter().zip(inputs.iter()) {
         env.insert(name.clone(), v.clone());
     }
     env.insert("res".to_string(), res.clone());
-    for inv in &wish.invariants {
+    for inv in &gen.invariants {
         let held = match interp::eval_ctx(inv, &env, &ctx) {
             Ok(Value::Bool(b)) => b,
             Ok(other) => {
@@ -350,9 +350,9 @@ fn inputs_str(inputs: &[Value]) -> String {
 
 /// S7: coarse deterministic timing — round-robin transparent examples.
 /// Ranking signal only; correctness was settled by S3–S6.
-fn bench(wish: &Wish, cand: &Candidate, iters: usize, ctx: &interp::Ctx) -> u64 {
-    let _ = wish;
-    let set = &wish.transparent;
+fn bench(gen: &Gen, cand: &Candidate, iters: usize, ctx: &interp::Ctx) -> u64 {
+    let _ = gen;
+    let set = &gen.transparent;
     if set.is_empty() || iters == 0 {
         return u64::MAX;
     }
@@ -396,9 +396,9 @@ pub fn ast_size(e: &Expr) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wish;
+    use crate::gen;
 
-    const SUM_WISH: &str = "\
+    const SUM_GEN: &str = "\
 fn Ledger.total(%items: List<Int>) -> Int
   => [1,2,3] -> 6
   => [] -> 0
@@ -409,15 +409,15 @@ fn Ledger.total(%items: List<Int>) -> Int
     const HONEST: &str =
         "fn @total(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { %acc + %x } }";
 
-    fn sum_wish() -> Wish {
-        wish::parse(SUM_WISH).expect("wish parses")
+    fn sum_wish() -> Gen {
+        gen::parse(SUM_GEN).expect("gen parses")
     }
 
     #[test]
     fn test_honest_fold_survives_all_stages() {
         let w = sum_wish();
         let texts = vec![("honest".to_string(), HONEST.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.survivors.len(), 1, "{:?}", r.rejections);
         assert!(r.rejections.is_empty());
     }
@@ -427,7 +427,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         let w = sum_wish();
         let table = "fn @t(%items: List<Int>) -> Int { if len(%items) == 3 { fold %x in %items, %a from 0 { %a + %x } } else { if len(%items) == 0 { 0 } else { 5 } } }";
         let texts = vec![("table".to_string(), table.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.survivors.len(), 0);
         assert_eq!(r.rejections[0].1.stage, Stage::HeldOut);
         assert_eq!(r.rejections[0].1.kind, KillKind::Overfit);
@@ -435,7 +435,7 @@ fn Ledger.total(%items: List<Int>) -> Int
 
     #[test]
     fn test_invariant_violator_caught_at_probe_stage() {
-        let w = wish::parse(
+        let w = gen::parse(
             "fn f(%items: List<Int>) -> Int\n  | %res >= 0\n  => [1] -> 1\n  => [] -> 0\n",
         )
         .unwrap();
@@ -444,7 +444,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         let sneaky =
             "fn @f(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { if %acc == 0 { %x } else { %acc + %x } } }";
         let texts = vec![("sneaky".to_string(), sneaky.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.survivors.len(), 0);
         assert_eq!(r.rejections[0].1.stage, Stage::Probe);
         assert_eq!(r.rejections[0].1.kind, KillKind::InvariantViolation);
@@ -455,7 +455,7 @@ fn Ledger.total(%items: List<Int>) -> Int
     fn test_malformed_candidate_dies_at_s1() {
         let w = sum_wish();
         let texts = vec![("junk".to_string(), "fn @t( {".to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.rejections[0].1.stage, Stage::Parse);
     }
 
@@ -465,7 +465,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         // Internally inconsistent: body is Int, own signature says Bool.
         let bad = "fn @t(%items: List<Int>) -> Bool { len(%items) }";
         let texts = vec![("badty".to_string(), bad.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.rejections[0].1.stage, Stage::WellFormed);
     }
 
@@ -474,14 +474,14 @@ fn Ledger.total(%items: List<Int>) -> Int
         let w = sum_wish();
         let off = "fn @t(%items: List<Int>) -> Int { fold %x in %items, %acc from 1 { %acc + %x } }";
         let texts = vec![("offbyone".to_string(), off.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.rejections[0].1.stage, Stage::Transparent);
         assert_eq!(r.rejections[0].1.kind, KillKind::WrongOutput);
     }
 
     #[test]
     fn test_division_reachable_on_probes_kills_candidate() {
-        let w = wish::parse(
+        let w = gen::parse(
             "fn f(%a: Int, %b: Int) -> Int\n  | %res >= -1000000\n  => 6, 3 -> 2\n  => 9, 3 -> 3\n",
         )
         .unwrap();
@@ -489,7 +489,7 @@ fn Ledger.total(%items: List<Int>) -> Int
         // blow up at S5 instead.
         let risky = "fn @f(%a: Int, %b: Int) -> Int { %a / %b }";
         let texts = vec![("risky".to_string(), risky.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert!(matches!(
             &r.rejections[0].1.kind,
             KillKind::RuntimeError | KillKind::InvariantViolation
@@ -504,7 +504,7 @@ fn Ledger.total(%items: List<Int>) -> Int
             ("honest".to_string(), HONEST.to_string()),
             ("padded".to_string(), padded.to_string()),
         ];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.survivors.len(), 2);
         for pair in r.survivors.windows(2) {
             assert!(pair[0].ns_per_call <= pair[1].ns_per_call);
@@ -513,7 +513,7 @@ fn Ledger.total(%items: List<Int>) -> Int
 
     #[test]
     fn test_bad_invariant_is_wish_error_not_candidate_kill() {
-        let w = wish::parse("fn f(%a: Int) -> Int\n  | %zz > 0\n  => 1 -> 2\n").unwrap();
+        let w = gen::parse("fn f(%a: Int) -> Int\n  | %zz > 0\n  => 1 -> 2\n").unwrap();
         assert!(run(
             &w,
             &[("h".into(), HONEST.into())],
@@ -533,13 +533,13 @@ fn Ledger.total(%items: List<Int>) -> Int
     fn test_wrapping_tier_survives_overflow_values() {
         // i64::MAX-scale sums would kill the checked tier; declared wrapping
         // makes them defined semantics, so the honest fold survives.
-        let w = wish::parse(
+        let w = gen::parse(
             "fn f(%items: List<Int>) -> Int\n  wrapping\n  => [1] -> 1\n  => [] -> 0\n",
         )
         .unwrap();
         assert!(w.wrapping);
         let texts = vec![("honest".to_string(), HONEST.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.survivors.len(), 1, "{:?}", r.rejections);
     }
 
@@ -547,13 +547,13 @@ fn Ledger.total(%items: List<Int>) -> Int
     fn test_checked_tier_still_kills_overflow_reachable() {
         // Passes both visible examples; probe rows with 3+ elements blow
         // past i64 under repeated ×1e9 — checked tier must kill at S5.
-        let w = wish::parse(
+        let w = gen::parse(
             "fn f(%items: List<Int>) -> Int\n  => [1] -> 1000000000\n  => [] -> 1\n",
         )
         .unwrap();
         let big = "fn @f(%items: List<Int>) -> Int { fold %x in %items, %acc from 1 { %acc * 1000000000 } }";
         let texts = vec![("big".to_string(), big.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
         assert_eq!(r.survivors.len(), 0);
         assert_eq!(r.rejections[0].1.stage, Stage::Probe);
         assert_eq!(r.rejections[0].1.kind, KillKind::RuntimeError);
@@ -561,8 +561,8 @@ fn Ledger.total(%items: List<Int>) -> Int
 
     #[test]
     fn test_canonical_includes_wrapping() {
-        let plain = wish::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
-        let wrap = wish::parse("fn f(%a: Int) -> Int\n  wrapping\n  => 1 -> 2\n").unwrap();
+        let plain = gen::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
+        let wrap = gen::parse("fn f(%a: Int) -> Int\n  wrapping\n  => 1 -> 2\n").unwrap();
         assert_ne!(plain.canonical(), wrap.canonical());
     }
 }
@@ -570,7 +570,7 @@ fn Ledger.total(%items: List<Int>) -> Int
 #[cfg(test)]
 mod compose_tests {
     use super::*;
-    use crate::{sketch, wish};
+    use crate::{sketch, gen};
     use std::collections::HashMap;
 
     const MEAN_SRC: &str =
@@ -581,10 +581,10 @@ mod compose_tests {
     /// full sieve. The dep executes under its own tier.
     #[test]
     fn test_vault_call_composition_survives_sieve() {
-        let w = wish::parse(
+        let w = gen::parse(
             "use Stats.mean\nfn DevSq(%xs: List<F64>) -> F64\n  | %res >= 0\n  => [2.0,4.0] -> 1.0 ± 1e-9\n  ?? [3.0] -> 0.0 ± 1e-12\n",
         )
-        .expect("wish parses");
+        .expect("gen parses");
         assert_eq!(w.deps, vec!["Stats.mean".to_string()]);
 
         let mut deps: interp::DepMap = HashMap::new();
@@ -599,20 +599,20 @@ mod compose_tests {
         );
 
         let texts = vec![("composed".to_string(), DEVSQ_SRC.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &deps).expect("wish valid");
+        let r = run(&w, &texts, &SiegeConfig::default(), &deps).expect("gen valid");
         assert_eq!(r.survivors.len(), 1, "{:?}", r.rejections);
     }
 
     #[test]
     fn test_undeclared_call_killed_at_s2() {
-        let w = wish::parse(
+        let w = gen::parse(
             "fn Bad(%xs: List<F64>) -> F64\n  => [1.0] -> 0.0\n",
         )
         .unwrap();
         // No deps declared; candidate calls anyway.
         let texts = vec![("bad".to_string(), DEVSQ_SRC.to_string())];
         let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new())
-            .expect("wish valid");
+            .expect("gen valid");
         assert_eq!(r.rejections[0].1.stage, Stage::WellFormed);
         assert!(
             r.rejections[0].1.reason.contains("requires declared `use`"),

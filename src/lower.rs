@@ -1,5 +1,5 @@
 //! Lowering: sketch AST → MLIR text (arith + scf + memref), plus the
-//! expression pretty-printer used in canonical wish text and diagnostics.
+//! expression pretty-printer used in canonical gen text and diagnostics.
 //!
 //! Semantics rule: the interpreter (`interp.rs`) is the oracle. This module
 //! projects exactly those semantics; differential tests pin them.
@@ -25,7 +25,7 @@ pub struct CallTarget {
 pub type CallMap = HashMap<String, CallTarget>;
 
 /// Pretty-print an expression back to sketch surface syntax.
-/// Used by canonical wish serialization and sieve diagnostics.
+/// Used by canonical gen serialization and sieve diagnostics.
 pub fn expr_display(e: &Expr) -> String {
     match e {
         Expr::IntLit(v) => v.to_string(),
@@ -1165,5 +1165,89 @@ mod compose_tests {
         assert!(c.contains("func.func @a"));
         assert!(c.contains("func.func @b"));
         assert_eq!(c.matches("module {").count(), 1);
+    }
+}
+
+/// C return type for a gen-level type.
+fn c_ret_ty(ty: &Ty) -> Result<&'static str, String> {
+    match ty {
+        Ty::Int | Ty::Bool => Ok("long"),
+        Ty::F64 => Ok("double"),
+        // List-returning functions unsupported by the v0 ABI.
+        _ => Err("header: list-returning kernels unsupported".to_string()),
+    }
+}
+
+/// Generate the C header declaration for one candidate using the flat
+/// MemRef ABI (each List<T> param expands to five scalars). Deterministic:
+/// no timestamps, no paths — same gen yields byte-identical headers.
+pub fn emit_header(
+    name: &str,
+    params: &[(String, Ty)],
+    ret: &Ty,
+) -> Result<String, String> {
+    let rt = c_ret_ty(ret)?;
+    let mut parts: Vec<String> = Vec::new();
+    for (n, t) in params {
+        match t {
+            Ty::ListInt => parts.push(format!(
+                "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st"
+            )),
+            Ty::ListF64 => parts.push(format!(
+                "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st"
+            )),
+            Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
+            Ty::F64 => parts.push(format!("double {n}")),
+        }
+    }
+    Ok(format!(
+        "// Ontic kernel (verified; do not edit — re-solve instead)\n{} {}({});\n",
+        rt,
+        name,
+        if parts.is_empty() {
+            "void".to_string()
+        } else {
+            parts.join(", ")
+        }
+    ))
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    use crate::sketch::Ty;
+
+    #[test]
+    fn test_header_flat_memref_and_scalars() {
+        let h = emit_header(
+            "mean",
+            &[("xs".to_string(), Ty::ListF64)],
+            &Ty::F64,
+        )
+        .unwrap();
+        assert!(h.contains("double mean(void* xs_a, void* xs_b, long xs_o, long xs_s, long xs_st);"));
+        assert!(h.contains("do not edit"));
+    }
+
+    #[test]
+    fn test_header_int_list_and_scalars() {
+        let h = emit_header(
+            "f",
+            &[
+                ("items".to_string(), Ty::ListInt),
+                ("k".to_string(), Ty::Int),
+                ("flag".to_string(), Ty::Bool),
+            ],
+            &Ty::Int,
+        )
+        .unwrap();
+        assert!(h.contains("long f(void* items_a, void* items_b, long items_o, long items_s, long items_st, long k, long flag);"));
+    }
+
+    #[test]
+    fn test_header_deterministic() {
+        let a = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int).unwrap();
+        let b = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int).unwrap();
+        assert_eq!(a, b);
     }
 }

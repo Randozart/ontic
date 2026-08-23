@@ -70,7 +70,7 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
         match stmt {
             Stmt::BindLit(name, value) => {
                 match value {
-                    crate::wish::Value::List(vs) => {
+                    crate::gen::Value::List(vs) => {
                         let cn = format!("v{}", seq);
                         seq += 1;
                         let items: Vec<String> = vs.iter().map(|v| v.to_string()).collect();
@@ -81,25 +81,25 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         ));
                         locals.push((name.clone(), Local::List { c_name: cn, len: vs.len() }));
                     }
-                    crate::wish::Value::Int(v) => {
+                    crate::gen::Value::Int(v) => {
                         let cn = format!("v{}", seq);
                         seq += 1;
                         body.push_str(&format!("  long {} = {}L;\n", cn, v));
                         locals.push((name.clone(), Local::Scalar { c_name: cn }));
                     }
-                    crate::wish::Value::Float(v) => {
+                    crate::gen::Value::Float(v) => {
                         let cn = format!("v{}", seq);
                         seq += 1;
                         body.push_str(&format!("  double {} = {:e};\n", cn, v));
                         locals.push((name.clone(), Local::ScalarF { c_name: cn }));
                     }
-                    crate::wish::Value::Bool(b) => {
+                    crate::gen::Value::Bool(b) => {
                         let cn = format!("v{}", seq);
                         seq += 1;
                         body.push_str(&format!("  long {} = {}L;\n", cn, *b as i64));
                         locals.push((name.clone(), Local::Scalar { c_name: cn }));
                     }
-                    crate::wish::Value::FloatList(vs) => {
+                    crate::gen::Value::FloatList(vs) => {
                         let cn = format!("v{}", seq);
                         seq += 1;
                         let items: Vec<String> = vs.iter().map(|x| format!("{:e}", x)).collect();
@@ -148,17 +148,17 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                             }
                         },
                         (CallArg::Lit(value), false) => match value {
-                            crate::wish::Value::Int(v) => {
+                            crate::gen::Value::Int(v) => {
                                 call_args.push_str(&format!("{}L, ", v))
                             }
-                            crate::wish::Value::Float(v) => {
+                            crate::gen::Value::Float(v) => {
                                 call_args.push_str(&format!("{:e}, ", v))
                             }
-                            crate::wish::Value::Bool(b) => {
+                            crate::gen::Value::Bool(b) => {
                                 call_args.push_str(&format!("{}L, ", *b as i64))
                             }
-                            crate::wish::Value::List(_)
-                            | crate::wish::Value::FloatList(_) => {
+                            crate::gen::Value::List(_)
+                            | crate::gen::Value::FloatList(_) => {
                                 return Err(format!("list literal arg to `{}` unsupported", callee))
                             }
                         },
@@ -323,10 +323,10 @@ pub fn run_in(file: &OntFile, vault_dir: &str) -> Result<Vec<String>, String> {
 
     for (i, dep_path) in prog.deps.iter().enumerate() {
         let w = file
-            .wishes
+            .gens
             .iter()
             .find(|w| &w.path == dep_path)
-            .ok_or_else(|| format!("dependency `{}` not among same-file wishes", dep_path))?;
+            .ok_or_else(|| format!("dependency `{}` not among same-file gens", dep_path))?;
         let key = crate::vault::Vault::key_for(w);
         let v = crate::vault::Vault::open(vault_dir)?;
         let entry = v.get(&key).ok_or_else(|| {
@@ -409,7 +409,7 @@ mod tests {
     use super::*;
     use crate::{pipeline, sketch};
 
-    /// End-to-end recipe gate (toolchain-gated): two hand-solved wishes,
+    /// End-to-end recipe gate (toolchain-gated): two hand-solved gens,
     /// one linear program, executed natively.
     #[test]
     fn test_recipe_end_to_end_native() {
@@ -438,7 +438,7 @@ end
 ";
         let file = crate::recipe::parse_ont(src).expect("file parses");
 
-        // Solve both wishes by hand into an isolated vault.
+        // Solve both gens by hand into an isolated vault.
         let vault_dir = scratch();
         let v = crate::vault::Vault::open(&vault_dir).expect("vault opens");
         let cands: &[(&str, &str)] = &[
@@ -450,10 +450,10 @@ end
         ];
         for (path, text) in cands {
             let w = file
-                .wishes
+                .gens
                 .iter()
                 .find(|w| w.path == *path)
-                .expect("wish present");
+                .expect("gen present");
             let cand = sketch::parse(text).expect("candidate parses");
             crate::check::check(&cand).expect("typechecks");
             let mlir = crate::lower::emit_fn(
@@ -504,7 +504,7 @@ end
         // Solve Twice into an isolated vault.
         let vault_dir = scratch();
         let v = Vault::open(&vault_dir).expect("vault opens");
-        let w = &file.wishes[0];
+        let w = &file.gens[0];
         let cand = crate::sketch::parse("fn @Twice(%n: Int) -> Int { %n * 2 }").unwrap();
         crate::check::check(&cand).unwrap();
         let mlir = crate::lower::emit_fn(
@@ -534,5 +534,75 @@ end
             std::fs::read_to_string(workdir.join("out.json")).unwrap(),
             "{\"v\": 42}\n"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod ffi_tests {
+    use super::*;
+    use crate::{pipeline, recipe, vault::Vault};
+
+    /// KG3 gate: generated header + shared library are consumable by a plain
+    /// C caller with zero Ontic involvement at runtime.
+    #[test]
+    fn test_kernel_ffi_c_caller() {
+        if pipeline::find_tool("mlir-opt").is_none() || pipeline::find_tool("llc").is_none() {
+            eprintln!("toolchain missing; ffi gate skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "ontic-ffi-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cand = crate::sketch::parse("fn @Twice(%n: Int) -> Int { %n * 2 }").unwrap();
+        let mlir = crate::lower::emit_fn(
+            &cand.name,
+            &cand.params,
+            &cand.ret,
+            &cand.body,
+            true,
+            &crate::lower::CallMap::new(),
+        )
+        .unwrap();
+
+        let so_path = dir.join("libTwice.so");
+        pipeline::build_shared_so(&mlir, &so_path).expect("builds so");
+
+        let header = crate::lower::emit_header(
+            &cand.name,
+            &cand.params,
+            &cand.ret,
+        )
+        .unwrap();
+        let h_path = dir.join("Twice.h");
+        std::fs::write(&h_path, &header).unwrap();
+
+        let caller = format!(
+            "#include <stdio.h>\n#include \"{}\"\nint main(void) {{ printf(\"%ld\\n\", Twice(21)); return 0; }}\n",
+            h_path.display()
+        );
+        let c_path = dir.join("caller.c");
+        let bin = dir.join("caller");
+        std::fs::write(&c_path, caller).unwrap();
+        let cc = pipeline::find_tool("clang").unwrap_or_else(|| std::path::PathBuf::from("clang"));
+        let out = std::process::Command::new(&cc)
+            .arg(c_path.to_str().unwrap())
+            .arg(format!("-L{}", dir.display()))
+            .arg("-lTwice")
+            .arg(format!("-Wl,-rpath,{}", dir.display()))
+            .arg("-o")
+            .arg(bin.to_str().unwrap())
+            .output()
+            .expect("caller compile spawns");
+        assert!(out.status.success(), "link failed: {}", String::from_utf8_lossy(&out.stderr));
+        let run = std::process::Command::new(&bin).output().expect("runs");
+        assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
     }
 }

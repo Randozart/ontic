@@ -1,6 +1,6 @@
 # Ontic
 
-**Stochastic specification compiler.** You write the wish (`.ont`); Mellum2
+**Stochastic specification compiler.** You write the gen (`.ont`); Mellum2
 proposes implementations; a fully deterministic sieve decides what is true.
 Verified winners are emitted as MLIR and cached in a content-addressed vault.
 
@@ -36,7 +36,7 @@ when ≥ 4 exist. Forge prompts contain only the transparent set.
 
 ```bash
 cargo build --release
-ontic check examples/ledger.ont          # validate wish, report probe strength
+ontic check examples/ledger.ont          # validate gen, report probe strength
 ontic solve examples/ledger.ont --forge 127.0.0.1:8287   # forge + sieve + vault MLIR
 ontic solve examples/ledger.ont --hand cand.sketch       # sieve hand candidates only
 ontic bench examples/ledger.ont --hand ...               # timings only
@@ -46,7 +46,7 @@ ontic vault                              # list verified functions
 
 ## Recipes
 
-One `.ont` file may hold several wishes plus one linear `program` block:
+One `.ont` file may hold several gens plus one linear `program` block:
 
 ```
 fn Ledger.total(%items: List<Int>) -> Int
@@ -69,12 +69,12 @@ end
 ```
 
 Strictly linear glue over verified parts — all computation stays in sieved
-wishes. Dependencies must be vaulted before `run`; unsolved wishes are named
+gens. Dependencies must be vaulted before `run`; unsolved gens are named
 with their fix command.
 
 ## Overflow tiers
 
-- `wrapping` line in a wish → mod-2^64 semantics, bit-exact interpreter↔native,
+- `wrapping` line in a gen → mod-2^64 semantics, bit-exact interpreter↔native,
   LLVM free to reassociate (the fast lane; declared, never implicit).
 - Default tier is checked: overflow kills candidates in the sieve and traps
   natively — honest-slow until M3 Z3 proofs replace checks.

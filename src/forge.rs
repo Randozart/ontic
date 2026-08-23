@@ -7,7 +7,7 @@
 
 use crate::http::HttpClient;
 use crate::sketch;
-use crate::wish::{Value, Wish};
+use crate::gen::{Value, Gen};
 use serde_json::json;
 use crate::sampler::{self, Usage};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -97,14 +97,14 @@ pub fn parse_endpoint(s: &str) -> (String, u16) {
     }
 }
 
-/// Render a wish parameter list for prompts.
-fn sig_text(wish: &Wish) -> String {
-    let params: Vec<String> = wish
+/// Render a gen parameter list for prompts.
+fn sig_text(gen: &Gen) -> String {
+    let params: Vec<String> = gen
         .params
         .iter()
         .map(|(n, t)| format!("%{}: {}", n, t.name()))
         .collect();
-    format!("fn {}({}) -> {}", wish.path, params.join(", "), wish.ret.name())
+    format!("fn {}({}) -> {}", gen.path, params.join(", "), gen.ret.name())
 }
 
 /// Render one value exactly as the .ont surface does.
@@ -117,30 +117,30 @@ fn val_text(v: &Value) -> String {
 /// Prefill strategy: the prompt ends with a literal `fn @`, so the model's
 /// first generated token is already inside the function name. Mellum2 is a
 /// code-completion model; completion-style prompting beats chat instructions.
-pub fn build_prompt(wish: &Wish, feedback: &[String]) -> String {
+pub fn build_prompt(gen: &Gen, feedback: &[String]) -> String {
     let mut p = String::new();
     p.push_str("Complete one Ontic sketch implementation.\n");
     p.push_str("\n=== SPECIFICATION (notation only — never copy into code) ===\n");
-    p.push_str(&format!("{}\n", sig_text(wish)));
-    if !wish.invariants.is_empty() {
+    p.push_str(&format!("{}\n", sig_text(gen)));
+    if !gen.invariants.is_empty() {
         p.push_str("Invariants:\n");
-        for inv in &wish.invariants {
+        for inv in &gen.invariants {
             p.push_str(&format!(
                 "| {}\n",
                 crate::lower::expr_display(inv)
             ));
         }
     }
-    if !wish.transparent.is_empty() {
+    if !gen.transparent.is_empty() {
         p.push_str("Evidence:\n");
-        for ex in &wish.transparent {
+        for ex in &gen.transparent {
             let ins: Vec<String> = ex.inputs.iter().map(val_text).collect();
             p.push_str(&format!("=> {} -> {}\n", ins.join(", "), val_text(&ex.output)));
         }
     }
-    if !wish.hints.is_empty() {
+    if !gen.hints.is_empty() {
         p.push_str("\n=== AUTHOR GUIDANCE ===\n");
-        for h in &wish.hints {
+        for h in &gen.hints {
             p.push_str(&format!("- {}\n", h));
         }
     }
@@ -213,15 +213,15 @@ fn extract_content(body: &str) -> Result<String, String> {
 /// sample index so downstream sieving is deterministic regardless of
 /// network completion order.
 pub fn sample(
-    wish: &Wish,
+    gen: &Gen,
     cfg: &ForgeConfig,
     feedback: &[String],
 ) -> Result<(Vec<String>, Usage), String> {
     // Cloud backends never touch the llama worker pool.
     if cfg.backend != Backend::Llama {
-        return sample_cloud(wish, cfg, feedback);
+        return sample_cloud(gen, cfg, feedback);
     }
-    let prompt = build_prompt(wish, feedback);
+    let prompt = build_prompt(gen, feedback);
     let n = cfg.samples.max(1);
     let workers = worker_count().min(n);
     let done = AtomicUsize::new(0);
@@ -293,7 +293,7 @@ pub fn sample(
 
     // Cloud backends take a separate sequential path (curl per sample).
     if cfg.backend != Backend::Llama {
-        return sample_cloud(wish, cfg, feedback);
+        return sample_cloud(gen, cfg, feedback);
     }
 
     let mut flat: Vec<(usize, String)> = results.into_iter().flatten().collect();
@@ -308,7 +308,7 @@ pub fn sample(
 /// Cloud sampling path: one curl request per candidate index, retry/backoff
 /// on transient failures, tokens accumulated across the batch.
 fn sample_cloud(
-    wish: &Wish,
+    gen: &Gen,
     cfg: &ForgeConfig,
     feedback: &[String],
 ) -> Result<(Vec<String>, Usage), String> {
@@ -322,7 +322,7 @@ fn sample_cloud(
         Backend::GeminiNative => sampler::gemini_url(&cfg.endpoint, &cfg.model),
         _ => format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/')),
     };
-    let llama_style_prompt = build_prompt(wish, feedback);
+    let llama_style_prompt = build_prompt(gen, feedback);
     let chat_prompt_text = sampler::chat_prompt(&llama_style_prompt);
 
     let mut texts: Vec<(usize, String)> = Vec::new();
@@ -396,9 +396,9 @@ fn sample_cloud(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wish;
+    use crate::gen;
 
-    const WISH_SRC: &str = "\
+    const GEN_SRC: &str = "\
 fn Ledger.total(%items: List<Int>) -> Int
   | %res >= 0
   => [1,2,3] -> 6
@@ -408,7 +408,7 @@ fn Ledger.total(%items: List<Int>) -> Int
 
     #[test]
     fn test_prompt_contains_only_transparent_evidence() {
-        let w = wish::parse(WISH_SRC).unwrap();
+        let w = gen::parse(GEN_SRC).unwrap();
         let p = build_prompt(&w, &[]);
         assert!(p.contains("[1,2,3] -> 6"));
         assert!(p.contains("[] -> 0"));
@@ -419,7 +419,7 @@ fn Ledger.total(%items: List<Int>) -> Int
 
     #[test]
     fn test_feedback_round_included_in_prompt() {
-        let w = wish::parse(WISH_SRC).unwrap();
+        let w = gen::parse(GEN_SRC).unwrap();
         let p = build_prompt(&w, &["S5-probe/invariant-violation: res < 0".into()]);
         assert!(p.contains("Rejected attempts"));
         assert!(p.contains("invariant-violation"));
@@ -467,7 +467,7 @@ fn Ledger.total(%items: List<Int>) -> Int
 
     #[test]
     fn test_prompt_ends_with_prefill_and_hides_opaque() {
-        let w = wish::parse(WISH_SRC).unwrap();
+        let w = gen::parse(GEN_SRC).unwrap();
         let p = build_prompt(&w, &[]);
         assert!(p.ends_with("\nfn @"));
         assert!(!p.contains("-> 9"), "opaque example leaked into prompt");
