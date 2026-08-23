@@ -82,9 +82,20 @@ with their fix command.
 Environment: `ONTIC_FORGE` (host:port), `ONTIC_FORGE_WORKERS` (default 2),
 `ONTIC_VAULT` (default `.ontic/vault`), `ONTIC_MLIR_BIN` (toolchain dir).
 
-Forge requirements: any llama.cpp `/completion` endpoint; the GBNF grammar and
-the `fn @` prompt prefill are sent per request. Designed against VITRIOL's
-llama-server running Mellum2-12B-A2.5B.
+Forge requirements: local llama.cpp `/completion` (GBNF grammar + `fn @`
+prefill) **or** a cloud sampler:
+
+```bash
+export GEMINI_API_KEY=...        # or put it in .env (gitignored)
+ontic solve examples/rms.ont \
+  --sampler-backend gemini \ 
+  --model gemini-2.0-flash-lite --samples 16
+```
+
+`--sampler-backend openai` speaks chat/completions (OpenRouter, Groq,
+DeepSeek, vLLM...). Cloud candidate sets are non-reproducible; every solve
+records full prompt provenance in its vault manifest, and each run prints a
+token report.
 
 ## Editor support
 

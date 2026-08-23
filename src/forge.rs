@@ -9,6 +9,7 @@ use crate::http::HttpClient;
 use crate::sketch;
 use crate::wish::{Value, Wish};
 use serde_json::json;
+use crate::sampler::{self, Usage};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -33,10 +34,34 @@ fn retryable_status(status: u16) -> bool {
     matches!(status, 500 | 502 | 503 | 504)
 }
 
+/// Which sampler transport produces candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Llama,
+    OpenAICompat,
+    GeminiNative,
+}
+
+impl Backend {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Backend::Llama => "llama",
+            Backend::OpenAICompat => "openai",
+            Backend::GeminiNative => "gemini",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ForgeConfig {
+    /// Local llama endpoint host/port.
     pub host: String,
     pub port: u16,
+    /// Cloud backend selection + credentials indirection.
+    pub backend: Backend,
+    pub endpoint: String,
+    pub model: String,
+    pub api_key_env: String,
     pub samples: usize,
     pub seed: u64,
     pub temperature: f64,
@@ -48,6 +73,10 @@ impl Default for ForgeConfig {
         ForgeConfig {
             host,
             port,
+            backend: Backend::Llama,
+            endpoint: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            model: "gemini-2.0-flash-lite".to_string(),
+            api_key_env: "GEMINI_API_KEY".to_string(),
             samples: 32,
             seed: 0x5EED,
             temperature: 0.8,
@@ -181,7 +210,11 @@ fn extract_content(body: &str) -> Result<String, String> {
 /// Sample `cfg.samples` candidates in parallel. Returns texts ordered by
 /// sample index so downstream sieving is deterministic regardless of
 /// network completion order.
-pub fn sample(wish: &Wish, cfg: &ForgeConfig, feedback: &[String]) -> Result<Vec<String>, String> {
+pub fn sample(
+    wish: &Wish,
+    cfg: &ForgeConfig,
+    feedback: &[String],
+) -> Result<(Vec<String>, Usage), String> {
     let prompt = build_prompt(wish, feedback);
     let n = cfg.samples.max(1);
     let workers = worker_count().min(n);
@@ -252,13 +285,102 @@ pub fn sample(wish: &Wish, cfg: &ForgeConfig, feedback: &[String]) -> Result<Vec
         Ok::<Vec<Vec<(usize, String)>>, String>(merged)
     })?;
 
+    // Cloud backends take a separate sequential path (curl per sample).
+    if cfg.backend != Backend::Llama {
+        return sample_cloud(wish, cfg, feedback);
+    }
+
     let mut flat: Vec<(usize, String)> = results.into_iter().flatten().collect();
     flat.sort_by_key(|(i, _)| *i);
     let texts: Vec<String> = flat.into_iter().map(|(_, t)| t).collect();
     if texts.is_empty() {
         return Err("all samples failed (server unreachable or rejecting)".to_string());
     }
-    Ok(texts)
+    Ok((texts, Usage::zero()))
+}
+
+/// Cloud sampling path: one curl request per candidate index, retry/backoff
+/// on transient failures, tokens accumulated across the batch.
+fn sample_cloud(
+    wish: &Wish,
+    cfg: &ForgeConfig,
+    feedback: &[String],
+) -> Result<(Vec<String>, Usage), String> {
+    let key = std::env::var(&cfg.api_key_env)
+        .map_err(|_| format!("missing API key: set ${}", cfg.api_key_env))?;
+    let style = match cfg.backend {
+        Backend::OpenAICompat => crate::cloud::AuthStyle::Bearer,
+        _ => crate::cloud::AuthStyle::XGoogApiKey,
+    };
+    let url = match cfg.backend {
+        Backend::GeminiNative => sampler::gemini_url(&cfg.endpoint, &cfg.model),
+        _ => format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/')),
+    };
+    let llama_style_prompt = build_prompt(wish, feedback);
+    let chat_prompt_text = sampler::chat_prompt(&llama_style_prompt);
+
+    let mut texts: Vec<(usize, String)> = Vec::new();
+    let mut usage_total = Usage::zero();
+    for idx in 0..cfg.samples.max(1) {
+        let body = match cfg.backend {
+            Backend::OpenAICompat => {
+                sampler::openai_body(&cfg.model, &chat_prompt_text, cfg.temperature, 512)
+            }
+            _ => sampler::gemini_body(&chat_prompt_text, cfg.temperature, 512),
+        };
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            match crate::cloud::post_json(
+                &url,
+                Some((&key, style)),
+                &[],
+                &body,
+                120,
+            ) {
+                Ok(resp) if resp.status == 200 => {
+                    let (raw, u) = match cfg.backend {
+                        Backend::GeminiNative => sampler::gemini_parse(&resp.body)?,
+                        _ => sampler::openai_parse(&resp.body)?,
+                    };
+                    usage_total += u;
+                    texts.push((idx, forge_extract_helper(raw)));
+                    break;
+                }
+                Ok(resp)
+                    if matches!(resp.status, 429 | 500 | 502 | 503 | 504)
+                        && attempt < SAMPLE_TRIES =>
+                {
+                    eprintln!(
+                        "forge: sample {} got HTTP {}, retrying ({}/{})",
+                        idx, resp.status, attempt, SAMPLE_TRIES
+                    );
+                }
+                Ok(resp) => {
+                    return Err(format!(
+                        "sample {}: HTTP {}: {}",
+                        idx,
+                        resp.status,
+                        resp.body
+                    ))
+                }
+                Err(e) if attempt < SAMPLE_TRIES => {
+                    eprintln!("forge: sample {} transport error ({}), retrying ({}/{})", idx, e, attempt, SAMPLE_TRIES);
+                }
+                Err(e) => {
+                    eprintln!("forge: sample {} abandoned: {}", idx, e);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400 * attempt as u64));
+        }
+    }
+    texts.sort_by_key(|(i, _)| *i);
+    let out: Vec<String> = texts.into_iter().map(|(_, t)| t).collect();
+    if out.is_empty() {
+        return Err("all cloud samples failed".to_string());
+    }
+    Ok((out, usage_total))
 }
 
 #[cfg(test)]
@@ -340,4 +462,10 @@ fn Ledger.total(%items: List<Int>) -> Int
         assert!(p.ends_with("\nfn @"));
         assert!(!p.contains("-> 9"), "opaque example leaked into prompt");
     }
+}
+
+/// Normalize raw provider output into a candidate text (thin alias kept so
+/// the cloud path reads symmetrically with the llama path).
+fn forge_extract_helper(raw: String) -> String {
+    extract_candidate(&raw)
 }

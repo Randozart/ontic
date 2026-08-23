@@ -115,7 +115,7 @@ fn schema() -> serde_json::Value {
 }
 
 /// Native Gemini generateContent request body.
-pub fn gemini_body(model: &str, prompt: &str, temp: f64, max_tokens: usize) -> String {
+pub fn gemini_body(prompt: &str, temp: f64, max_tokens: usize) -> String {
     json!({
         "contents": [
             {"role": "user", "parts": [{"text": prompt}]}
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_gemini_body_carries_schema() {
-        let b = gemini_body("gm", "PROMPT", 0.7, 512);
+        let b = gemini_body("PROMPT", 0.7, 512);
         assert!(b.contains("\"responseSchema\""));
         assert!(b.contains("List<Int>"), "type enum missing");
         assert!(b.contains("\"candidateCount\":1"));

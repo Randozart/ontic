@@ -22,12 +22,7 @@ pub enum AuthStyle {
     XGoogApiKey,
 }
 
-fn auth_header_name(style: AuthStyle) -> &'static str {
-    match style {
-        AuthStyle::Bearer => "Authorization",
-        AuthStyle::XGoogApiKey => "x-goog-api-key",
-    }
-}
+
 
 /// Pure builder for the protected header file contents (unit tested):
 /// one Content-Type line plus the credential line.

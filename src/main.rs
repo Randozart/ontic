@@ -13,6 +13,8 @@ use ontic::vault::Vault;
 use ontic::wish;
 
 fn main() {
+    // .env is the lowest-precedence source; real env always wins.
+    let _ = ontic::dotenv::load(std::path::Path::new("."));
     let args: Vec<String> = std::env::args().collect();
     std::process::exit(dispatch(&args));
 }
@@ -130,18 +132,70 @@ fn probes_count(w: &wish::Wish, cfg: &SiegeConfig) -> usize {
 }
 
 /// Resolve forge config from flags/env.
-fn forge_config(forge_flag: Option<&str>, samples: usize, seed: u64) -> ForgeConfig {
+fn forge_config(opts: &SolveOpts) -> ForgeConfig {
     let mut cfg = ForgeConfig::default();
-    let endpoint = forge_flag
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("ONTIC_FORGE").ok());
-    if let Some(ep) = endpoint {
+    // Backend selection: flag > env > default(llama).
+    if let Some(b) = &opts.sampler_backend {
+        cfg.backend = forge::Backend::Llama; // placeholder replaced below
+        let kind = match b.as_str() {
+            "openai" | "openai-compat" => forge::Backend::OpenAICompat,
+            "gemini" | "gemini-native" => forge::Backend::GeminiNative,
+            _ => forge::Backend::Llama,
+        };
+        cfg.backend = kind;
+        if matches!(kind, forge::Backend::OpenAICompat | forge::Backend::GeminiNative) {
+            cfg.model = opts
+                .model
+                .clone()
+                .or_else(|| std::env::var("ONTIC_MODEL").ok())
+                .unwrap_or_else(|| "gemini-2.0-flash-lite".to_string());
+            let key_env = opts
+                .api_key_env
+                .clone()
+                .unwrap_or_else(|| "GEMINI_API_KEY".to_string());
+            if std::env::var(&key_env).is_err() {
+                eprintln!(
+                    "warning: ${} not set — cloud sampling will fail until it is",
+                    key_env
+                );
+            }
+        }
+    } else if let Ok(b) = std::env::var("ONTIC_SAMPLER") {
+        let kind = match b.as_str() {
+            "openai" | "openai-compat" => Some(forge::Backend::OpenAICompat),
+            "gemini" | "gemini-native" => Some(forge::Backend::GeminiNative),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            cfg.backend = kind;
+            cfg.model = opts
+                .model
+                .clone()
+                .or_else(|| std::env::var("ONTIC_MODEL").ok())
+                .unwrap_or_else(|| "gemini-2.0-flash-lite".to_string());
+        }
+    }
+    // Endpoint handling: llama uses host:port; cloud uses base URL.
+    let endpoint = opts
+        .endpoint
+        .clone()
+        .or_else(|| std::env::var("ONTIC_FORGE_ENDPOINT").ok());
+    if matches!(
+        cfg.backend,
+        forge::Backend::OpenAICompat | forge::Backend::GeminiNative
+    ) {
+        if let Some(ep) = endpoint {
+            cfg.endpoint = ep;
+        }
+    } else if let Some(ep) = endpoint.or_else(|| opts.forge.clone()) {
         let (h, p) = forge::parse_endpoint(&ep);
         cfg.host = h;
         cfg.port = p;
+    } else if let Some(f) = &opts.forge {
+        let (h, p) = forge::parse_endpoint(f);
+        cfg.host = h;
+        cfg.port = p;
     }
-    cfg.samples = samples;
-    cfg.seed = seed;
     cfg
 }
 
@@ -154,6 +208,10 @@ struct SolveOpts {
     samples: usize,
     seed: u64,
     forge: Option<String>,
+    sampler_backend: Option<String>,
+    endpoint: Option<String>,
+    model: Option<String>,
+    api_key_env: Option<String>,
 }
 
 fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
@@ -168,6 +226,10 @@ fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
         samples: 32,
         seed: 0x5EED,
         forge: None,
+        sampler_backend: None,
+        endpoint: None,
+        model: None,
+        api_key_env: None,
     };
     let mut i = 3;
     while i < args.len() {
@@ -200,6 +262,38 @@ fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
                     .get(i)
                     .and_then(|v| v.parse().ok())
                     .ok_or_else(|| "--seed needs a number".to_string())?;
+            }
+            "--sampler-backend" => {
+                i += 1;
+                opts.sampler_backend = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--sampler-backend needs llama|openai|gemini".to_string())?
+                        .clone(),
+                );
+            }
+            "--endpoint" => {
+                i += 1;
+                opts.endpoint = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--endpoint needs a URL".to_string())?
+                        .clone(),
+                );
+            }
+            "--model" => {
+                i += 1;
+                opts.model = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--model needs a model name".to_string())?
+                        .clone(),
+                );
+            }
+            "--api-key-env" => {
+                i += 1;
+                opts.api_key_env = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--api-key-env needs a variable name".to_string())?
+                        .clone(),
+                );
             }
             "--wish" => {
                 i += 1;
@@ -293,13 +387,19 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             }
         }
     } else {
-        let fcfg = forge_config(opts.forge.as_deref(), opts.samples, opts.seed);
+        let fcfg = forge_config(opts);
         println!(
             "forging {} candidates from {}:{} ...",
             fcfg.samples, fcfg.host, fcfg.port
         );
         match forge::sample(&w, &fcfg, &[]) {
-            Ok(texts) => texts.into_iter().enumerate().map(|(i, t)| (format!("forge-{}", i), t)).collect(),
+            Ok((texts, usage)) => {
+                println!(
+                    "tokens  : prompt={} completion={}",
+                    usage.prompt, usage.completion
+                );
+                texts.into_iter().enumerate().map(|(i, t)| (format!("forge-{}", i), t)).collect()
+            }
             Err(e) => {
                 eprintln!("forge failed: {}", e);
                 return 1;
@@ -308,6 +408,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
     };
 
     let resolved = resolve_deps(&w);
+    let first_prompt = forge::build_prompt(&w, &[]);
     let mut report = match sieve::run(&w, &candidates, &cfg, &resolved.map) {
         Ok(r) => r,
         Err(e) => {
@@ -325,12 +426,20 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             .take(16)
             .map(|(l, r)| format!("{}/{}/{}: {}", l, r.stage.label(), r.kind.label(), r.reason))
             .collect();
-        let mut fcfg = forge_config(opts.forge.as_deref(), opts.samples, opts.seed.wrapping_add(1));
-        // Repair mode: colder sampling turns exploration into refinement.
-        fcfg.temperature = 0.4;
+        let fcfg = {
+            let mut c = forge_config(opts);
+            c.seed = c.seed.wrapping_add(1);
+            // Repair mode: colder sampling turns exploration into refinement.
+            c.temperature = 0.4;
+            c
+        };
         println!("feedback round: {} resamples at T={} ...", fcfg.samples, fcfg.temperature);
         match forge::sample(&w, &fcfg, &feedback) {
-            Ok(texts) => {
+            Ok((texts, usage)) => {
+                println!(
+                    "tokens  : prompt={} completion={} (retry)",
+                    usage.prompt, usage.completion
+                );
                 let cands: Vec<(String, String)> = texts
                     .into_iter()
                     .enumerate()
@@ -360,7 +469,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             if !store {
                 return 0;
             }
-            emit_and_store(&w, winner, &resolved)
+            emit_and_store(&w, winner, &resolved, &fcfg, &first_prompt)
         }
     }
 }
@@ -511,7 +620,13 @@ fn merge_reports(base: &mut sieve::SieveReport, extra: sieve::SieveReport) {
 }
 
 /// Lower the winner, best-effort validate with mlir-opt, store in vault.
-fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor, resolved: &ResolvedDeps) -> i32 {
+fn emit_and_store(
+    w: &wish::Wish,
+    survivor: &sieve::Survivor,
+    resolved: &ResolvedDeps,
+    fcfg: &ForgeConfig,
+    first_prompt: &str,
+) -> i32 {
     let mlir = match lower::emit_fn(
         &survivor.candidate.name,
         &survivor.candidate.params,
@@ -554,7 +669,25 @@ fn emit_and_store(w: &wish::Wish, survivor: &sieve::Survivor, resolved: &Resolve
             return 1;
         }
     };
-    match v.put(w, &survivor.source_text, &mlir) {
+    // Prompt provenance (rule 12 companion): recorded with the solve so
+    // prompts become regression-testable artifacts.
+    let model_label = if matches!(fcfg.backend, forge::Backend::Llama) {
+        format!("llama {}:{}", fcfg.host, fcfg.port)
+    } else {
+        format!("{} {}", fcfg.backend.label(), fcfg.model)
+    };
+    let meta = serde_json::json!({
+        "last_solve": {
+            "sampler": fcfg.backend.label(),
+            "model": model_label,
+            "temperature": fcfg.temperature,
+            "samples": fcfg.samples,
+            "seed_base": fcfg.seed,
+            "prompt_sha256": ontic::sha256::sha256_hex(first_prompt.as_bytes()),
+            "prompt": first_prompt,
+        }
+    });
+    match v.put_meta(w, &survivor.source_text, &mlir, &meta) {
         Ok(key) => {
             println!("VAULTED {} ({})", w.path, key);
             0

@@ -240,3 +240,14 @@
   Usage accumulation. Fixture built programmatically after hand-counted
   bracket fixture failed twice (ISSUES entry).
 - 107 tests green.
+
+### 2026-08-23 05:00 — C1-C3: cloud sampler dispatch, flags, provenance
+- forge.rs: ForgeConfig gains backend/endpoint/model/api_key_env; cloud
+  sampling path (sequential curl, retry/backoff, 429-aware) returning Usage.
+- main.rs: .env loaded at startup; new flags --sampler-backend/--endpoint/
+  --model/--api-key-env; per-round token reports; provenance meta (prompt
+  text + sha + sampler params) stored in vault manifests via put_meta().
+- vault.rs: put_meta(extra) shallow-merged into manifest; put() kept.
+- Docs: AGENTS rule 10 amended (configured endpoints, key hygiene,
+  reproducibility caveat); README cloud usage section.
+- 115 tests green.

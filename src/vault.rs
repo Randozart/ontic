@@ -48,7 +48,14 @@ impl Vault {
     }
 
     /// Store a survivor. Overwrites on re-verification of the same key.
-    pub fn put(&self, wish: &Wish, sketch_text: &str, mlir: &str) -> Result<String, String> {
+    /// `extra_meta` merges into the manifest (e.g. solve provenance).
+    pub fn put_meta(
+        &self,
+        wish: &Wish,
+        sketch_text: &str,
+        mlir: &str,
+        extra_meta: &serde_json::Value,
+    ) -> Result<String, String> {
         let key = Self::key_for(wish);
         fs::write(self.mlir_path(&key), mlir)
             .map_err(|e| format!("mlir write failed: {}", e))?;
@@ -67,12 +74,18 @@ impl Vault {
             "sketch": sketch_text,
             "ns_per_call_note": "see solve output; timing is machine-specific",
         });
+        let merged = Self::merge_json(&manifest, extra_meta);
         fs::write(
             self.manifest_path(&key),
-            serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?,
+            serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?,
         )
         .map_err(|e| format!("manifest write failed: {}", e))?;
         Ok(key)
+    }
+
+    /// Store without provenance metadata.
+    pub fn put(&self, wish: &Wish, sketch_text: &str, mlir: &str) -> Result<String, String> {
+        self.put_meta(wish, sketch_text, mlir, &serde_json::Value::Null)
     }
 
     /// Find a solved entry by wish path (latest match wins).
@@ -88,6 +101,21 @@ impl Vault {
             }
         }
         best.map(|(_, e)| e)
+    }
+
+    /// Shallow-merge b over a (b wins).
+    fn merge_json(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
+        match (a, b) {
+            (serde_json::Value::Object(_), serde_json::Value::Null) => a.clone(),
+            (serde_json::Value::Object(am), serde_json::Value::Object(bm)) => {
+                let mut out = am.clone();
+                for (k, v) in bm {
+                    out.insert(k.clone(), v.clone());
+                }
+                serde_json::Value::Object(out)
+            }
+            _ => a.clone(),
+        }
     }
 
     /// Fetch an entry by key.

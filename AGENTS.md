@@ -55,8 +55,13 @@ Patches are unacceptable. There is no "go fast and break things."
    committed code.
 9. **TESTS OR IT DOESN'T EXIST**: every stage needs behavioral tests,
    including negative tests (a known-overfit candidate MUST be rejected).
-10. **SELF-CONTAINED**: no network calls except to the configured
-    llama-server endpoint. No telemetry. Vault is plain files.
+10. **SELF-CONTAINED**: no network calls except to CONFIGURED forge
+    endpoints (local llama-server or cloud sampler per `.env`/CLI). No
+    telemetry. Vault is plain files. API keys live only in 0600 temp header
+    files consumed by curl and are never logged, printed, or committed.
+    NOTE: cloud-sampled candidate sets are not reproducible across runs;
+    verdicts and vault keys remain deterministic. Prompt provenance is
+    stored per solve so runs stay auditable.
 11. **SPEED REQUIRES DECLARATION**: the fast path never exists without a
     visible contract word in the wish (`wrapping`, future `prop` proofs).
     Compiler mercy is forbidden: semantics must be identical between the
