@@ -48,6 +48,7 @@ pub fn expr_display(e: &Expr) -> String {
             "{}({})",
             match b {
                 Builtin::Len => "len",
+                Builtin::Range => "range",
                 Builtin::Sum => "sum",
                 Builtin::Max => "max",
                 Builtin::Min => "min",
@@ -55,8 +56,14 @@ pub fn expr_display(e: &Expr) -> String {
                 Builtin::Exp => "exp",
                 Builtin::Log => "log",
                 Builtin::Abs => "abs",
+                Builtin::Index => "index",
             },
             expr_display(i)
+        ),
+        Expr::Builtin2(_, l, r) => format!(
+            "index({}, {})",
+            expr_display(l),
+            expr_display(r)
         ),
         Expr::UnOp(crate::sketch::UnOp::Neg, i) => format!("(-{})", expr_display(i)),
         Expr::UnOp(crate::sketch::UnOp::Not, i) => format!("!{}", expr_display(i)),
@@ -215,6 +222,7 @@ pub fn emit_fn(
     // broadcast length guard (a structural error in EVERY tier). Unused
     // declarations are valid MLIR; harnesses link abort().
     em.line("func.func private @ontic_trap() -> i64");
+    em.line("func.func private @ontic_trapf() -> f64");
     em.line(&format!(
         "func.func @{}({}) -> {} {{",
         name,
@@ -276,6 +284,13 @@ fn emit_expr(
         Expr::ListLit(items) => emit_list_lit(items, em),
         Expr::Call(p, args) => emit_call(p, args, env, tyenv, em),
         Expr::Builtin(b, inner) => emit_builtin(*b, inner, env, tyenv, em),
+        Expr::Builtin2(crate::sketch::Builtin::Index, l, r) => {
+            emit_index(l, r, env, tyenv, em)
+        }
+        Expr::Builtin2(b, _, _) => Err(format!(
+            "lowering: builtin {:?} is unary",
+            b
+        )),
         Expr::UnOp(crate::sketch::UnOp::Neg, inner) => {
             let x = emit_expr(inner, env, tyenv, em)?;
             let z = em.const_i64(0);
@@ -343,6 +358,57 @@ fn emit_builtin(
     em: &mut Emitter,
 ) -> Result<String, String> {
     match b {
+        // range(n) allocates an i64 memref 0..n and fills it by loop.
+        Builtin::Range => {
+            let n64 = emit_expr(inner, env, tyenv, em)?;
+            let idx0 = em.const_index(0);
+            let step = em.const_index(1);
+            let n_idx = em.fresh("rn");
+            em.line(&format!(
+                "{} = arith.index_cast {} : i64 to index",
+                n_idx, n64
+            ));
+            let neg = em.fresh("rneg");
+            let z = em.const_i64(0);
+            em.line(&format!("{} = arith.cmpi slt, {}, {} : i64", neg, n64, z));
+            let guard = em.fresh("rguard");
+            em.line(&format!("{} = scf.if {} -> (index) {{", guard, neg));
+            em.indent += 1;
+            em.line(&format!("scf.yield {} : index", idx0));
+            em.indent -= 1;
+            em.line("} else {");
+            em.indent += 1;
+            em.line(&format!("scf.yield {} : index", n_idx));
+            em.indent -= 1;
+            em.line("}");
+            let alloc = em.fresh("range");
+            em.line(&format!(
+                "{} = memref.alloc({}) : memref<?xi64>",
+                alloc, guard
+            ));
+            let iv = em.fresh("ri");
+            let accp = em.fresh("racc");
+            em.line(&format!(
+                "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (index) {{",
+                accp, iv, idx0, guard, step, accp, idx0
+            ));
+            em.indent += 1;
+            let v64 = em.fresh("rv");
+            em.line(&format!(
+                "{} = arith.index_cast {} : index to i64",
+                v64, iv
+            ));
+            em.line(&format!(
+                "memref.store {}, {}[{}] : memref<?xi64>",
+                v64, alloc, iv
+            ));
+            em.line(&format!("scf.yield {} : index", accp));
+            em.indent -= 1;
+            em.line("}");
+            // The allocated buffer carries the iota; the loop result is unused.
+            Ok(alloc)
+        }
+        Builtin::Index => Err("lowering: index is binary".to_string()),
         Builtin::Len => {
             let m = emit_expr(inner, env, tyenv, em)?;
             let idx0 = em.const_index(0);
@@ -506,6 +572,75 @@ fn emit_call(
         }
         _ => Err("lowering: only F64-returning dep calls supported".to_string()),
     }
+}
+
+
+/// Emit `index(list, pos)`: bounds-CHECKED load — out-of-bounds traps via
+/// ontic_trap so native matches the oracle's IndexOutOfBounds kill.
+fn emit_index(
+    l: &Expr,
+    r: &Expr,
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let m = emit_expr(l, env, tyenv, em)?;
+    let pos = emit_expr(r, env, tyenv, em)?;
+    let mty = list_memref(l, tyenv);
+    let idx0 = em.const_index(0);
+    let dim = em.fresh("idim");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim, m, idx0, mty
+    ));
+    // position is i64; compare in index domain.
+    let pos_idx = em.fresh("ipos");
+    em.line(&format!(
+        "{} = arith.index_cast {} : i64 to index",
+        pos_idx, pos
+    ));
+    let neg = em.fresh("ineg");
+    let zero_i64 = em.const_i64(0);
+    em.line(&format!(
+        "{} = arith.cmpi slt, {}, {} : i64",
+        neg, pos, zero_i64
+    ));
+    let pos_i64 = em.fresh("p64");
+    em.line(&format!(
+        "{} = arith.index_cast {} : index to i64",
+        pos_i64, dim
+    ));
+    let ge = em.fresh("ige");
+    em.line(&format!(
+        "{} = arith.cmpi sge, {}, {} : i64",
+        ge, pos, pos_i64
+    ));
+    let bad = em.fresh("ibad");
+    em.line(&format!("{} = arith.ori {}, {} : i1", bad, neg, ge));
+
+    let out = em.fresh("elem");
+    let elem_ty = if matches!(mty, "memref<?xf64>") { "f64" } else { "i64" };
+    em.line(&format!("{} = scf.if {} -> ({}) {{", out, bad, elem_ty));
+    em.indent += 1;
+    let trap_sym = if elem_ty == "f64" { "ontic_trapf" } else { "ontic_trap" };
+    let t = em.fresh("t");
+    em.line(&format!(
+        "{} = func.call @{}() : () -> {}",
+        t, trap_sym, elem_ty
+    ));
+    em.line(&format!("scf.yield {} : {}", t, elem_ty));
+    em.indent -= 1;
+    em.line("} else {");
+    em.indent += 1;
+    let v = em.fresh("v");
+    em.line(&format!(
+        "{} = memref.load {}[{}] : {}",
+        v, m, pos_idx, mty
+    ));
+    em.line(&format!("scf.yield {} : {}", v, elem_ty));
+    em.indent -= 1;
+    em.line("}");
+    Ok(out)
 }
 
 fn emit_if(
@@ -772,8 +907,18 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
         Expr::ListLit(_) => Ty::ListInt,
         Expr::Var(n) => tyenv.get(n).cloned().unwrap_or(Ty::Int),
         Expr::Call(p, _) => tyenv.get(p).cloned().unwrap_or(Ty::Int),
+        Expr::Builtin2(crate::sketch::Builtin::Index, l, _) => {
+            // Element type follows the indexed list.
+            if matches!(expr_ty(l, tyenv), Ty::ListF64) {
+                Ty::F64
+            } else {
+                Ty::Int
+            }
+        }
+        Expr::Builtin2(..) => Ty::Int,
         Expr::Builtin(b, inner) => match b {
             Builtin::Len => Ty::Int,
+            Builtin::Range => Ty::ListInt,
             // Reductions follow their list's element type.
             Builtin::Sum | Builtin::Max | Builtin::Min => {
                 if matches!(expr_ty(inner, tyenv), Ty::ListF64) {

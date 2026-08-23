@@ -7,12 +7,22 @@ use std::collections::HashMap;
 /// Dependency signatures for vault calls: path -> (param types, ret).
 pub type DepSigs = HashMap<String, (Vec<Ty>, Ty)>;
 
+#[allow(dead_code)]
+fn unreachable_index() -> ! {
+    panic!("internal: Index handled via builtin2")
+}
+
 /// Static type of a builtin application.
 fn builtin_ty(b: Builtin, t: Ty) -> Result<Ty, String> {
     match b {
         Builtin::Len => match t {
             Ty::ListInt | Ty::ListF64 => Ok(Ty::Int),
             other => Err(format!("len of {}", other.name())),
+        },
+        Builtin::Index => unreachable_index(),
+        Builtin::Range => match t {
+            Ty::Int => Ok(Ty::ListInt),
+            other => Err(format!("range of {}", other.name())),
         },
         Builtin::Sum | Builtin::Max | Builtin::Min => match t {
             Ty::ListInt => Ok(Ty::Int),
@@ -209,6 +219,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             let t = infer(inner, env)?;
             builtin_ty(*b, t)
         }
+        Expr::Builtin2(b, l, r) => infer_builtin2(*b, l, r, env),
         Expr::UnOp(UnOp::Neg, inner) => expect_ty(inner, env, &Ty::Int),
         Expr::UnOp(UnOp::Not, inner) => expect_ty(inner, env, &Ty::Bool),
         Expr::If(c, t, f) => {
@@ -268,6 +279,26 @@ fn expect_ty_in(e: &Expr, env: &HashMap<String, Ty>, want: &Ty) -> Result<Ty, St
         return Err(format!("expected {}, got {}", want.name(), got.name()));
     }
     Ok(got)
+}
+
+/// Typecheck binary builtins.
+fn infer_builtin2(b: Builtin, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
+    let lt = infer(l, env)?;
+    let rt = infer(r, env)?;
+    match b {
+        Builtin::Index => {
+            let elem = match lt {
+                Ty::ListInt => Ty::Int,
+                Ty::ListF64 => Ty::F64,
+                other => return Err(format!("index of {}", other.name())),
+            };
+            if rt != Ty::Int {
+                return Err(format!("index position must be Int, got {}", rt.name()));
+            }
+            Ok(elem)
+        }
+        _ => Err(format!("builtin {:?} is unary", b)),
+    }
 }
 
 fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {

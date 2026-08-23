@@ -1,0 +1,5 @@
+// Dot product via range+index — the canonical D-track kernel shape.
+wrapping
+fn Linalg.dot(%a: List<F64>, %b: List<F64>) -> F64
+  => [1.0, 2.0], [3.0, 4.0] -> 11.0 ± 1e-9
+  ?? [1.0, 1.0, 1.0], [2.0, 2.0, 2.0] -> 6.0 ± 1e-12

@@ -305,3 +305,13 @@
   AVAILABLE FUNCTIONS with signatures, enabling model-discovered composition.
 - ablate arm passes empty block (fair: uniform sampler cannot call).
 - Prompt-provenance test added. 120 tests green.
+
+### 2026-08-23 07:40 — C: PR0 intrinsics (index/range) + dot kernel
+- sketch/check/interp/lower: `index(l,i)` bounds-checked (OOB traps natively,
+  matching oracle), `range(n)` builds iota memref (negative → guarded 0).
+- Lowering fixes found by live emission: Range returns the ALLOC (not the
+  loop counter); Builtin2 expr_ty derives from indexed list; trapf f64 trap
+  variant; cmpf ordered-float predicates.
+- examples/dot.ont: Linalg.dot solved+vaulted with header/.so — first
+  D-track kernel. Design lesson: partial kernels fail probes; totality via
+  explicit guards is the Ontic way.

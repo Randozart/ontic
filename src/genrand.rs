@@ -156,6 +156,7 @@ pub fn render(e: &Expr) -> String {
         Builtin(b, i) => {
             let name = match b {
                 crate::sketch::Builtin::Len => "len",
+                crate::sketch::Builtin::Range => "range",
                 crate::sketch::Builtin::Sum => "sum",
                 crate::sketch::Builtin::Max => "max",
                 crate::sketch::Builtin::Min => "min",
@@ -163,8 +164,13 @@ pub fn render(e: &Expr) -> String {
                 crate::sketch::Builtin::Exp => "exp",
                 crate::sketch::Builtin::Log => "log",
                 crate::sketch::Builtin::Abs => "abs",
+                crate::sketch::Builtin::Index => unreachable_index_name(),
             };
             format!("{}({})", name, render(i))
+        }
+        Builtin2(b, l, r) => {
+            assert!(matches!(b, crate::sketch::Builtin::Index));
+            format!("index({}, {})", render(l), render(r))
         }
         UnOp(crate::sketch::UnOp::Neg, i) => format!("(-{})", render(i)),
         UnOp(crate::sketch::UnOp::Not, i) => format!("!{}", render(i)),
@@ -237,4 +243,8 @@ pub fn generate(g: &Gen, count: usize, seed: u64) -> Vec<Generated> {
         });
     }
     out
+}
+
+fn unreachable_index_name() -> ! {
+    panic!("internal: Index is binary")
 }

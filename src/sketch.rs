@@ -47,6 +47,8 @@ pub enum BinOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     Len,
+    Index,
+    Range,
     Sum,
     Max,
     Min,
@@ -75,8 +77,11 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(String, Box<Expr>, Box<Expr>),
     ListLit(Vec<i64>),
-    /// Unary builtins: Len/Sum/Max/Min over lists; Sqrt/Exp/Log/Abs numeric.
+    /// Unary builtins: Len/Sum/Max/Min over lists; Sqrt/Exp/Log/Abs numeric;
+    /// Range(n) builds 0..n.
     Builtin(Builtin, Box<Expr>),
+    /// Binary builtins: Index(list, pos).
+    Builtin2(Builtin, Box<Expr>, Box<Expr>),
     /// Vault dependency call: Path.name(arg, ...). Validated against the
     /// gen's declared `use` deps; executed from the vault at sieve time.
     Call(String, Vec<Expr>),
@@ -227,7 +232,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log"
                     | "abs" | "fold" | "let" | "if" | "else" | "true"
                     | "false" | "in" | "from" | "Int" | "F64" | "Bool"
-                    | "List" | "fn"
+                    | "List" | "fn" | "index" | "range"
             );
             if !is_keyword {
                 // Speculative dotted-path scan: ident ('.' ident)* then ws+'('
@@ -278,6 +283,8 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "true" => Some("true"),
                 "false" => Some("false"),
                 "len" => Some("len"),
+                "index" => Some("index"),
+                "range" => Some("range"),
                 "sum" => Some("sum"),
                 "max" => Some("max"),
                 "min" => Some("min"),
@@ -674,13 +681,22 @@ impl Parser {
                 self.eat_sym(")")?;
                 Ok(Expr::Call(p.clone(), args))
             }
-            Some(Tok::Word(w @ ("len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs"))) => {
+            Some(Tok::Word(w @ ("len" | "index" | "range" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs"))) => {
                 self.pos += 1;
                 self.eat_sym("(")?;
                 let e = self.parse_expr()?;
+                // index takes a second argument (the position).
+                let second = if w == "index" {
+                    self.eat_sym(",")?;
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
                 self.eat_sym(")")?;
                 let op = match w {
                     "len" => Builtin::Len,
+                    "index" => Builtin::Index,
+                    "range" => Builtin::Range,
                     "sum" => Builtin::Sum,
                     "max" => Builtin::Max,
                     "min" => Builtin::Min,
@@ -689,7 +705,10 @@ impl Parser {
                     "log" => Builtin::Log,
                     _ => Builtin::Abs,
                 };
-                Ok(Expr::Builtin(op, Box::new(e)))
+                match second {
+                    Some(idx) => Ok(Expr::Builtin2(op, Box::new(e), Box::new(idx))),
+                    None => Ok(Expr::Builtin(op, Box::new(e))),
+                }
             }
             Some(Tok::Word("fold")) => self.parse_fold(),
             other => {
@@ -780,11 +799,12 @@ addsym      ::= "+" | "-"
 mulx        ::= unx (ws mulsym ws unx)*
 mulsym      ::= "*" | "/" | "%"
 unx         ::= "-" unx | "!" unx | prim
-prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | callx | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
 callx       ::= cpath ws "(" ws callargs ws ")"
 cpath       ::= ident ("." ident)*
 callargs    ::= e (ws "," ws e)*
-unop1       ::= "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs"
+unop1       ::= "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs" | "range"
+binop1      ::= "index"
+prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | binop1 ws "(" ws e ws "," ws e ws ")" | callx | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
 pid         ::= "%" [a-zA-Z_] [a-zA-Z0-9_]*
 listlit     ::= "[" ws "]" | "[" ws int (ws "," ws int)* ws "]"
 int         ::= "-"? [0-9]+

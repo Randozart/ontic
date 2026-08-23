@@ -9,6 +9,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalError {
     DivByZero,
+    IndexOutOfBounds(i64),
     ModByZero,
     Overflow,
     TypeError(String),
@@ -19,6 +20,7 @@ impl std::fmt::Display for EvalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EvalError::DivByZero => write!(f, "division by zero"),
+            EvalError::IndexOutOfBounds(p) => write!(f, "index {} out of bounds", p),
             EvalError::ModByZero => write!(f, "modulo by zero"),
             EvalError::Overflow => write!(f, "integer overflow"),
             EvalError::TypeError(m) => write!(f, "type error: {}", m),
@@ -112,6 +114,17 @@ fn as_promotable(v: &Value) -> Option<f64> {
 fn eval_builtin(b: Builtin, inner: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
     let v = eval_ctx(inner, env, ctx)?;
     match b {
+        Builtin::Range => match v {
+            Value::Int(n) => {
+                if n < 0 || n > 10_000_000 {
+                    return Err(EvalError::Overflow);
+                }
+                Ok(Value::List((0..n).collect()))
+            }
+            other => Err(EvalError::TypeError(format!("range of {}", other))),
+        },
+        // Unary evaluation never sees Index (binary).
+        Builtin::Index => Err(EvalError::TypeError("internal: index".to_string())),
         Builtin::Len => match v {
             Value::List(vs) => Ok(Value::Int(vs.len() as i64)),
             Value::FloatList(vs) => Ok(Value::Int(vs.len() as i64)),
@@ -304,6 +317,36 @@ fn eval_call(
     eval_ctx(&dep.cand.body, &dep_env, ctx)
 }
 
+/// Binary builtin semantics. Index is bounds-CHECKED: out-of-bounds is an
+/// error exactly like division by zero, so probes expose it and native
+/// traps match (parity rule).
+fn eval_builtin2(
+    b: Builtin,
+    l: &Expr,
+    r: &Expr,
+    env: &Env,
+    ctx: &Ctx,
+) -> Result<Value, EvalError> {
+    match b {
+        Builtin::Index => {
+            let list = eval_ctx(l, env, ctx)?;
+            let pos = int_of(&eval_ctx(r, env, ctx)?)?;
+            match list {
+                Value::List(vs) => vs
+                    .get(pos as usize)
+                    .map(|v| Value::Int(*v))
+                    .ok_or(EvalError::IndexOutOfBounds(pos)),
+                Value::FloatList(vs) => vs
+                    .get(pos as usize)
+                    .map(|v| Value::Float(*v))
+                    .ok_or(EvalError::IndexOutOfBounds(pos)),
+                other => Err(EvalError::TypeError(format!("index of {}", other))),
+            }
+        }
+        _ => Err(EvalError::TypeError("binary builtin".to_string())),
+    }
+}
+
 fn int_of(v: &Value) -> Result<i64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -329,6 +372,7 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
             .ok_or_else(|| EvalError::Unbound(n.clone())),
         Expr::ListLit(items) => Ok(Value::List(items.clone())),
         Expr::Builtin(b, inner) => eval_builtin(*b, inner, env, ctx),
+        Expr::Builtin2(b, l, r) => eval_builtin2(*b, l, r, env, ctx),
         Expr::Call(p, args) => eval_call(p, args, env, ctx),
         Expr::UnOp(UnOp::Neg, inner) => {
             let inner_v = eval_ctx(inner, env, ctx)?;
@@ -724,5 +768,55 @@ mod broadcast_tests {
         )
         .unwrap();
         assert_eq!(v, Value::Float(29.0f64.sqrt()));
+    }
+}
+
+#[cfg(test)]
+mod pr0_tests {
+    use super::*;
+    use crate::{check, sketch};
+
+    #[test]
+    fn test_index_in_bounds_and_oob() {
+        let c = sketch::parse("fn @g(%xs: List<Int>, %i: Int) -> Int { index(%xs, %i) }").unwrap();
+        let ok = eval_candidate(
+            &c,
+            &[Value::List(vec![7, 8]), Value::Int(1)],
+            &Ctx::checked(),
+        )
+        .unwrap();
+        assert_eq!(ok, Value::Int(8));
+        let oob = eval_candidate(
+            &c,
+            &[Value::List(vec![7, 8]), Value::Int(5)],
+            &Ctx::checked(),
+        );
+        assert!(matches!(oob, Err(EvalError::IndexOutOfBounds(5))));
+    }
+
+    #[test]
+    fn test_range_builds_iota() {
+        let c = sketch::parse("fn @r(%n: Int) -> List<Int> { range(%n) }").unwrap();
+        let v = eval_candidate(&c, &[Value::Int(4)], &Ctx::checked()).unwrap();
+        assert_eq!(v, Value::List(vec![0, 1, 2, 3]));
+        // Negative ranges are rejected (probe-exposed like div-by-zero).
+        assert!(eval_candidate(&c, &[Value::Int(-1)], &Ctx::checked()).is_err());
+    }
+
+    #[test]
+    fn test_dot_via_range_index() {
+        // The canonical D-track kernel shape.
+        let c = sketch::parse(
+            "fn @dot(%a: List<F64>, %b: List<F64>) -> F64 { fold %i in range(len(%a)), %acc from 0.0 { %acc + index(%a, %i) * index(%b, %i) } }",
+        )
+        .unwrap();
+        check::check(&c).unwrap();
+        let v = eval_candidate(
+            &c,
+            &[Value::FloatList(vec![1.0, 2.0]), Value::FloatList(vec![3.0, 4.0])],
+            &Ctx::checked(),
+        )
+        .unwrap();
+        assert_eq!(v, Value::Float(11.0));
     }
 }

@@ -378,6 +378,7 @@ pub fn ast_size(e: &Expr) -> usize {
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::Var(_)
         | Expr::ListLit(_) => 0,
         Expr::Builtin(_, i) | Expr::UnOp(_, i) => ast_size(i),
+        Expr::Builtin2(_, a, b) => ast_size(a) + ast_size(b),
         Expr::Call(_, args) => {
             1 + args.iter().map(ast_size).sum::<usize>()
         }
