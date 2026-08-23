@@ -320,3 +320,11 @@
 - emit_header: include guards ONTIC_<KEY8>_<NAME>_H, extern "C" wrapper,
   ABI v1 comment block. Verified under clang AND clang++ consumers.
 - Header filename stays key-suffixed; guard derives from key+name.
+
+### 2026-08-23 08:20 — L2: ontic lib build (composite library emission)
+- cmd_lib_build: solves ALL gens in a file sequentially, composes into
+  ONE shared library + combined header. Cache-first; forge fallback with
+  per-stage sieve output. Bundle manifest (.bundle.json) records members.
+- Both modes now live: per-kernel .so on solve + composite library via
+  lib build. Verified: C consumer links composite and calls mean() at 2.5.
+- split_module_funcs: proper func.func chunk extraction from module text.

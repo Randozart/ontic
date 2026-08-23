@@ -2,6 +2,7 @@
 //! survivors, and inspect the `vault`. Hand-rolled arg parsing — no clap.
 
 use ontic::forge::{self, ForgeConfig};
+use ontic::check;
 use ontic::interp;
 use ontic::lower;
 use ontic::pipeline;
@@ -63,7 +64,8 @@ USAGE:
   ontic bench <file.ont> [opts]                   rank survivors with timings only
   ontic run <file.ont>                            execute a recipe over vaulted fns
   ontic vault [--dir D]                           list verified functions
-  ontic lib [ls|promote <Path>|demote <Path>]     manage graduated stdlib entries
+  ontic lib [ls|promote <P>|demote <P>]           manage graduated stdlib entries
+  ontic lib build <file.ont> [--sampler-backend B] [--samples N]  solve all gens -> one .so+header
   ontic ablate <file.ont> --samples N             uniform-vs-LLM control experiment
   ontic key <file.ont> [--gen Path]               print canonical SHA-256 key
 
@@ -882,6 +884,300 @@ fn build_shared_lib(
 
 
 
+/// Extract individual func.func chunks from a full module text.
+/// Strips the outer module{} wrapper, then chunks at each top-indented
+/// func.func boundary. Chunks retain their indentation.
+fn split_module_funcs(full_module: &str) -> Vec<String> {
+    let inner = full_module
+        .trim()
+        .strip_prefix("module {")
+        .and_then(|x| x.strip_suffix('}'))
+        .unwrap_or(full_module);
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for line in inner.lines() {
+        if line.starts_with("  func.func ") && !cur.trim().is_empty() {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        if !cur.trim().is_empty() || line.starts_with("  func.func ") {
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    if !cur.trim().is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+/// `ontic lib build <file.ont>` — solve ALL gens in the file sequentially
+/// and emit ONE composite shared library + combined header.
+fn cmd_lib_build(args: &[String]) -> i32 {
+    let path = match args.iter().position(|a| a == "build").and_then(|p| args.get(p + 1)) {
+        Some(p) => p.clone(),
+        None => return usage("lib build needs a .ont file"),
+    };
+    let samples = args
+        .iter()
+        .position(|a| a == "--samples")
+        .and_then(|i| args.get(i + 1).and_then(|v| v.parse::<usize>().ok()))
+        .unwrap_or(32);
+    let backend = args
+        .iter()
+        .position(|a| a == "--sampler-backend")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| std::env::var("ONTIC_SAMPLER").ok());
+
+    let file = match load_file(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("invalid gen file: {}", e);
+            return 1;
+        }
+    };
+    if file.gens.is_empty() {
+        eprintln!("no gens in {}", path);
+        return 1;
+    }
+
+    let opts = SolveOpts {
+        wish_path: path.clone(),
+        wish_sel: None,
+        hand: Vec::new(),
+        samples,
+        seed: 0x5EED,
+        forge: None,
+        sampler_backend: backend,
+        endpoint: None,
+        model: None,
+        api_key_env: None,
+    };
+    let _ = &opts.wish_sel;
+    let fcfg = forge_config(&opts);
+    let cfg = SiegeConfig::default();
+
+    let vault_dir =
+        std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
+    let v = match Vault::open(&vault_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+
+    let dir = std::env::temp_dir().join(format!(
+        "ontic-libbuild-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+
+    let mut all_funcs: Vec<String> = Vec::new();
+    let mut headers: Vec<String> = Vec::new();
+    let mut members: Vec<String> = Vec::new();
+
+    // Solve each gen: cache-first, forge fallback.
+    for g in &file.gens {
+        println!("== gen {} ==", g.path);
+        let key = Vault::key_for(g);
+
+        // Cache hit: use stored mlir + sketch.
+        if v.get(&key).is_some() {
+            let entry = v.get(&key).expect("checked");
+            let cand =
+                match crate::sketch::parse(&entry.sketch_text) {
+                    Ok(c) => c,
+                    Err(pe) => {
+                        eprintln!(
+                            "cached sketch unparsable for {}: {} at {}",
+                            g.path, pe.message, pe.offset
+                        );
+                        return 1;
+                    }
+                };
+            check::check(&cand).unwrap();
+            let m = lower::emit_fn(
+                &cand.name,
+                &cand.params,
+                &cand.ret,
+                &cand.body,
+                entry.wrapping,
+                &lower::CallMap::new(),
+            )
+            .unwrap();
+            for chunk in split_module_funcs(&m) {
+                if !all_funcs.contains(&chunk) {
+                    all_funcs.push(chunk);
+                }
+            }
+            let h = lower::emit_header(
+                &g.name,
+                &g.params,
+                &g.ret,
+                &key[..8.min(key.len())],
+            )
+            .unwrap();
+            headers.push(h);
+            members.push(key.clone());
+            println!("  cache hit ({})", &key[..12.min(key.len())]);
+            continue;
+        }
+
+        // Cache miss: forge + sieve.
+        println!("  solving {} ...", g.path);
+        let texts = match forge::sample(g, &fcfg, &[], "") {
+            Ok((t, usage)) => {
+                println!(
+                    "  tokens : prompt={} completion={}",
+                    usage.prompt, usage.completion
+                );
+                t.into_iter()
+                    .enumerate()
+                    .map(|(i, x)| (format!("forge-{}", i), x))
+                    .collect::<Vec<_>>()
+            }
+            Err(e) => {
+                eprintln!("forge failed for {}: {}", g.path, e);
+                return 1;
+            }
+        };
+        let empty_deps = interp::DepMap::new();
+        let report = match sieve::run(g, &texts, &cfg, &empty_deps) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("sieve precondition failed: {}", e);
+                return 1;
+            }
+        };
+        let survivor = match report.survivors.first() {
+            Some(s) => s,
+            None => {
+                for (label, rej) in &report.rejections {
+                    eprintln!(
+                        "  KILLED {} {} / {} : {}",
+                        label,
+                        rej.stage.label(),
+                        rej.kind.label(),
+                        rej.reason
+                    );
+                }
+                eprintln!("no survivor for {} — library build aborted", g.path);
+                return 1;
+            }
+        };
+        let cand = &survivor.candidate;
+        let m = lower::emit_fn(
+            &cand.name,
+            &cand.params,
+            &cand.ret,
+            &cand.body,
+            g.wrapping,
+            &lower::CallMap::new(),
+        )
+        .unwrap();
+        let inner = m
+            .strip_prefix("module {\n")
+            .and_then(|x| x.strip_suffix('}'))
+            .unwrap_or(&m);
+        for chunk in split_module_funcs(&format!("module {{\n{}}}", inner)) {
+            if !all_funcs.contains(&chunk) {
+                all_funcs.push(chunk);
+            }
+        }
+        let h = lower::emit_header(&g.name, &g.params, &g.ret, &key[..8.min(key.len())])
+            .unwrap();
+        headers.push(h);
+        members.push(key.clone());
+        let k2 = v.put_meta(g, &survivor.source_text, &m, &serde_json::json!({}))
+            .unwrap_or_else(|_| key.clone());
+        println!("  solved+vaulted ({})", &k2[..12.min(k2.len())]);
+    }
+
+    // Compose final module.
+    let mut composite = String::from("module {\n");
+    for f in &all_funcs {
+        composite.push_str(f);
+        composite.push('\n');
+    }
+    composite.push('}');
+
+    let stem = std::path::Path::new(&path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "lib".into());
+    let so_name = format!("lib{}.so", stem);
+    let hdr_name = format!("{}.h", stem);
+    let so_path = std::path::Path::new(&vault_dir).join(&so_name);
+
+    if let Err(e) = pipeline::build_shared_so(&composite, &so_path) {
+        eprintln!("shared library build failed: {}", e);
+        return 1;
+    }
+
+    // Combined header: guards from stem, all signatures inside extern C.
+    let guard = format!(
+        "ONTIC_{}_H",
+        stem.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+            .collect::<String>()
+    );
+    let mut header_out = format!(
+        "// Ontic library bundle (verified; do not edit - re-solve instead)\n// ABI v1 Flat-MemRef\n#ifndef {guard}\n#define {guard}\n\n#ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n"
+    );
+    for h in &headers {
+        // Strip per-kernel guards/extern wrappers; keep declarations.
+        for line in h.lines() {
+            let t = line.trim();
+            if t.starts_with("//")
+                || t.starts_with("#ifndef")
+                || t.starts_with("#define ONTIC")
+                || t.starts_with("#ifdef __cplusplus")
+                || t.starts_with("extern \"C\"")
+                || t == "}"
+                || t.starts_with("#endif")
+                || t.is_empty()
+            {
+                continue;
+            }
+            header_out.push_str(t);
+            header_out.push('\n');
+        }
+    }
+    header_out.push_str("\n#ifdef __cplusplus\n}\n#endif\n\n#endif /* ");
+    header_out.push_str(&guard);
+    header_out.push_str(" */\n");
+
+    let hdr_path = std::path::Path::new(&vault_dir).join(&hdr_name);
+    if let Err(e) = std::fs::write(&hdr_path, &header_out) {
+        eprintln!("header write failed: {}", e);
+        return 1;
+    }
+
+    // Bundle manifest.
+    let bundle = serde_json::json!({
+        "bundle": stem,
+        "members": members,
+        "lib": so_name,
+        "header": hdr_name,
+    });
+    let bp = std::path::Path::new(&vault_dir).join(format!("{}.bundle.json", stem));
+    if let Err(e) = std::fs::write(
+        &bp,
+        serde_json::to_string_pretty(&bundle).unwrap_or_default(),
+    ) {
+        eprintln!("bundle manifest write failed: {}", e);
+        return 1;
+    }
+
+    println!("LIBRARY : {}/{}", vault_dir, so_name);
+    println!("HEADER  : {}/{}", vault_dir, hdr_name);
+    0
+}
+
 /// `ontic key <file.ont> [--gen Path]` — print the canonical SHA-256 for
 /// a gen. Sole key authority: external tools (pyous) shell out to this
 /// instead of reimplementing canonical serialization.
@@ -942,6 +1238,7 @@ fn cmd_lib(args: &[String]) -> i32 {
             }
             0
         }
+        Some("build") => cmd_lib_build(args),
         Some("promote") => match args.get(3) {
             Some(p) => {
                 let mut m = read_lib_manifest();
