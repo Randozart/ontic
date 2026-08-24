@@ -13,10 +13,23 @@ use std::collections::HashMap;
 /// invariants unsatisfiable over the probe domain.
 const SAMPLE_ATTEMPTS: usize = 256;
 
-/// Probe-plan failure: the declared invariants exclude every value the
-/// type domain can produce. Surfaced as a wish error, never a candidate kill.
+/// Probe-plan failure: not even the canonical edge combinations satisfy the
+/// declared invariants, so the plan would be empty. Surfaced as a wish error,
+/// never a candidate kill.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unsatisfiable;
+
+/// How much of the requested random coverage the plan actually achieved.
+/// Relational invariants (e.g. `len(%a) == %n * %n`) can make independent
+/// random sampling a lottery; degraded plans keep edge rows and say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanQuality {
+    /// All requested random rows sampled.
+    Full,
+    /// Random phase exhausted its budget without satisfying the contract;
+    /// plan carries edge rows only.
+    EdgesOnly,
+}
 
 /// Check a probe row against input-side invariant satisfaction. Invariants
 /// referencing `res` cannot be evaluated here and are ignored (they remain
@@ -99,17 +112,19 @@ fn sample(ty: &Ty, rng: &mut Rng) -> Value {
 /// followed by `count` random rows. Every row satisfies the gen's input-side
 /// invariants (Golden Rule 4: probe domain = type domains ∩ invariants).
 /// Edge rows outside the declared domain are skipped; random rows are
-/// rejection-sampled. Errors when the contract excludes the whole domain.
+/// rejection-sampled. When relational invariants out-select the sampler the
+/// plan degrades to edge rows and reports EdgesOnly; an empty plan is an
+/// Unsatisfiable contract.
 pub fn generate(
     gen: &Gen,
     count: usize,
     seed: u64,
     edge_budget: usize,
     ctx: &Ctx,
-) -> Result<Vec<Vec<Value>>, Unsatisfiable> {
+) -> Result<(Vec<Vec<Value>>, PlanQuality), Unsatisfiable> {
     let mut rows: Vec<Vec<Value>> = Vec::new();
     if gen.params.is_empty() {
-        return Ok(rows);
+        return Ok((rows, PlanQuality::Full));
     }
     let per_param: Vec<Vec<Value>> = gen.params.iter().map(|(_, t)| edges(t)).collect();
     let mut cursor = vec![0usize; per_param.len()];
@@ -140,8 +155,8 @@ pub fn generate(
         }
     }
     let mut rng = Rng::new(seed);
-    for _ in 0..count {
-        let mut accepted = None;
+    let mut quality = PlanQuality::Full;
+    'random: for _ in 0..count {
         for _ in 0..SAMPLE_ATTEMPTS {
             let row: Vec<Value> = gen
                 .params
@@ -149,16 +164,19 @@ pub fn generate(
                 .map(|(_, t)| sample(t, &mut rng))
                 .collect();
             if inputs_satisfy(gen, &row, ctx) {
-                accepted = Some(row);
-                break;
+                rows.push(row);
+                continue 'random;
             }
         }
-        match accepted {
-            Some(row) => rows.push(row),
-            None => return Err(Unsatisfiable),
-        }
+        // Budget exhausted without a satisfying row. Degrade honestly.
+        quality = PlanQuality::EdgesOnly;
+        break;
     }
-    Ok(rows)
+    if rows.is_empty() {
+        Err(Unsatisfiable)
+    } else {
+        Ok((rows, quality))
+    }
 }
 
 #[cfg(test)]
@@ -174,8 +192,8 @@ mod tests {
     fn test_probes_are_deterministic() {
         let w = ledger_wish();
         let ctx = interp::Ctx::checked();
-        let a = generate(&w, 64, 0x5EED, 8, &ctx).unwrap();
-        let b = generate(&w, 64, 0x5EED, 8, &ctx).unwrap();
+        let a = generate(&w, 64, 0x5EED, 8, &ctx).unwrap().0;
+        let b = generate(&w, 64, 0x5EED, 8, &ctx).unwrap().0;
         assert_eq!(a, b);
     }
 
@@ -183,7 +201,8 @@ mod tests {
     fn test_probe_shape_and_bounds() {
         let w = ledger_wish();
         let ctx = interp::Ctx::checked();
-        let rows = generate(&w, 256, 7, 8, &ctx).unwrap();
+        let (rows, quality) = generate(&w, 256, 7, 8, &ctx).unwrap();
+        assert_eq!(quality, PlanQuality::Full);
         assert_eq!(rows.len(), 256 + 4); // edges for List<Int> + randoms
         for row in &rows[4..] {
             assert_eq!(row.len(), 1);
@@ -203,7 +222,7 @@ mod tests {
     fn test_edges_include_empty_and_zero() {
         let w = ledger_wish();
         let ctx = interp::Ctx::checked();
-        let rows = generate(&w, 0, 1, 16, &ctx).unwrap();
+        let (rows, _) = generate(&w, 0, 1, 16, &ctx).unwrap();
         assert!(rows.iter().any(|r| r[0] == Value::List(vec![])));
         assert!(rows.iter().any(|r| r[0] == Value::List(vec![0])));
     }
@@ -216,7 +235,7 @@ mod tests {
         )
         .unwrap();
         let ctx = interp::Ctx::checked();
-        let rows = generate(&w, 0, 1, 16, &ctx).unwrap();
+        let (rows, _) = generate(&w, 0, 1, 16, &ctx).unwrap();
         assert!(!rows.is_empty());
         for row in &rows {
             match &row[0] {
@@ -227,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unsatisfiable_invariant_errors_not_kills() {
+    fn test_empty_plan_is_unsatisfiable() {
         // A contract no Int can satisfy must surface as Unsatisfiable.
         let w = gen::parse(
             "fn f(%x: Int) -> Int\n  | %x > 100000\n  | %x < -100000\n  => 0 -> 0\n",
@@ -236,5 +255,20 @@ mod tests {
         let ctx = interp::Ctx::checked();
         let out = generate(&w, 4, 7, 2, &ctx);
         assert_eq!(out, Err(Unsatisfiable));
+    }
+
+    
+#[test]
+    fn test_relational_contract_degrades_to_edges_only() {
+        // matmul-style shape relation: independent random sampling is a
+        // lottery; plan must degrade to edge rows rather than error.
+        let w = gen::parse(
+            "fn mm(%a: List<F64>, %b: List<F64>, %n: Int) -> F64\n  | %n > 0\n  | len(%a) == %n * %n\n  | len(%b) == %n * %n\n  => [1.0], [2.0], 1 -> 2.0\n",
+        )
+        .unwrap();
+        let ctx = interp::Ctx::checked();
+        let (rows, quality) = generate(&w, 32, 7, 64, &ctx).unwrap();
+        assert_eq!(quality, PlanQuality::EdgesOnly);
+        assert!(!rows.is_empty());
     }
 }

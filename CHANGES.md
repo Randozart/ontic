@@ -483,3 +483,19 @@ Hand-solved candidate passes full sieve and vaults correctly.
   FALSE (script no-op'd silently; nothing changed). Tiers remain, by design
   (Golden Rule 11). The 10:00-ish "matvec capability boundary" entries are
   also retracted — root cause was probe-domain, see ISSUES.md post-mortem.
+
+### 2026-08-23 14:30 — Matmul forge-solved; linalg library compounding
+- Linalg.matmul(a, b, n) vaulted via forge (cf052a8e…): flat-output
+  map over range(n*n) with inline i=p/n, j=p%n decomposition + inner
+  dot-product fold. Three survivors. Verified from Python end-to-end.
+- Contract-design lesson: explicit shape params (BLAS dgemm convention)
+  beat sqrt-derivation gymnastics — models cannot compute isqrt in-language.
+- Hint-grammar lesson: hints must mirror EXACT sketch syntax (fold has no
+  parens). Models copy hint text literally under GBNF constraints.
+- Probe plans degrade honestly: relational contracts that defeat random
+  rejection sampling fall back to edge rows (PlanQuality::EdgesOnly);
+  empty plan = KillKind::WishError against the GEN. Default edge_budget
+  raised 16 → 64 for full small-domain cross products.
+
+Forge-solved today: Linalg.dot, Linalg.matvec, Linalg.matmul — the
+nested-iteration wall is down. Library now compounds via vault deps.

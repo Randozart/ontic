@@ -29,7 +29,7 @@ impl Default for SiegeConfig {
         SiegeConfig {
             probe_count: 256,
             seed: 0x5EED,
-            edge_budget: 16,
+            edge_budget: 64,
             bench_iters: 2_000,
             overfit: OverfitConfig::default(),
         }
@@ -268,12 +268,13 @@ fn run_probes(
     cfg: &SiegeConfig,
     ctx: &interp::Ctx,
 ) -> Result<(), Rejection> {
-    let rows = probes::generate(gen, cfg.probe_count, cfg.seed, cfg.edge_budget, ctx)
-        .map_err(|_| {
+    let (rows, _quality) =
+        probes::generate(gen, cfg.probe_count, cfg.seed, cfg.edge_budget, ctx).map_err(|_| {
             reject(
                 Stage::Probe,
                 KillKind::WishError,
-                "gen invariants unsatisfiable over the probe domain: no input row satisfies the declared contract".to_string(),
+                "gen invariants exclude every probe input: contract admits no canonical edge row"
+                    .to_string(),
             )
         })?;
     for row in rows {

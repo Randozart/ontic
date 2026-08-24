@@ -146,7 +146,7 @@ use ontic::probes;
 fn probes_count(w: &gen::Gen, cfg: &SiegeConfig) -> usize {
     let ctx = interp::Ctx::checked();
     probes::generate(w, cfg.probe_count, cfg.seed, cfg.edge_budget, &ctx)
-        .map(|rows| rows.len())
+        .map(|(rows, _)| rows.len())
         .unwrap_or(0)
 }
 
