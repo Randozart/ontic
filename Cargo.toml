@@ -3,7 +3,7 @@ name = "ontic"
 version = "0.1.0"
 edition = "2021"
 description = "Stochastic specification compiler: wishes in, verified MLIR out."
-license = "MIT"
+license = "Apache-2.0 WITH LLVM-exception"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

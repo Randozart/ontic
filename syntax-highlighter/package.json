@@ -4,7 +4,7 @@
   "description": "Syntax highlighting for Ontic (.ont) \u2014 stochastic specification compiler",
   "version": "0.1.0",
   "publisher": "ontic",
-  "license": "MIT",
+  "license": "Apache-2.0 WITH LLVM-exception",
   "engines": {
     "vscode": "^1.60.0"
   },
