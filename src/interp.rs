@@ -347,6 +347,34 @@ fn eval_builtin2(
     }
 }
 
+/// List concatenation for ++ operator.
+fn eval_concat(l: &Value, r: &Value) -> Result<Value, EvalError> {
+    match (l, r) {
+        (Value::List(a), Value::List(b)) => {
+            let mut out = a.clone();
+            out.extend(b.iter().copied());
+            Ok(Value::List(out))
+        }
+        // Mixed Int-list ++ Float-list: promote Ints.
+        (Value::List(a), Value::FloatList(b)) => {
+            let mut out: Vec<f64> = a.iter().map(|x| *x as f64).collect();
+            out.extend(b.iter().copied());
+            Ok(Value::FloatList(out))
+        }
+        (Value::FloatList(a), Value::List(b)) => {
+            let mut out = a.clone();
+            out.extend(b.iter().map(|x| *x as f64));
+            Ok(Value::FloatList(out))
+        }
+        (Value::FloatList(a), Value::FloatList(b)) => {
+            let mut out = a.clone();
+            out.extend(b.iter().copied());
+            Ok(Value::FloatList(out))
+        }
+        _ => Err(EvalError::TypeError(format!("concat on {} vs {}", l, r))),
+    }
+}
+
 fn int_of(v: &Value) -> Result<i64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -542,6 +570,9 @@ fn eval_binop(
             };
         }
     }
+    if op == BinOp::Concat {
+        return eval_concat(&lv, &rv);
+    }
     if matches!(
         op,
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
@@ -551,6 +582,7 @@ fn eval_binop(
         }
     }
     match op {
+        BinOp::Concat => eval_concat(&lv, &rv),
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let a = int_of(&lv)?;
             let b = int_of(&rv)?;
@@ -624,6 +656,7 @@ fn op_str(op: BinOp) -> &'static str {
         BinOp::Le => "<=",
         BinOp::Gt => ">",
         BinOp::Ge => ">=",
+        BinOp::Concat => "++",
         BinOp::And => "&&",
         BinOp::Or => "||",
     }

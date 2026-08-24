@@ -123,6 +123,7 @@ fn binop_str(op: BinOp) -> &'static str {
         BinOp::Le => "<=",
         BinOp::Gt => ">",
         BinOp::Ge => ">=",
+        BinOp::Concat => "++",
         BinOp::And => "&&",
         BinOp::Or => "||",
     }
@@ -703,6 +704,94 @@ fn emit_index(
     Ok(out)
 }
 
+
+/// Emit list concatenation: allocate combined-size memref, copy both sides.
+fn emit_concat(
+    lv: &str,
+    rv: &str,
+    lt: &Ty,
+    rt: &Ty,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let mty_l = if matches!(lt, Ty::ListF64) { "memref<?xf64>" } else { "memref<?xi64>" };
+    let mty_r = if matches!(rt, Ty::ListF64) { "memref<?xf64>" } else { "memref<?xi64>" };
+    let elem = if matches!(lt, Ty::ListF64) || matches!(rt, Ty::ListF64) { "f64" } else { "i64" };
+    let mty_out = if elem == "f64" { "memref<?xf64>" } else { "memref<?xi64>" };
+
+    let idx0 = em.const_index(0);
+    let step = em.const_index(1);
+
+    let dim_l = em.fresh("cdl");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim_l, lv, idx0, mty_l
+    ));
+    let dim_r = em.fresh("cdr");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim_r, rv, idx0, mty_r
+    ));
+    let total = em.fresh("ctot");
+    em.line(&format!(
+        "{} = arith.addi {}, {} : index",
+        total, dim_l, dim_r
+    ));
+
+    let alloc = em.fresh("calloc");
+    em.line(&format!(
+        "{} = memref.alloc({}) : {}",
+        alloc, total, mty_out
+    ));
+
+    // Copy left side.
+    let ivl = em.fresh("cil");
+    let accl = em.fresh("cal");
+    em.line(&format!(
+        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (index) {{",
+        accl, ivl, idx0, dim_l, step, accl, idx0
+    ));
+    em.indent += 1;
+    let vl = em.fresh("vl");
+    em.line(&format!("{} = memref.load {}[{}] : {}", vl, lv, ivl, mty_l));
+    em.line(&format!(
+        "memref.store {}, {}[{}] : {}",
+        vl, alloc, ivl, mty_out
+    ));
+    em.line(&format!("scf.yield {} : index", accl));
+    em.indent -= 1;
+    em.line("}");
+
+    // Copy right side at offset = len(left).
+    let ivr = em.fresh("cir");
+    let accr = em.fresh("car");
+    let endr = em.fresh("cer");
+    em.line(&format!(
+        "{} = arith.addi {}, {} : index",
+        endr, dim_l, dim_r
+    ));
+    em.line(&format!(
+        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (index) {{",
+        accr, ivr, dim_l, endr, step, accr, accr
+    ));
+    em.indent += 1;
+    let vr = em.fresh("vr");
+    em.line(&format!("{} = memref.load {}[{}] : {}", vr, rv, ivr, mty_r));
+    let off = em.fresh("coff");
+    em.line(&format!(
+        "{} = arith.subi {}, {} : index",
+        off, ivr, dim_l
+    ));
+    em.line(&format!(
+        "memref.store {}, {}[{}] : {}",
+        vr, alloc, off, mty_out
+    ));
+    em.line(&format!("scf.yield {} : index", accr));
+    em.indent -= 1;
+    em.line("}");
+
+    Ok(alloc)
+}
+
 fn emit_if(
     c: &Expr,
     t: &Expr,
@@ -842,6 +931,9 @@ fn emit_binop(
         )
     {
         return emit_broadcast(op, l, r, &lv_s, &rv_s, &lt, &rt, tyenv, em);
+    }
+    if op == BinOp::Concat {
+        return emit_concat(&lv_s, &rv_s, &lt, &rt, em);
     }
     if any_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
         let out = em.fresh("opf");
@@ -998,6 +1090,15 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
         Expr::Let(_, _, b) => expr_ty(b, tyenv),
         Expr::Fold { init, .. } => expr_ty(init, tyenv),
         Expr::BinOp(op, l, r) => match op {
+            BinOp::Concat => {
+                let lt = expr_ty(l, tyenv);
+                let rt = expr_ty(r, tyenv);
+                if matches!(lt, Ty::ListF64) || matches!(rt, Ty::ListF64) {
+                    Ty::ListF64
+                } else {
+                    Ty::ListInt
+                }
+            }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 let lt = expr_ty(l, tyenv);
                 let rt = expr_ty(r, tyenv);

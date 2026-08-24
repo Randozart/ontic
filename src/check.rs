@@ -210,6 +210,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
         Expr::IntLit(_) => Ok(Ty::Int),
         Expr::FloatLit(_) => Ok(Ty::F64),
         Expr::BoolLit(_) => Ok(Ty::Bool),
+        Expr::ListLit(items) if items.is_empty() => Ok(Ty::ListF64),
         Expr::ListLit(_) => Ok(Ty::ListInt),
         Expr::FloatListLit(_) => Ok(Ty::ListF64),
         Expr::Var(n) => env
@@ -326,6 +327,17 @@ fn infer_builtin2(b: Builtin, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> 
 
 fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
     match op {
+        BinOp::Concat => {
+            let lt = infer(l, env)?;
+            let rt = infer(r, env)?;
+            match (&lt, &rt) {
+                (Ty::ListInt, Ty::ListInt) => Ok(Ty::ListInt),
+                (Ty::ListF64, _) | (_, Ty::ListF64)
+                    if matches!(lt, Ty::ListF64 | Ty::F64 | Ty::Int) && matches!(rt, Ty::ListF64 | Ty::F64 | Ty::Int) =>
+                    Ok(Ty::ListF64),
+                _ => Err(format!("concat on {} vs {}", lt.name(), rt.name())),
+            }
+        }
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let lt = infer(l, env)?;
             let rt = infer(r, env)?;

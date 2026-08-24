@@ -41,6 +41,8 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    /// List concatenation (++).
+    Concat,
 }
 
 /// Unary builtin operations.
