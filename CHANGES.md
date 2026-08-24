@@ -524,3 +524,14 @@ nested-iteration wall is down. Library now compounds via vault deps.
 - Gauss.weight also vaulted (exp falloff kernel).
 - Sieve caught MY wrong held-out value in gauss draft (expected e^-0.5
   where truth was e^-1): candidates were right, spec was wrong.
+
+### 2026-08-23 16:20 — Explicit probe-anomaly diagnostics
+- ProbePlan carries rejection attribution: which invariant rejected each
+  random attempt, counts sorted desc, total attempts drawn.
+- `ontic check` now prints the anomaly explicitly:
+  * EdgesOnly plans name top rejecting invariants + fix hint (shape params
+    / more examples).
+  * Empty plans print ANOMALY with full invariant list + contradiction
+    explanation.
+- Sieve WishError message names every invariant and points at the spec,
+  not candidates.

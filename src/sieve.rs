@@ -298,15 +298,26 @@ fn run_probes(
     cfg: &SiegeConfig,
     ctx: &interp::Ctx,
 ) -> Result<(), Rejection> {
-    let (rows, _quality) =
-        probes::generate(gen, cfg.probe_count, cfg.seed, cfg.edge_budget, ctx).map_err(|_| {
+    let plan = probes::generate(gen, cfg.probe_count, cfg.seed, cfg.edge_budget, ctx).map_err(
+        |_| {
+            let invs: Vec<String> = gen
+                .invariants
+                .iter()
+                .map(crate::lower::expr_display)
+                .collect();
             reject(
                 Stage::Probe,
                 KillKind::WishError,
-                "gen invariants exclude every probe input: contract admits no canonical edge row"
-                    .to_string(),
+                format!(
+                    "gen contract excludes every probeable input: no canonical edge row satisfies the invariants [{}]. \
+                     The declared domain is empty or narrower than the type domain — fix the spec (loosen an invariant, \
+                     widen a type) rather than the candidates.",
+                    invs.join("; ")
+                ),
             )
-        })?;
+        },
+    )?;
+    let rows = plan.rows;
     for row in rows {
         let res = match interp::eval_candidate(cand, &row, &ctx) {
             Ok(v) => v,

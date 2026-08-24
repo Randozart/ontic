@@ -127,8 +127,37 @@ fn cmd_check(path: &str) -> i32 {
             println!("transparent examples: {}", w.transparent.len());
             println!("opaque examples     : {}{}", w.opaque.len(), if w.auto_split { " (auto-split)" } else { "" });
             let cfg = SiegeConfig::default();
-            let rows = probes_count(&w, &cfg);
-            println!("probe plan: {} rows (seed 0x{:X})", rows, cfg.seed);
+            let ctx = interp::Ctx::checked();
+            match probes::generate(&w, cfg.probe_count, cfg.seed, cfg.edge_budget, &ctx) {
+                Ok(plan) => {
+                    println!(
+                        "probe plan: {} rows (seed 0x{:X}, {:?})",
+                        plan.rows.len(),
+                        cfg.seed,
+                        plan.quality
+                    );
+                    if plan.quality == probes::PlanQuality::EdgesOnly {
+                        println!("anomaly   : random sampling could not satisfy the contract in {} attempts — relational invariants defeat independent sampling", plan.attempts);
+                        for (inv, n) in &plan.rejects {
+                            println!(
+                                "  rejected {}x by `{}`",
+                                n,
+                                inv
+                            );
+                        }
+                        println!("fix hint  : pass shape params explicitly (e.g. %n: Int with len relations) or provide more transparent examples; probe coverage is edge-only");
+                    }
+                }
+                Err(_) => {
+                    let invs: Vec<String> =
+                        w.invariants.iter().map(|i| lower::expr_display(i)).collect();
+                    println!(
+                        "probe plan: 0 rows — ANOMALY: no input satisfies the declared contract [{}]",
+                        invs.join("; ")
+                    );
+                    println!("fix hint  : the invariant set is contradictory over the type domain (or excludes all canonical edges). Loosen or correct an invariant.");
+                }
+            }
             if w.invariants.is_empty() {
                 println!("note      : no invariants — probes check runtime errors only");
             }
@@ -142,13 +171,6 @@ fn cmd_check(path: &str) -> i32 {
 }
 
 use ontic::probes;
-
-fn probes_count(w: &gen::Gen, cfg: &SiegeConfig) -> usize {
-    let ctx = interp::Ctx::checked();
-    probes::generate(w, cfg.probe_count, cfg.seed, cfg.edge_budget, &ctx)
-        .map(|(rows, _)| rows.len())
-        .unwrap_or(0)
-}
 
 /// Resolve forge config from flags/env.
 fn forge_config(opts: &SolveOpts) -> ForgeConfig {

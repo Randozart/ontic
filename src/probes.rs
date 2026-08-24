@@ -31,24 +31,42 @@ pub enum PlanQuality {
     EdgesOnly,
 }
 
-/// Check a probe row against input-side invariant satisfaction. Invariants
-/// referencing `res` cannot be evaluated here and are ignored (they remain
-/// enforced post-hoc by the sieve with the result bound). Returns false only
-/// when some invariant evaluates to Bool(false) on the inputs alone.
-fn inputs_satisfy(gen: &Gen, row: &[Value], ctx: &Ctx) -> bool {
+/// A probe plan plus honest accounting of what the sampler could achieve.
+#[derive(Debug, Clone)]
+pub struct ProbePlan {
+    pub rows: Vec<Vec<Value>>,
+    pub quality: PlanQuality,
+    /// Total random-phase attempts drawn (accepted + rejected).
+    pub attempts: usize,
+    /// Rejections attributed to the FIRST violated invariant per attempt,
+    /// as `(invariant display, count)`, sorted by count descending.
+    pub rejects: Vec<(String, usize)>,
+}
+
+impl ProbePlan {
+    /// The invariant that rejected the most random attempts, if any.
+    pub fn top_rejector(&self) -> Option<&(String, usize)> {
+        self.rejects.first()
+    }
+}
+
+/// First input-side invariant violated by a row, by index. Invariants
+/// referencing `res` cannot be evaluated here and are skipped (they remain
+/// enforced post-hoc by the sieve with the result bound).
+fn first_violation(gen: &Gen, row: &[Value], ctx: &Ctx) -> Option<usize> {
     let env: Env = gen
         .params
         .iter()
         .zip(row.iter())
         .map(|((n, _), v)| (n.clone(), v.clone()))
         .collect();
-    for inv in &gen.invariants {
+    for (i, inv) in gen.invariants.iter().enumerate() {
         match interp::eval_ctx(inv, &env, ctx) {
-            Ok(Value::Bool(false)) => return false,
+            Ok(Value::Bool(false)) => return Some(i),
             _ => {}
         }
     }
-    true
+    None
 }
 
 /// Probe-domain bounds for v0 integer values.
@@ -114,17 +132,22 @@ fn sample(ty: &Ty, rng: &mut Rng) -> Value {
 /// Edge rows outside the declared domain are skipped; random rows are
 /// rejection-sampled. When relational invariants out-select the sampler the
 /// plan degrades to edge rows and reports EdgesOnly; an empty plan is an
-/// Unsatisfiable contract.
+/// Unsatisfiable contract. Rejection attribution names the guilty invariant.
 pub fn generate(
     gen: &Gen,
     count: usize,
     seed: u64,
     edge_budget: usize,
     ctx: &Ctx,
-) -> Result<(Vec<Vec<Value>>, PlanQuality), Unsatisfiable> {
+) -> Result<ProbePlan, Unsatisfiable> {
     let mut rows: Vec<Vec<Value>> = Vec::new();
     if gen.params.is_empty() {
-        return Ok((rows, PlanQuality::Full));
+        return Ok(ProbePlan {
+            rows,
+            quality: PlanQuality::Full,
+            attempts: 0,
+            rejects: Vec::new(),
+        });
     }
     let per_param: Vec<Vec<Value>> = gen.params.iter().map(|(_, t)| edges(t)).collect();
     let mut cursor = vec![0usize; per_param.len()];
@@ -137,7 +160,7 @@ pub fn generate(
                 opts[k].clone()
             })
             .collect();
-        if inputs_satisfy(gen, &row, ctx) {
+        if first_violation(gen, &row, ctx).is_none() {
             rows.push(row);
         }
         // Advance the first param that still has unseen edges; wrap others.
@@ -156,16 +179,24 @@ pub fn generate(
     }
     let mut rng = Rng::new(seed);
     let mut quality = PlanQuality::Full;
+    let mut attempts = 0usize;
+    let mut reject_counts: HashMap<usize, usize> = HashMap::new();
     'random: for _ in 0..count {
         for _ in 0..SAMPLE_ATTEMPTS {
+            attempts += 1;
             let row: Vec<Value> = gen
                 .params
                 .iter()
                 .map(|(_, t)| sample(t, &mut rng))
                 .collect();
-            if inputs_satisfy(gen, &row, ctx) {
-                rows.push(row);
-                continue 'random;
+            match first_violation(gen, &row, ctx) {
+                None => {
+                    rows.push(row);
+                    continue 'random;
+                }
+                Some(idx) => {
+                    *reject_counts.entry(idx).or_insert(0) += 1;
+                }
             }
         }
         // Budget exhausted without a satisfying row. Degrade honestly.
@@ -173,10 +204,20 @@ pub fn generate(
         break;
     }
     if rows.is_empty() {
-        Err(Unsatisfiable)
-    } else {
-        Ok((rows, quality))
+        return Err(Unsatisfiable);
     }
+    // Attribution report: display text per invariant index, count desc.
+    let mut rejects: Vec<(String, usize)> = reject_counts
+        .into_iter()
+        .map(|(idx, n)| (crate::lower::expr_display(&gen.invariants[idx]), n))
+        .collect();
+    rejects.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(ProbePlan {
+        rows,
+        quality,
+        attempts,
+        rejects,
+    })
 }
 
 #[cfg(test)]
@@ -192,8 +233,8 @@ mod tests {
     fn test_probes_are_deterministic() {
         let w = ledger_wish();
         let ctx = interp::Ctx::checked();
-        let a = generate(&w, 64, 0x5EED, 8, &ctx).unwrap().0;
-        let b = generate(&w, 64, 0x5EED, 8, &ctx).unwrap().0;
+        let a = generate(&w, 64, 0x5EED, 8, &ctx).unwrap().rows;
+        let b = generate(&w, 64, 0x5EED, 8, &ctx).unwrap().rows;
         assert_eq!(a, b);
     }
 
@@ -201,8 +242,9 @@ mod tests {
     fn test_probe_shape_and_bounds() {
         let w = ledger_wish();
         let ctx = interp::Ctx::checked();
-        let (rows, quality) = generate(&w, 256, 7, 8, &ctx).unwrap();
-        assert_eq!(quality, PlanQuality::Full);
+        let plan = generate(&w, 256, 7, 8, &ctx).unwrap();
+        assert_eq!(plan.quality, PlanQuality::Full);
+        let rows = &plan.rows;
         assert_eq!(rows.len(), 256 + 4); // edges for List<Int> + randoms
         for row in &rows[4..] {
             assert_eq!(row.len(), 1);
@@ -222,7 +264,7 @@ mod tests {
     fn test_edges_include_empty_and_zero() {
         let w = ledger_wish();
         let ctx = interp::Ctx::checked();
-        let (rows, _) = generate(&w, 0, 1, 16, &ctx).unwrap();
+        let rows = generate(&w, 0, 1, 16, &ctx).unwrap().rows;
         assert!(rows.iter().any(|r| r[0] == Value::List(vec![])));
         assert!(rows.iter().any(|r| r[0] == Value::List(vec![0])));
     }
@@ -235,7 +277,7 @@ mod tests {
         )
         .unwrap();
         let ctx = interp::Ctx::checked();
-        let (rows, _) = generate(&w, 0, 1, 16, &ctx).unwrap();
+        let rows = generate(&w, 0, 1, 16, &ctx).unwrap().rows;
         assert!(!rows.is_empty());
         for row in &rows {
             match &row[0] {
@@ -254,7 +296,7 @@ mod tests {
         .unwrap();
         let ctx = interp::Ctx::checked();
         let out = generate(&w, 4, 7, 2, &ctx);
-        assert_eq!(out, Err(Unsatisfiable));
+        assert!(matches!(out, Err(Unsatisfiable)));
     }
 
     
@@ -267,8 +309,8 @@ mod tests {
         )
         .unwrap();
         let ctx = interp::Ctx::checked();
-        let (rows, quality) = generate(&w, 32, 7, 64, &ctx).unwrap();
-        assert_eq!(quality, PlanQuality::EdgesOnly);
-        assert!(!rows.is_empty());
+        let plan = generate(&w, 32, 7, 64, &ctx).unwrap();
+        assert_eq!(plan.quality, PlanQuality::EdgesOnly);
+        assert!(!plan.rows.is_empty());
     }
 }
