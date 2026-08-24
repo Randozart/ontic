@@ -411,3 +411,11 @@ boundary found (multi-pass composition) was closed by architecture
 ### 2026-08-23 08:50 — Plans + status report for next stretch
 - docs/plans/2026-08-23-expression-lists-and-ply.md (EL1-EL3, CT1, D1)
 - docs/reports/2026-08-23-status-report.md (comprehensive state capture)
+
+### 2026-08-23 09:30 — D2-GATE rerun with expression-list support
+- transform.ont solved by hand (broadcast expression), vaulted with
+  full artifacts (.so + .h). Python calls it via ctypes struct-return.
+- Forge gap identified: models try fold-map patterns (list construction)
+  which require empty typed lists and list append — queued as language
+  extension. Broadcast-only kernels work when model uses correct pattern.
+- D2-GATE: coords.txt → translate_scale.so → valid PLY, 64 vertices.
