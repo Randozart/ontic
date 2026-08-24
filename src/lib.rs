@@ -12,6 +12,7 @@ pub mod genrand;
 pub mod http;
 pub mod interp;
 pub mod lower;
+pub mod lower_llvm;
 pub mod ous;
 pub mod overfit;
 pub mod pipeline;
