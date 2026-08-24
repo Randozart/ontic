@@ -233,9 +233,18 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             let t = infer(inner, env)?;
             builtin_ty(*b, t)
         }
-        Expr::Map { var: _, .. } => Err(
-            "map requires declared `use` dependency context".to_string()
-        ),
+        Expr::Map { var, list, body } => {
+            let list_ty = infer(list, env)?;
+            let elem = match list_ty {
+                Ty::ListInt => Ty::Int,
+                Ty::ListF64 => Ty::F64,
+                other => return Err(format!("map over {}", other.name())),
+            };
+            let mut scoped = env.clone();
+            scoped.insert(var.clone(), elem);
+            let body_ty = infer(body, &scoped)?;
+            Ok(if matches!(body_ty, Ty::F64) { Ty::ListF64 } else { Ty::ListInt })
+        }
         Expr::Builtin2(b, l, r) => infer_builtin2(*b, l, r, env),
         Expr::ListCons(elems) => {
             if elems.is_empty() {

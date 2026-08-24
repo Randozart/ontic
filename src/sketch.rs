@@ -317,13 +317,19 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 _ => None,
             };
             match kw {
-                // Keywords are matched case-sensitively; anything else is a hard error
-                // so typos like "Fold" die at S1 instead of confusing later stages.
-                None => return Err(err(start, format!("unknown word `{}`", word))),
+                // Keywords are matched case-sensitively. Non-keyword bare
+                // words become variable references (no % sigil required) —
+                // this accepts model output that forgets the sigil.
                 Some(w) => out.push(Lexed {
                     tok: Tok::Word(w),
                     offset: start,
                 }),
+                None => {
+                    out.push(Lexed {
+                        tok: Tok::PIdent(word.to_string()),
+                        offset: start,
+                    });
+                }
             }
             continue;
         }
@@ -920,9 +926,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_unknown_word() {
-        let e = parse("fn @f() -> Int { Foo }").expect_err("must reject");
-        assert!(e.message.contains("unknown word"));
+    fn test_bare_identifiers_are_variables() {
+        // Non-keyword bare words become variable references.
+        let c = parse("fn @f(%a: Int) -> Int { %a + foo }").unwrap();
+        assert!(matches!(c.body, Expr::BinOp(_, _, _)));
     }
 
     #[test]
