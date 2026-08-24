@@ -100,6 +100,9 @@ pub struct Rejection {
     pub stage: Stage,
     pub kind: KillKind,
     pub reason: String,
+    /// Candidate text attached post-hoc for corpus collection (DPO pairs).
+    /// None for gen-level errors (wish errors) where no candidate exists.
+    pub text: Option<String>,
 }
 
 /// A candidate that passed every stage, with its measured cost.
@@ -165,7 +168,10 @@ pub fn run(
     for (label, text) in texts {
         match run_one(gen, text, cfg, deps) {
             Ok(survivor) => report.survivors.push(survivor),
-            Err(rej) => report.rejections.push((label.clone(), rej)),
+            Err(rej) => {
+                let rej = with_text(rej, text);
+                report.rejections.push((label.clone(), rej));
+            }
         }
     }
     rank(&mut report);
@@ -188,7 +194,19 @@ fn dep_sigs(deps: &interp::DepMap) -> crate::check::DepSigs {
 }
 
 fn reject(stage: Stage, kind: KillKind, reason: String) -> Rejection {
-    Rejection { stage, kind, reason }
+    Rejection {
+        stage,
+        kind,
+        reason,
+        text: None,
+    }
+}
+
+/// Attach the candidate's text to a rejection (corpus capture keeps
+/// losers alongside winners for preference training).
+fn with_text(mut r: Rejection, text: &str) -> Rejection {
+    r.text = Some(text.to_string());
+    r
 }
 
 fn run_one(

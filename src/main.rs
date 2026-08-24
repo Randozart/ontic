@@ -34,6 +34,7 @@ fn dispatch(args: &[String]) -> i32 {
         },
         Some("solve") => cmd_solve(args),
         Some("decompose") => cmd_decompose(args),
+        Some("corpus") => cmd_corpus(args),
         Some("bench") => cmd_bench(args),
         Some("vault") => cmd_vault(args),
         Some("lib") => cmd_lib(args),
@@ -79,6 +80,8 @@ USAGE:
   ontic pack <key|Path> -o <name>.ous             bundle a kernel into .ous
   ontic unpack <x.ous> -d <dir>                   extract .so/.h/.mlir from bundle
   ontic key <file.ont> [--gen Path]               print canonical SHA-256 key
+  ontic corpus [backfill|stats|export]            training-corpus tooling
+    export: --format chat|dpo --out F --exclude-key K1,K2  (ONTIC_COLLECT=1)
 
 SOLVE OPTIONS:
   --hand <file>     candidate sketch file (repeatable; skips forge)
@@ -522,6 +525,23 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
         Some(_) => {
             native_rerank(&w, &resolved, &mut report.survivors);
             print_native_ranking(&report);
+            // Corpus capture (opt-in via ONTIC_COLLECT=1 in .env): winners
+            // plus killed candidates with machine reasons — SFT and DPO.
+            if ontic::corpus::enabled() {
+                let model_label = match fcfg.backend {
+                    forge::Backend::Llama => {
+                        format!("llama {}:{}", fcfg.host, fcfg.port)
+                    }
+                    _ => format!("{}/{}", fcfg.backend.label(), fcfg.model),
+                };
+                ontic::corpus::capture_solve(
+                    &Vault::key_for(&w),
+                    &fcfg.backend.label().to_string(),
+                    &model_label,
+                    &first_prompt,
+                    &report,
+                );
+            }
             let winner = report.survivors.first().unwrap();
             if !store {
                 return 0;
@@ -1805,6 +1825,7 @@ fn cmd_decompose(args: &[String]) -> i32 {
     };
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ontic"));
     let mut solved = 0usize;
+    let mut repair_log: Vec<String> = Vec::new();
     for idx in order {
         let (spec, _) = &nodes_a[idx];
         let path = std::path::Path::new(&outdir).join(&spec.filename);
@@ -1849,6 +1870,7 @@ fn cmd_decompose(args: &[String]) -> i32 {
                     }
                     repairs += 1;
                     println!("{}: failed (repair {}/{}); asking spec backend", spec.filename, repairs, repair_rounds);
+                    repair_log.push(format!("{} round {}: {}", spec.filename, repairs, tail));
                     match repair_node(&src, &prompt, &spec.filename, &tail) {
                         Some(new_text) => {
                             let _ = std::fs::write(&path, new_text);
@@ -1864,6 +1886,34 @@ fn cmd_decompose(args: &[String]) -> i32 {
         }
     }
 
+    if ontic::corpus::enabled() {
+        let paper_key: String = {
+            let full = ontic::sha256::sha256_hex(prompt.as_bytes());
+            full[..16].to_string()
+        };
+        let blocks: String = nodes_a
+            .iter()
+            .map(|(s, _)| format!("=== file: {} ===\n{}=== end ===\n", s.filename, s.text))
+            .collect();
+        let mut rec = ontic::corpus::Record::new(
+            ontic::corpus::Kind::Spec,
+            paper_key,
+            spec_backend_label(&src),
+            fcfg.model.clone(),
+            prompt.clone(),
+        )
+        .with_winner(&blocks);
+        rec.rejects = repair_log
+            .iter()
+            .map(|t| ontic::corpus::RejectRec {
+                text: t.clone(),
+                stage: "repair".into(),
+                kind: "solve-failed".into(),
+                reason: t.clone(),
+            })
+            .collect();
+        ontic::corpus::append(&rec);
+    }
     println!("\ndecompose: {}/{} nodes solved", solved, nodes_a.len());
     if solved == nodes_a.len() {
         println!("roots ready — bind via pyous.gen(open(<file>).read())");
@@ -1956,4 +2006,197 @@ fn spec_backend_label(src: &SpecSource) -> String {
         SpecSource::File(p) => format!("file:{}", p),
         SpecSource::Model(c) => c.backend.label().to_string(),
     }
+}
+
+// ============================== corpus ===================================
+
+/// `ontic corpus [backfill|stats|export]` — training-corpus tooling.
+fn cmd_corpus(args: &[String]) -> i32 {
+    match args.get(2).map(|s| s.as_str()) {
+        Some("backfill") => corpus_backfill(),
+        Some("stats") => corpus_stats(),
+        Some("export") => corpus_export(args),
+        _ => usage("corpus needs [backfill|stats|export]"),
+    }
+}
+
+fn corpus_backfill() -> i32 {
+    let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
+    let v = match Vault::open(&vault_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    let entries = match v.list() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    let mut n = 0usize;
+    // Idempotence: never append a reconstructed record twice.
+    let corpus_file = std::path::Path::new(&vault_dir)
+        .parent()
+        .unwrap_or(std::path::Path::new(".ontic"))
+        .join("corpus")
+        .join("train.jsonl");
+    let mut have_keys: std::collections::HashSet<String> = Default::default();
+    if let Ok(raw) = std::fs::read_to_string(&corpus_file) {
+        for line in raw.lines() {
+            if let Ok(r) = serde_json::from_str::<ontic::corpus::Record>(line) {
+                if r.reconstructed {
+                    have_keys.insert(r.gen_key);
+                }
+            }
+        }
+    }
+    for e in &entries {
+        // Manifests hold both halves: canonical spec (prompt side) and
+        // winning sketch text (completion side).
+        let man = std::path::Path::new(&vault_dir).join(format!("{}.json", e.key));
+        let man_v: serde_json::Value = match std::fs::read_to_string(&man)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+        {
+            Some(v) => v,
+            None => continue,
+        };
+        let canonical = match man_v.get("canonical").and_then(|c| c.as_str()) {
+            Some(c) => c.to_string(),
+            None => continue,
+        };
+        let sketch = match man_v.get("sketch").and_then(|c| c.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let g = match gen::parse(&canonical) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("backfill skip: parse: {}", &e);
+                continue;
+            }
+        };
+        let resolved = resolve_deps(&g);
+        let prompt = forge::build_prompt(&g, &[], &dep_block(&resolved));
+        let k = Vault::key_for(&g);
+        if have_keys.contains(&k) {
+            continue;
+        }
+        let rec = ontic::corpus::Record::new(
+            ontic::corpus::Kind::Solve,
+            k.clone(),
+            "backfill".to_string(),
+            "reconstructed".to_string(),
+            prompt,
+        )
+        .with_winner(&sketch)
+        .reconstructed();
+        ontic::corpus::append(&rec);
+        n += 1;
+    }
+    println!("corpus backfill: {} records appended", n);
+    0
+}
+
+fn corpus_stats() -> i32 {
+    match ontic::corpus::stats() {
+        Ok(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                println!("{:<28} {}", k, map[k]);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("corpus stats: {}", e);
+            1
+        }
+    }
+}
+
+fn corpus_export(args: &[String]) -> i32 {
+    let flag = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|p| args.get(p + 1))
+            .cloned()
+    };
+    let format = flag("--format").unwrap_or_else(|| "chat".into());
+    let out_path = match flag("--out") {
+        Some(p) => p,
+        None => return usage("export needs --out <file>"),
+    };
+    let excludes: Vec<String> = args
+        .iter()
+        .position(|a| a == "--exclude-key")
+        .and_then(|p| args.get(p + 1))
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
+    let path = std::path::Path::new(&vault_dir)
+        .parent()
+        .unwrap_or(std::path::Path::new(".ontic"))
+        .join("corpus")
+        .join("train.jsonl");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("corpus export: {}: {}", path.display(), e);
+            return 1;
+        }
+    };
+    use std::io::Write;
+    let mut out = std::fs::File::create(&out_path).ok();
+    let mut written = 0usize;
+    let mut skipped = 0usize;
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: ontic::corpus::Record = match serde_json::from_str(line) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if excludes.iter().any(|k| rec.gen_key.starts_with(k.as_str())) {
+            skipped += 1;
+            continue;
+        }
+        let winner = match &rec.winner {
+            Some(w) => w.clone(),
+            None => continue,
+        };
+        let obj = match format.as_str() {
+            "dpo" => serde_json::json!({
+                "gen_key": rec.gen_key,
+                "prompt": rec.prompt,
+                "chosen": winner,
+                "rejected": rec.rejects.first().map(|r| r.text.clone()),
+                "reconstructed": rec.reconstructed,
+            }),
+            _ => serde_json::json!({
+                "messages": [
+                    {"role": "system", "content": "You author Ontic artifacts. Implementations are proven by the sieve, not by you; follow the contract exactly."},
+                    {"role": "user", "content": rec.prompt},
+                    {"role": "assistant", "content": winner}
+                ],
+                "kind": rec.kind,
+                "gen_key": rec.gen_key,
+                "reconstructed": rec.reconstructed,
+            }),
+        };
+        if let Some(f) = out.as_mut() {
+            let _ = writeln!(f, "{}", obj);
+            written += 1;
+        }
+    }
+    println!(
+        "corpus export: {} records -> {} ({} excluded by key)",
+        written, out_path, skipped
+    );
+    0
 }

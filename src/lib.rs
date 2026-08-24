@@ -6,6 +6,7 @@
 
 pub mod ask;
 pub mod check;
+pub mod corpus;
 pub mod cloud;
 pub mod dotenv;
 pub mod forge;

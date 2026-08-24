@@ -370,6 +370,32 @@ fn validate(gen: &Gen) -> Result<(), String> {
     check_set(gen, &gen.opaque, "opaque")
 }
 
+
+/// Widen an int literal to float in place when the declared slot is F64.
+/// Returns true when a coercion happened.
+/// Widen int literals to floats when the declared slot is F64 (params,
+/// list elements, outputs). Canonical serialization writes whole floats
+/// as bare integers; the canonical form must re-parse. Semantics are
+/// identical and vault keys are unaffected (computed from canonical()).
+fn coerce_f64(v: &mut Value, t: &Ty) -> bool {
+    // Compute the replacement first; mutating through `v` inside a match
+    // that borrows it fights the borrow checker.
+    let repl = match (t, &*v) {
+        (Ty::F64, Value::Int(i)) => Some(Value::Float(*i as f64)),
+        (Ty::ListF64, Value::List(items)) => {
+            Some(Value::FloatList(items.iter().map(|&i| i as f64).collect()))
+        }
+        _ => None,
+    };
+    match repl {
+        Some(nv) => {
+            *v = nv;
+            true
+        }
+        None => false,
+    }
+}
+
 fn check_set(gen: &Gen, set: &[Example], label: &str) -> Result<(), String> {
     for ex in set {
         if ex.inputs.len() != gen.params.len() {
@@ -381,6 +407,23 @@ fn check_set(gen: &Gen, set: &[Example], label: &str) -> Result<(), String> {
                 gen.params.len()
             ));
         }
+        // Int literals coerce into declared F64 slots (params, list elems,
+        // output). Canonical serialization writes whole floats as `3`; the
+        // canonical form must re-parse. Semantics identical (interp sees
+        // Float(3.0)); vault keys unchanged (computed from canonical()).
+        let mut inputs = ex.inputs.clone();
+        let mut output = ex.output.clone();
+        let mut coerced = false;
+        for (v, (_, t)) in inputs.iter_mut().zip(gen.params.iter()) {
+            coerced |= coerce_f64(v, t);
+        }
+        coerced |= coerce_f64(&mut output, &gen.ret);
+        let ex = Example {
+            inputs,
+            output,
+            tol: ex.tol,
+        };
+        let _ = coerced;
         for ((v, (_, t)), idx) in ex.inputs.iter().zip(gen.params.iter()).zip(0..) {
             // Empty list literals are polymorphic; they adopt the declared
             // element type of the parameter they feed.
