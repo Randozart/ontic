@@ -666,6 +666,15 @@ fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
             }
         }
     }
+    if std::env::var("ONTIC_DEBUG").is_ok() {
+        eprintln!(
+            "DEBUG resolve: gen {} deps {:?} -> resolved {} (calls {})",
+            w.path,
+            w.deps,
+            map.len(),
+            calls.len()
+        );
+    }
     ResolvedDeps { map, mlirs, calls }
 }
 

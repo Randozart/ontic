@@ -155,7 +155,7 @@ fn infer_dep(
             }
         }
         Expr::UnOp(UnOp::Not, inner) => expect_ty_in(inner, env, &Ty::Bool),
-        Expr::BinOp(op, l, r) => infer_binop(*op, l, r, env),
+        Expr::BinOp(op, l, r) => infer_binop(*op, l, r, env, deps),
         leaf => infer(leaf, env),
     }
 }
@@ -180,8 +180,12 @@ fn typecheck_call(
     env: &HashMap<String, Ty>,
     deps: &DepSigs,
 ) -> Result<Ty, String> {
-    let (want_ps, want_rt) =
-        deps.get(path).ok_or_else(|| format!("call to undeclared dependency `{}`", path))?;
+    let (want_ps, want_rt) = deps.get(path).ok_or_else(|| {
+        if std::env::var("ONTIC_DEBUG").is_ok() {
+            eprintln!("DEBUG dep-miss: asked `{}` have {:?}", path, deps.keys().collect::<Vec<_>>());
+        }
+        format!("call to undeclared dependency `{}`", path)
+    })?;
     if args.len() != want_ps.len() {
         return Err(format!(
             "`{}` expects {} args, got {}",
@@ -321,7 +325,10 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             scoped.insert(acc.clone(), init_ty.clone());
             expect_ty_in(body, &scoped, &init_ty)
         }
-        Expr::BinOp(op, l, r) => infer_binop(*op, l, r, env),
+        Expr::BinOp(op, l, r) => {
+            let no_deps = DepSigs::new();
+            infer_binop(*op, l, r, env, &no_deps)
+        }
     }
 }
 
@@ -357,11 +364,17 @@ fn infer_builtin2(b: Builtin, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> 
     }
 }
 
-fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
+fn infer_binop(
+    op: BinOp,
+    l: &Expr,
+    r: &Expr,
+    env: &HashMap<String, Ty>,
+    deps: &DepSigs,
+) -> Result<Ty, String> {
     match op {
         BinOp::Concat => {
-            let lt = infer(l, env)?;
-            let rt = infer(r, env)?;
+            let lt = infer_dep(l, env, deps)?;
+            let rt = infer_dep(r, env, deps)?;
             match (&lt, &rt) {
                 (Ty::ListInt, Ty::ListInt) => Ok(Ty::ListInt),
                 (Ty::ListF64, _) | (_, Ty::ListF64)
@@ -371,8 +384,8 @@ fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Resu
             }
         }
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-            let lt = infer(l, env)?;
-            let rt = infer(r, env)?;
+            let lt = infer_dep(l, env, deps)?;
+            let rt = infer_dep(r, env, deps)?;
             // Numeric promotion: mixing Int with F64 widens to F64
             // (research-language convention, documented in AGENTS.md).
             // Broadcasting: list op scalar (or same-kind lists) maps
@@ -390,8 +403,8 @@ fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Resu
             }
         }
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-            let lt = infer(l, env)?;
-            let rt = infer(r, env)?;
+            let lt = infer_dep(l, env, deps)?;
+            let rt = infer_dep(r, env, deps)?;
             match (&lt, &rt) {
                 (Ty::Int | Ty::F64, Ty::Int | Ty::F64) => Ok(Ty::Bool),
                 _ => Err(format!("compare {} vs {}", lt.name(), rt.name())),
@@ -405,8 +418,8 @@ fn infer_binop(op: BinOp, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> Resu
         // Equality over matching scalars; Int==F64 promotes like other
         // numeric ops (documented convention).
         BinOp::Eq | BinOp::Ne => {
-            let lt = infer(l, env)?;
-            let rt = infer(r, env)?;
+            let lt = infer_dep(l, env, deps)?;
+            let rt = infer_dep(r, env, deps)?;
             match (&lt, &rt) {
                 (Ty::Int | Ty::F64, Ty::Int | Ty::F64) | (Ty::Bool, Ty::Bool) => Ok(Ty::Bool),
                 _ => Err(format!(

@@ -580,3 +580,20 @@ own hint text via S3 (2482 vs 58).
   per-node validation + draft union at gate.
 - Sieve moment: pass-2 model hint said sqrt() — mathematically wrong for
   its own examples; vaulted kernel passes anyway because evidence rules.
+
+### 2026-08-23 21:30 — Flywheel consolidation complete (FG1–FG3)
+- A1: reuse ledger (.ontic/vault/reuse.json) + [reuse N] in vault ls.
+- A2: IDENTITY.md refreshed — dolls, membrane, soundness test, vision.
+- A3: decompose documented (help + README); pyous divergence noted.
+- B: deeper Kerbl run produced a 4-node tree with a same-draft use-edge
+  (transmittance_step -> alpha_from_sigma); 4/4 solved after a checker
+  fix; composition verified from Python; reuse ledger captured edges.
+- Checker fix found by the run: infer_binop used plain leaf inference,
+  so dep calls inside ANY binary expression errored as "undeclared" even
+  when properly declared and resolved. Binop inference now threads
+  DepSigs end-to-end (plain path passes an empty table, keeping honest
+  stray-call errors). This had been latent since dep calls landed —
+  matvec/matmul never tripped it only because their hints kept calls at
+  statement position, not inside arithmetic. Real pipelines compose in
+  expressions; now the checker does too.
+- Short-name dep citation tolerated via dotted-suffix match in vault.

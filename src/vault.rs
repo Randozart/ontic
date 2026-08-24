@@ -96,7 +96,14 @@ impl Vault {
         let entries = self.list().ok()?;
         for e in entries {
             // Signature starts with "fn <path>(" — match exactly.
-            if signature_path(&e.signature) == path {
+            // Exact first; then unique dotted-suffix match so specs may
+            // cite `gaussian_3d` for `Splat.gaussian_3d`.
+            let sig_path = signature_path(&e.signature);
+            let matched =
+                sig_path == path
+                    || sig_path.ends_with(&format!(".{}", path))
+                    || path.ends_with(&format!(".{}", sig_path));
+            if matched {
                 best = Some((e.key.clone(), e));
             }
         }
