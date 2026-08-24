@@ -451,3 +451,16 @@ boundary found (multi-pass composition) was closed by architecture
   header + sketch + manifest) after every successful vault.
 - .ous roundtrip verified: pack → unpack → link → call → correct result.
 - Branding cleanup: dropped "Sanctified" and "crystal" language.
+
+### 2026-08-23 11:20 — Matvec: language gap precisely characterized
+
+Forge cannot solve matvec despite understanding the algorithm. Models
+write well-intentioned candidates that die at S1 because our grammar
+lacks list-construction from computed values:
+
+- `[0.0; n]` repeat syntax (Rust-style)
+- `[%acc ++ [%v * %s]]` concat via + on single-element lists
+- `...` ellipsis in partial applications
+
+These are genuine language design gaps requiring focused thought.
+Hand-solved candidate passes full sieve and vaults correctly.

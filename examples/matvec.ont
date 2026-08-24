@@ -1,7 +1,6 @@
 wrapping
 fn Linalg.matvec(%mat: List<F64>, %vec: List<F64>) -> List<F64>
-  hint "for each output element i: sum over j of mat[i*n+j] * vec[j] where n = len(%vec)"
-  hint "use: if len(%mat) == len(%vec) * len(%vec) { map(%i in range(len(%vec))) { fold %j in range(len(%vec)), %acc from 0.0 { %acc + index(%mat, %i * len(%vec) + %j) * index(%vec, %j) } } } else { map(%k in range(len(%vec))) { 0.0 } }"
+  hint "row-major NxN; use map over row indices, inner fold per row using index() for element access"
   => [1.0, 0.0, 0.0, 1.0], [3.0, 7.0] -> [3.0, 7.0] ± 1e-12
   => [2.0, 0.0, 0.0, 3.0], [1.0, 1.0] -> [2.0, 3.0] ± 1e-12
   ?? [1.0, 2.0, 3.0, 4.0], [1.0, 1.0] -> [3.0, 7.0] ± 1e-12
