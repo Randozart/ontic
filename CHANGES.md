@@ -419,3 +419,8 @@ boundary found (multi-pass composition) was closed by architecture
   which require empty typed lists and list append — queued as language
   extension. Broadcast-only kernels work when model uses correct pattern.
 - D2-GATE: coords.txt → translate_scale.so → valid PLY, 64 vertices.
+
+### 2026-08-23 09:00 — Concat operator reverted (infinite recursion)
+- WIP parse_concat created infinite recursion: parse_add → parse_concat →
+  parse_or → ... → parse_add. Reverted entirely; list concatenation needs
+  its own focused design session.
