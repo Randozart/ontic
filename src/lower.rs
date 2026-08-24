@@ -878,7 +878,13 @@ fn emit_if(
         "{} = arith.trunci {} : i64 to i1",
         cond, cv
     ));
-    let ty_str = if expr_ty(t, tyenv) == Ty::F64 { "f64" } else { "i64" };
+    let t_ty = expr_ty(t, tyenv);
+    let ty_str = match t_ty {
+        Ty::F64 => "f64",
+        Ty::ListF64 => "memref<?xf64>",
+        Ty::ListInt => "memref<?xi64>",
+        _ => "i64",
+    };
     let result = em.fresh("ifres");
     em.line(&format!("{} = scf.if {} -> ({}) {{", result, cond, ty_str));
     em.indent += 1;

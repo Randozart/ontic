@@ -760,6 +760,9 @@ pub fn build_shared_so(composite_mlir: &str, out_so: &Path) -> Result<(), String
         .map_err(|e| format!("lower-to-llvm: {}", e))?;
     object_from_ll(&ll_mlir, &o_p)
         .map_err(|e| format!("object: {}", e))?;
+    // Trap stub: provides ontic_trap/ontic_trapf definitions.
+    let trap_c = dir.join("trap.c");
+    std::fs::write(&trap_c, "#include <stdlib.h>\nlong ontic_trap(void) { abort(); }\ndouble ontic_trapf(void) { abort(); }\n").map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
     run(
         &cc,
@@ -767,6 +770,7 @@ pub fn build_shared_so(composite_mlir: &str, out_so: &Path) -> Result<(), String
             "-shared",
             "-O2",
             o_p.to_str().ok_or("bad obj")?,
+            trap_c.to_str().ok_or("bad trap")?,
             "-o",
             out_so.to_str().ok_or("bad so")?,
         ],

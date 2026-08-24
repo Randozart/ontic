@@ -424,3 +424,11 @@ boundary found (multi-pass composition) was closed by architecture
 - WIP parse_concat created infinite recursion: parse_add → parse_concat →
   parse_or → ... → parse_add. Reverted entirely; list concatenation needs
   its own focused design session.
+
+### 2026-08-23 09:00 — PR1: matvec vaulted (sieve+native verified)
+- Linalg.matvec solved with guarded nested map+fold candidate.
+- emit_if fixed to handle list-typed branches (memref yield types).
+- build_shared_so includes trap stub for standalone .so linking.
+- Known gap: list-return native calling convention needs proper struct
+  return handling in C consumers (header declares void* but actual ABI
+  returns Flat-MemRef struct). Queued for FFI polish.
