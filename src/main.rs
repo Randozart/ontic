@@ -789,6 +789,7 @@ fn emit_and_store(
     match v.put_meta(w, &survivor.source_text, &mlir, &meta) {
         Ok(key) => {
             println!("VAULTED {} ({})", w.path, key);
+            emit_ous(w, survivor, resolved, &key, &vault_dir);
             0
         }
         Err(e) => {
@@ -873,6 +874,67 @@ fn cmd_run(path: &str) -> i32 {
     }
 }
 
+
+/// Auto-emit .ous bundle after successful vault.
+fn emit_ous(
+    w: &gen::Gen,
+    survivor: &sieve::Survivor,
+    resolved: &ResolvedDeps,
+    key: &str,
+    vault_dir: &str,
+) {
+    if pipeline::find_tool("llc").is_none() {
+        return;
+    }
+    let cand_m = match lower::emit_fn(
+        &survivor.candidate.name,
+        &survivor.candidate.params,
+        &survivor.candidate.ret,
+        &survivor.candidate.body,
+        w.wrapping,
+        &resolved.calls,
+    ) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let mut parts = resolved.mlirs.clone();
+    parts.push(cand_m.clone());
+    let composite = lower::compose_modules(&parts).unwrap_or_else(|_| cand_m.clone());
+
+    let dir = std::env::temp_dir().join(format!("ontic-ous-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let mlir_p = dir.join("composite.mlir");
+    let ll_p = dir.join("c_llvm.mlir");
+    let o_p = dir.join("c.o");
+    if std::fs::write(&mlir_p, &composite).is_err() { return; }
+    if pipeline::mlir_to_llvmir(&mlir_p, &ll_p).is_err() { return; }
+    if pipeline::object_from_ll(&ll_p, &o_p).is_err() { return; }
+    let obj_bytes = match std::fs::read(&o_p) { Ok(b) => b, Err(_) => return };
+
+    let hdr = lower::emit_header(
+        &survivor.candidate.name,
+        &survivor.candidate.params,
+        &survivor.candidate.ret,
+        &key[..8.min(key.len())],
+    ).unwrap_or_default();
+
+    let entry = ontic::vault::Entry {
+        key: key.to_string(),
+        name: survivor.candidate.name.clone(),
+        signature: String::new(),
+        wrapping: w.wrapping,
+        sketch_text: survivor.source_text.clone(),
+        mlir: cand_m.clone(),
+    };
+    let ous_data = ontic::ous::pack_full(&entry, &obj_bytes, &hdr);
+    let ous_name = format!("{}-{}.ous",
+        survivor.candidate.name, &key[..8.min(key.len())]);
+    let ous_path = std::path::Path::new(vault_dir).join(&ous_name);
+    match std::fs::write(&ous_path, &ous_data) {
+        Ok(()) => println!("OUS     : {}", ous_path.display()),
+        Err(e) => eprintln!("ous write: {}", e),
+    }
+}
 
 /// Compile a composite MLIR module into a self-contained shared library
 /// inside `vault_dir` (thin wrapper over pipeline::build_shared_so).

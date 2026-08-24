@@ -445,3 +445,9 @@ boundary found (multi-pass composition) was closed by architecture
 ### 2026-08-23 — Sieve catches human arithmetic errors (again)
 - matvec opaque evidence had wrong values ([5,11] instead of [3,7] for
   [1,2,3,4]×[1,1]). Fixed the evidence, not the code. Second occurrence.
+
+### 2026-08-23 11:00 — Auto-emit .ous after every solve
+- emit_and_store now emits .ous bundle (composite MLIR → LLVM → object +
+  header + sketch + manifest) after every successful vault.
+- .ous roundtrip verified: pack → unpack → link → call → correct result.
+- Branding cleanup: dropped "Sanctified" and "crystal" language.
