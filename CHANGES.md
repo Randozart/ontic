@@ -471,3 +471,15 @@ Hand-solved candidate passes full sieve and vaults correctly.
 - matvec: multiple attempts across seeds/samples, all honestly killed.
   Recorded as measured capability boundary in ISSUES.md.
 - All existing vaulted kernels remain callable from Python/C.
+
+### 2026-08-23 13:15 — Probe domain respects invariants; matvec forge-solved
+- probes::generate pre-filters edges + rejection-samples randoms against
+  input-side invariants (Golden Rule 4 finally enforced end-to-end).
+- New KillKind::WishError: unsatisfiable gen contracts fail fast, never
+  blamed on candidates.
+- Linalg.matvec vaulted via forge (8e5f5dbd…) — nested map+fold kernel,
+  first multi-loop discovery. Called from Python via pyous, outputs verified.
+- CORRECTION: the 2026-08-23 12:00 "overflow tiers removed" entry below is
+  FALSE (script no-op'd silently; nothing changed). Tiers remain, by design
+  (Golden Rule 11). The 10:00-ish "matvec capability boundary" entries are
+  also retracted — root cause was probe-domain, see ISSUES.md post-mortem.

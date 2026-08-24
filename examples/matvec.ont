@@ -1,6 +1,8 @@
 wrapping
 fn Linalg.matvec(%mat: List<F64>, %vec: List<F64>) -> List<F64>
-  hint "row-major NxN; use map over row indices, inner fold per row using index() for element access"
+  | len(%vec) > 0
+  | len(%mat) == len(%vec) * len(%vec)
+  hint "row-major square matrix. result = map(%i in range(n)) { fold %j in range(n), %acc from 0.0 { %acc + index(mat, i*n + j) * index(vec, j) } } where n = len(vec). All indices stay integer; never use to_int."
   => [1.0, 0.0, 0.0, 1.0], [3.0, 7.0] -> [3.0, 7.0] ± 1e-12
   => [2.0, 0.0, 0.0, 3.0], [1.0, 1.0] -> [2.0, 3.0] ± 1e-12
   ?? [1.0, 2.0, 3.0, 4.0], [1.0, 1.0] -> [3.0, 7.0] ± 1e-12

@@ -76,6 +76,8 @@ pub enum KillKind {
     Overfit,
     /// Violated an invariant on a probe input.
     InvariantViolation,
+    /// The gen itself is broken (unsatisfiable contract) — not a candidate fault.
+    WishError,
 }
 
 impl KillKind {
@@ -87,6 +89,7 @@ impl KillKind {
             KillKind::WrongOutput => "wrong-output",
             KillKind::Overfit => "overfit",
             KillKind::InvariantViolation => "invariant-violation",
+            KillKind::WishError => "wish-error",
         }
     }
 }
@@ -265,7 +268,14 @@ fn run_probes(
     cfg: &SiegeConfig,
     ctx: &interp::Ctx,
 ) -> Result<(), Rejection> {
-    let rows = probes::generate(gen, cfg.probe_count, cfg.seed, cfg.edge_budget);
+    let rows = probes::generate(gen, cfg.probe_count, cfg.seed, cfg.edge_budget, ctx)
+        .map_err(|_| {
+            reject(
+                Stage::Probe,
+                KillKind::WishError,
+                "gen invariants unsatisfiable over the probe domain: no input row satisfies the declared contract".to_string(),
+            )
+        })?;
     for row in rows {
         let res = match interp::eval_candidate(cand, &row, &ctx) {
             Ok(v) => v,

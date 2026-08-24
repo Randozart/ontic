@@ -144,7 +144,10 @@ fn cmd_check(path: &str) -> i32 {
 use ontic::probes;
 
 fn probes_count(w: &gen::Gen, cfg: &SiegeConfig) -> usize {
-    probes::generate(w, cfg.probe_count, cfg.seed, cfg.edge_budget).len()
+    let ctx = interp::Ctx::checked();
+    probes::generate(w, cfg.probe_count, cfg.seed, cfg.edge_budget, &ctx)
+        .map(|rows| rows.len())
+        .unwrap_or(0)
 }
 
 /// Resolve forge config from flags/env.

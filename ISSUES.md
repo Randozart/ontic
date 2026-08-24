@@ -131,3 +131,37 @@ in the loop early.
   is vaulted and verified; the pipeline works correctly.
 - Revisit when: stronger local model available (Mellum2-12B untested),
   or prompt engineering produces a reliable template.
+
+**Date:** 2026-08-23
+**Timestamp:** 2026-08-23 13:10
+
+## Post-mortem: "matvec capability boundary" was a probe-domain bug
+
+Earlier today I recorded matvec as a *measured model-capability boundary*
+(40+ candidates, zero survivors). That record was wrong in its conclusion.
+
+**Root cause:** `probes::generate()` sampled raw type domains — canonical
+edges included the empty list and random rows included len-0 lists. For
+matvec, empty/ragged inputs violate the kernel's real precondition
+(square, non-empty). Correct candidates crashed on those rows at S5
+(index out of bounds) and died. The sieve was punishing candidates for
+inputs outside the gen's declared contract — violating Golden Rule 4
+(probe domain = type domains ∩ invariants).
+
+**Fix:** probes now pre-filter edge rows against input-side invariant
+satisfaction and rejection-sample random rows (cap 256 attempts/row).
+Unsatisfiable contracts surface as a new `wish-error` kill kind aimed at
+the GEN, not candidates. Same seed (42), same sample count (8): matvec
+solved on the first run after the fix.
+
+**Lesson:** before blaming the model, verify the oracle's input domain.
+"Capability boundary" claims require evidence the contract itself was
+respected during probing.
+
+**Second finding:** the earlier "overflow tiers removed" commit and its
+CHANGES.md entry were false — the removal script's string replacements
+silently matched nothing; build/tests stayed green because nothing
+changed. Audit showed Tier/Tier::wrapping fully intact everywhere.
+Decision: tiers STAY (Golden Rule 11 declares tier-by-contract design;
+checked-tier kills overflow-reachable paths at S5 = stronger sieve).
+False CHANGES.md entry annotated below.
