@@ -329,8 +329,10 @@ fn emit_expr(
             b
         )),
         Expr::ListCons(elems) => {
-            // Allocate result memref, evaluate each element, store.
-            let elem_f = elems.iter().any(|e| matches!(e, Expr::FloatLit(_)))
+            // Element type mirrors the checker: F64 if ANY element is F64,
+            // else Int. Literal-presence heuristics miss computed floats
+            // (e.g. `[c/det, -b/det, ...]`) and mis-alloc i64 memrefs.
+            let elem_f = elems.iter().any(|e| expr_ty(e, tyenv) == Ty::F64)
                 || matches!(
                     expr_ty(&Expr::ListCons(elems.clone()), tyenv),
                     Ty::ListF64
@@ -342,7 +344,7 @@ fn emit_expr(
             em.line(&format!("{} = memref.alloc({}) : {}", alloc, count, mty));
             for (i, e) in elems.iter().enumerate() {
                 let v = emit_expr(e, env, tyenv, em)?;
-                let v2 = if elem_f && !matches!(e, Expr::FloatLit(_)) {
+                let v2 = if elem_f && expr_ty(e, tyenv) != Ty::F64 {
                     // Widen int-typed sub-expressions to f64.
                     let w = em.fresh("widen");
                     em.line(&format!(
@@ -1301,6 +1303,27 @@ mod tests {
         assert!(ir.contains("arith.constant 7 : i64"));
         assert!(ir.contains("memref.dim"));
         assert!(ir.contains("arith.index_cast"));
+    }
+
+    #[test]
+    fn test_computed_float_list_cons_allocates_f64_memref() {
+        // Regression: element type must come from the checker (F64 if any
+        // computed element is F64), not from literal presence. Storing a
+        // divf result into memref<?xi64> is invalid IR that mlir-opt
+        // correctly rejects.
+        let c = sketch::parse(
+            "fn @ci2(%a: F64, %b: F64, %c: F64) -> List<F64> { let %d = %a * %c - %b * %b; [%c / %d, -%b / %d] }",
+        )
+        .unwrap();
+        check::check(&c).unwrap();
+        let ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, true, &CallMap::new())
+            .expect("lowers");
+        assert!(
+            ir.contains("memref<?xf64>"),
+            "computed-float list cons must allocate f64 memref, got:\n{}",
+            ir
+        );
+        assert!(!ir.contains("sitofp"), "no widening needed for uniform f64");
     }
 
     #[test]

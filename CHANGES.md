@@ -535,3 +535,16 @@ nested-iteration wall is down. Library now compounds via vault deps.
     explanation.
 - Sieve WishError message names every invariant and points at the spec,
   not candidates.
+
+### 2026-08-23 17:00 — Conic inversion forge-solved; ListCons type bug fixed
+- Splat.conic2 vaulted via forge: symmetric 2x2 covariance inverse,
+  flattened [c/det, -b/det, -b/det, a/det]. Composes with alpha_at from
+  Python. Second real 3DGS equation verified.
+- Lowering bug caught by mlir-opt gate: ListCons element type was decided
+  by literal presence (FloatLit scan), so `[c/det, -b/det, ...]` with all-
+  computed float elements allocated memref<?xi64> and stored divf results.
+  Fix mirrors checker semantics exactly: F64 if ANY element infers F64,
+  widen ints otherwise. Regression test added (133 green).
+- Pipeline note: the mlir-opt validation step caught invalid IR before it
+  could ship — deterministic gates catching compiler bugs is the system
+  working as designed.
