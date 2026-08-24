@@ -464,3 +464,10 @@ lacks list-construction from computed values:
 
 These are genuine language design gaps requiring focused thought.
 Hand-solved candidate passes full sieve and vaults correctly.
+
+### 2026-08-23 11:30 — Matvec capability boundary confirmed
+- transform.ont reproducibility confirmed: 4/4 survivors on repeat run.
+- normalize re-vaulted via forge (same key).
+- matvec: multiple attempts across seeds/samples, all honestly killed.
+  Recorded as measured capability boundary in ISSUES.md.
+- All existing vaulted kernels remain callable from Python/C.

@@ -117,3 +117,17 @@ in the loop early.
   scalars. Sketch grammar supports list literals only with NUMBER tokens,
   not arbitrary expressions. Need: expression-list literals or list cons/
   append builtins. Queued as language extension.
+
+### 2026-08-23 — Matvec remains unsolved by forge (capability boundary)
+- Multiple attempts across sessions: 40+ candidates, zero survivors.
+- Models write well-intentioned candidates using fold-map-append or
+  nested-map patterns but consistently fail to produce grammatically
+  valid, semantically correct implementations under GBNF constraints.
+- Root cause: nested iteration (map over rows + fold within each row)
+  requires simultaneously tracking two loop variables, index arithmetic,
+  and accumulator semantics — beyond flash-lite-class model capability
+  under constrained decoding.
+- NOT a bug. This is a measured capability boundary. Hand-solved matvec
+  is vaulted and verified; the pipeline works correctly.
+- Revisit when: stronger local model available (Mellum2-12B untested),
+  or prompt engineering produces a reliable template.
