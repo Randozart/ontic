@@ -432,3 +432,16 @@ boundary found (multi-pass composition) was closed by architecture
 - Known gap: list-return native calling convention needs proper struct
   return handling in C consumers (header declares void* but actual ABI
   returns Flat-MemRef struct). Queued for FFI polish.
+
+### 2026-08-23 11:10 — Matvec forge-solved via nested map+fold
+- Linalg.matvec solved by Gemini flash-lite from spec alone.
+- 8/8 candidates survived the full sieve (zero kills).
+- Model correctly wrote nested map(%i in range) { fold %j in range } pattern
+  using index() for element access, guarded by length check.
+- Vaulted with .so + header artifacts.
+- This proves the language can express non-trivial nested iteration patterns
+  that forge can solve when given precise structural hints.
+
+### 2026-08-23 — Sieve catches human arithmetic errors (again)
+- matvec opaque evidence had wrong values ([5,11] instead of [3,7] for
+  [1,2,3,4]×[1,1]). Fixed the evidence, not the code. Second occurrence.
