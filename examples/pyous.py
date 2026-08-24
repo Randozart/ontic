@@ -105,6 +105,33 @@ def load(vault_dir: str | Path, wish_path: str):
     return fn, ptypes, ret, meta
 
 
+class MemRefF64(ctypes.Structure):
+    """Flat-MemRef descriptor for List<F64> returns."""
+    _fields_ = [
+        ("allocated", ctypes.c_void_p),
+        ("aligned", ctypes.c_void_p),
+        ("offset", ctypes.c_long),
+        ("size", ctypes.c_long),
+        ("stride", ctypes.c_long),
+    ]
+
+
+class MemRefI64(ctypes.Structure):
+    """Flat-MemRef descriptor for List<Int> returns."""
+    _fields_ = [
+        ("allocated", ctypes.c_void_p),
+        ("aligned", ctypes.c_void_p),
+        ("offset", ctypes.c_long),
+        ("size", ctypes.c_long),
+        ("stride", ctypes.c_long),
+    ]
+
+
+_SCALAR_RESTYPE = {"Int": ctypes.c_long, "Bool": ctypes.c_long,
+                   "F64": ctypes.c_double}
+_MEMREF_RESTYPE = {"List<F64>": MemRefF64, "List<Int>": MemRefI64}
+
+
 def _bind(lib, signature: str, sketch: str):
     head = signature[3:]
     name, rest = head.split("(", 1)
@@ -122,8 +149,10 @@ def _bind(lib, signature: str, sketch: str):
         return [ctypes.c_long]
 
     f = getattr(lib, symbol)
-    f.restype = {"Int": ctypes.c_long, "Bool": ctypes.c_long,
-                 "F64": ctypes.c_double}[ret_name]
+    if ret_name in _MEMREF_RESTYPE:
+        f.restype = _MEMREF_RESTYPE[ret_name]
+    else:
+        f.restype = _SCALAR_RESTYPE[ret_name]
     at = []
     ptypes = []
     for p in params_s.split(","):
@@ -188,104 +217,33 @@ def gen(spec: str, tier: str = "wrapping", samples: int | None = None,
 
     manifest = json.loads(man_path.read_text())
     lib = ctypes.CDLL(str(vd / manifest["artifacts"]["lib"]))
-    fn, ptypes, _ret = _bind(lib, manifest["signature"], manifest["sketch"])
+    fn, ptypes, ret_name = _bind(lib, manifest["signature"], manifest["sketch"])
 
     meta = dict(manifest.get("last_solve", {}))
     meta["artifacts"] = manifest.get("artifacts", {})
     meta["canonical_sha256"] = key
 
+    import numpy as np
+
     def kernel(*values):
         args = _make_call_args(values, ptypes)
-        return fn(*args)
+        result = fn(*args)
+        if is_list_ret(ret_name):
+            n = result.size
+            if n == 0 or not result.aligned:
+                return np.array([], dtype=np.float64)
+            buf = (ctypes.c_double * n).from_address(result.aligned)
+            return np.frombuffer(buf, dtype=np.float64).copy()
+        return result
 
     kernel.__sieve_meta__ = meta
     kernel.__ptypes__ = ptypes
     return kernel
 
 
-class MemRefF64(ctypes.Structure):
-    """Flat-MemRef descriptor (for struct-return kernels)."""
-    _fields_ = [
-        ("allocated", ctypes.c_void_p),
-        ("aligned", ctypes.c_void_p),
-        ("offset", ctypes.c_long),
-        ("size", ctypes.c_long),
-        ("stride", ctypes.c_long),
-    ]
+def is_list_ret(ret_name: str) -> bool:
+    return ret_name.startswith("List<")
 
 
-class ListF64Kernel:
-    """Callable wrapper for List<F64> → List<F64> kernels.
-    
-    Native ABI: each List<F64> param = 5 flat args; F64 params = 1 double.
-    restype = MemRefF64 struct; ctypes auto-handles hidden sret pointer.
-    """
-    def __init__(self, lib, symbol, num_scalars: int):
-        self._lib = lib
-        self._symbol = symbol
-        self._num_scalars = num_scalars
 
-    def __call__(self, pts, *scalars):
-        import numpy as np
-        arr = np.ascontiguousarray(pts, dtype=np.float64)
-        n = len(arr)
 
-        fn = getattr(self._lib, self._symbol)
-        fn.restype = MemRefF64
-        # Flat-5 for the list + one double per scalar
-        fn.argtypes = [
-            ctypes.c_void_p, ctypes.c_void_p,
-            ctypes.c_long, ctypes.c_long, ctypes.c_long,
-        ] + [ctypes.c_double] * self._num_scalars
-
-        ptr = arr.ctypes.data_as(ctypes.c_void_p)
-        args = [ptr, ptr, ctypes.c_long(0), ctypes.c_long(n), ctypes.c_long(1)]
-        args.extend(ctypes.c_double(s) for s in scalars)
-        result = fn(*args)
-
-        if result.size == 0 or not result.aligned:
-            return np.array([], dtype=np.float64)
-        out_t = ctypes.c_double * result.size
-        buf = out_t.from_address(result.aligned)
-        return np.frombuffer(buf, dtype=np.float64).copy()
-
-def gen_list_return(spec: str, tier: str = "wrapping",
-                    samples: int | None = None,
-                    vault_dir: str | None = None):
-    """Genesis for List<F64> → List<F64> kernels."""
-    import numpy as np
-
-    vd = Path(vault_dir or _vault_dir())
-    key = key_for_spec(spec, tier)
-    man_path = vd / f"{key}.json"
-    complete = False
-    if man_path.exists():
-        m = json.loads(man_path.read_text())
-        complete = bool(m.get("artifacts", {}).get("lib"))
-    if not complete:
-        if os.environ.get("ONTIC_AUTO_SOLVE") == "1":
-            tmp = tempfile.NamedTemporaryFile("w", suffix=".ont", delete=False)
-            tmp.write(_render(spec, tier))
-            tmp.close()
-            solve(tmp.name, samples)
-            os.unlink(tmp.name)
-        else:
-            raise GenMissing(f"key {key[:12]} not solved")
-
-    manifest = json.loads(man_path.read_text())
-    so_path = vd / manifest["artifacts"]["lib"]
-    sk = manifest.get("sketch", "")
-    sym = sk.split("@", 1)[1].split("(")[0].split()[0] if "@" in sk else "f"
-
-    lib = ctypes.CDLL(str(so_path))
-    # Count scalar params from the stored sketch signature.
-    sig = manifest.get("signature", "")
-    num_scalars = 0
-    inner = sig.split("(", 1)[1].split(")")[0] if "(" in sig else ""
-    for p in inner.split(","):
-        p = p.strip()
-        if p and "List" not in p:
-            num_scalars += 1
-    kernel = ListF64Kernel(lib, sym, num_scalars)
-    kernel.__sieve_meta__ = manifest.get("last_solve", {})
-    return kernel
