@@ -41,6 +41,8 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    /// List concatenation (++).
+    Concat,
 }
 
 /// Unary builtin operations.
@@ -320,6 +322,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
         let two = if i + 1 < b.len() { &src[i..i + 2] } else { "" };
         // Static literals keep Tok::Sym borrow-free of `src`.
         let sym2: Option<&'static str> = match two {
+            "++" => Some("++"),
             "==" => Some("=="),
             "!=" => Some("!="),
             "<=" => Some("<="),
@@ -573,10 +576,10 @@ impl Parser {
     }
 
     fn parse_add(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_mul()?;
+        let mut lhs = self.parse_concat()?;
         loop {
             let op = match self.peek() {
-                Some(Tok::Sym("+")) => BinOp::Add,
+                Some(Tok::Sym("+")) | Some(Tok::Sym("++")) => BinOp::Add,
                 Some(Tok::Sym("-")) => BinOp::Sub,
                 _ => break,
             };
@@ -585,6 +588,11 @@ impl Parser {
             lhs = Expr::BinOp(op, Box::new(lhs), Box::new(rhs));
         }
         Ok(lhs)
+    }
+
+    fn parse_concat(&mut self) -> Result<Expr, ParseError> {
+        // Lowest precedence above additive: catches ++ before + does.
+        self.parse_or()
     }
 
     fn parse_mul(&mut self) -> Result<Expr, ParseError> {
