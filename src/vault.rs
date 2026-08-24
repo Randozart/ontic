@@ -200,3 +200,40 @@ fn signature_path(signature: &str) -> String {
         None => inner.trim().to_string(),
     }
 }
+
+/// Append-only reuse ledger: `(dep_key, used_by_key)` -> hit count.
+/// Lives BESIDE vault entries (never inside them — entries are immutable
+/// artifacts, Golden Rule 15). Content is deterministic given the same
+/// sequence of operations; cloud-sampled runs may order differently.
+pub fn record_reuse(vault_dir: &str, dep_key: &str, used_by_key: &str) {
+    let path = std::path::Path::new(vault_dir).join("reuse.json");
+    let mut map: std::collections::HashMap<String, u64> = match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(m) => m,
+        None => Default::default(),
+    };
+    *map.entry(format!("{}->{}", dep_key, used_by_key)).or_insert(0) += 1;
+    if let Ok(body) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(&path, body);
+    }
+}
+
+/// Read reuse counts grouped by dependency key: dep_key -> total hits as a
+/// dependency of anything.
+pub fn reuse_counts(vault_dir: &str) -> std::collections::HashMap<String, u64> {
+    let path = std::path::Path::new(vault_dir).join("reuse.json");
+    let mut out: std::collections::HashMap<String, u64> = Default::default();
+    if let Some(map) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<std::collections::HashMap<String, u64>>(&s).ok())
+    {
+        for (pair, n) in map {
+            if let Some(dep) = pair.split("->").next() {
+                *out.entry(dep.to_string()).or_insert(0) += n;
+            }
+        }
+    }
+    out
+}

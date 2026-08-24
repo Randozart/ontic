@@ -200,6 +200,26 @@ Environment variables:
 | `ONTIC_MLIR_BIN` | LLVM toolchain directory | `/usr/lib/llvm-18/bin` |
 | `ONTIC_FORGE_WORKERS` | Parallel sampling workers | `2` |
 
+
+## From paper to pipeline
+
+`ontic decompose` turns research-paper text into a tree of `.ont`
+specifications, gates it through one human confirmation, then solves the
+tree leaves-first — verified kernels composing into verified kernels:
+
+```bash
+curl -s https://arxiv.org/html/2308.04079v1 | \
+  python3 -c "import sys,html,re; t=sys.stdin.read(); \
+    t=re.sub(r'<[^>]+>',' ',t); print(html.unescape(t))" > gs.txt
+ontic decompose gs.txt --spec-backend gemini --outdir tree/
+# review the PROPOSED TREE table, confirm, and each node is solved+vaulted
+```
+
+The vault records which cores fed which solves (`ontic vault` shows reuse
+counts), so every paper deposits reusable math for the next one. See
+`docs/reports/2026-08-23-research-report-p3.md` for a full run against the
+3D Gaussian Splatting paper.
+
 ## License
 
 [Apache 2.0 WITH LLVM-exception](LICENSE)

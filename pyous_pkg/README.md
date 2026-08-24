@@ -1,5 +1,12 @@
 # pyous
 
+> **Two front-ends, one vault.** This package is the typed builder
+> (`po.define` / `@po.kernel` / `po.gen`). The repository's
+> `examples/pyous.py` is the minimal reference client — plain spec text in,
+> native callable out (`pyous.gen(open("f.ont").read())`). Both drive the
+> same `ontic` CLI and bind the same vault artifacts; pick by taste.
+
+
 > *Sanctified logic for Python.* Verified native kernels from specifications.
 
 [Apache 2.0 WITH LLVM-exception](LICENSE)

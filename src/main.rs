@@ -65,6 +65,11 @@ fn print_help() {
 USAGE:
   ontic check <file.ont>                          validate a gen, report probe strength
   ontic solve <file.ont> [opts]                   sieve candidates; winner -> vault as MLIR
+  ontic decompose <paper.txt|-> [opts]            paper text -> .ont tree (differential drafts,
+                                                  one confirm gate, topo-solved with budgets)
+    opts: --spec-backend gemini|openai|llama|file:<path>
+          --candidate-backend B --candidate-samples N
+          --repair-rounds K --recuts N --yes --outdir D
   ontic bench <file.ont> [opts]                   rank survivors with timings only
   ontic run <file.ont>                            execute a recipe over vaulted fns
   ontic vault [--dir D]                           list verified functions
@@ -619,6 +624,7 @@ impl ResolvedDeps {
 fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
     let vault_dir =
         std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
+    let w_key = Vault::key_for(w);
     let v = match Vault::open(&vault_dir) {
         Ok(v) => v,
         Err(_) => return ResolvedDeps::empty(),
@@ -645,6 +651,7 @@ fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
                     path.clone(),
                     interp::DepFn { cand: cand.clone(), tier },
                 );
+                ontic::vault::record_reuse(&vault_dir, &entry.key, &w_key);
                 if let Some(sym) = symbol {
                     calls.insert(
                         path.clone(),
@@ -846,6 +853,7 @@ fn cmd_vault(args: &[String]) -> i32 {
                 println!("vault empty at {}", dir);
             }
             let promoted = read_lib_manifest();
+            let reuse = ontic::vault::reuse_counts(&dir);
             for e in entries {
                 let path = {
                     let inner = e.signature.strip_prefix("fn ").unwrap_or(&e.signature);
@@ -855,7 +863,15 @@ fn cmd_vault(args: &[String]) -> i32 {
                     }
                 };
                 let badge = if promoted.iter().any(|p| *p == path) { " [LIB]" } else { "" };
-                println!("{}  {}{}  {}", &e.key[..12.min(e.key.len())], e.name, badge, e.signature);
+                let hits = reuse.get(&e.key).copied().unwrap_or(0);
+                println!(
+                    "{}  {}{}  [reuse {}]  {}",
+                    &e.key[..12.min(e.key.len())],
+                    e.name,
+                    badge,
+                    hits,
+                    e.signature
+                );
             }
             0
         }
