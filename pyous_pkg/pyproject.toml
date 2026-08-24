@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyous"
+version = "0.1.0"
+authors = [
+    { name = "Randy Smits-Schreuder Goedheijt" },
+]
+description = "Sanctified logic for Python: verified native kernels from specifications."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0 WITH LLVM-exception" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering",
+    "Development Status :: 3 - Alpha",
+]
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy"]
+
+[project.urls]
+Homepage = "https://github.com/Randozart/ontic"
+
+[tool.setuptools.packages.find]
+where = ["src"]
