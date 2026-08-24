@@ -497,6 +497,56 @@ fn forge_extract_helper(raw: &str) -> String {
     extract_candidate(raw)
 }
 
+/// One raw-prompt completion through the configured backend — the primitive
+/// behind spec synthesis (`ontic decompose` / future `ask`). Candidate
+/// sampling uses `sample()`; this is free-form text with fence stripping.
+/// The uniform enumeration backend cannot author specs by construction.
+pub fn sample_text(prompt: &str, cfg: &ForgeConfig) -> Result<String, String> {
+    if cfg.backend == Backend::Uniform {
+        return Err(
+            "uniform sampler enumerates typed candidates; it cannot author specs".to_string(),
+        );
+    }
+    if matches!(cfg.backend, Backend::OpenAICompat | Backend::GeminiNative) {
+        let key = std::env::var(&cfg.api_key_env)
+            .map_err(|_| format!("missing API key: set ${}", cfg.api_key_env))?;
+        let style = match cfg.backend {
+            Backend::OpenAICompat => crate::cloud::AuthStyle::Bearer,
+            _ => crate::cloud::AuthStyle::XGoogApiKey,
+        };
+        let url = match cfg.backend {
+            Backend::GeminiNative => crate::sampler::gemini_url(&cfg.endpoint, &cfg.model),
+            _ => format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/')),
+        };
+        let chat_prompt_text = crate::sampler::chat_prompt(prompt);
+        const SPEC_TOKENS: usize = 8192;
+        let body = match cfg.backend {
+            Backend::OpenAICompat => {
+                crate::sampler::openai_body(&cfg.model, &chat_prompt_text, cfg.temperature, SPEC_TOKENS)
+            }
+            _ => crate::sampler::gemini_body(&chat_prompt_text, cfg.temperature, SPEC_TOKENS),
+        };
+        let resp = crate::cloud::post_json(&url, Some((&key, style)), &[], &body, 180)?;
+        if resp.status != 200 {
+            return Err(format!("HTTP {}: {}", resp.status, resp.body));
+        }
+        let raw = match cfg.backend {
+            Backend::GeminiNative => crate::sampler::gemini_parse(&resp.body)?.0,
+            _ => crate::sampler::openai_parse(&resp.body)?.0,
+        };
+        return Ok(extract_candidate(&raw));
+    }
+    // Local llama-server.
+    let mut client = HttpClient::connect(&cfg.host, cfg.port)?;
+    let host_header = format!("{}:{}", cfg.host, cfg.port);
+    let body = body_for(prompt, cfg, 0);
+    let resp = client.post_json(&host_header, "/completion", &body)?;
+    if resp.status != 200 {
+        return Err(format!("HTTP {}: {}", resp.status, resp.body));
+    }
+    extract_content(&resp.body)
+}
+
 #[cfg(test)]
 mod deps_prompt_tests {
     use super::*;

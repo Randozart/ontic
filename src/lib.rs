@@ -4,6 +4,7 @@
 //! deterministic sieve decides. Verified winners lower to MLIR and land in
 //! the content-addressed vault.
 
+pub mod ask;
 pub mod check;
 pub mod cloud;
 pub mod dotenv;

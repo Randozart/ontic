@@ -33,6 +33,7 @@ fn dispatch(args: &[String]) -> i32 {
             None => usage("run needs a .ont file"),
         },
         Some("solve") => cmd_solve(args),
+        Some("decompose") => cmd_decompose(args),
         Some("bench") => cmd_bench(args),
         Some("vault") => cmd_vault(args),
         Some("lib") => cmd_lib(args),
@@ -1640,4 +1641,287 @@ fn cmd_unpack(args: &[String]) -> i32 {
         _ => {}
     }
     0
+}
+
+// ============================ decompose ==================================
+
+use ontic::ask::{self, SpecSource};
+
+/// `ontic decompose <paper.txt|-> [flags]` — paper text to a tree of .ont
+/// files, gated once by a human, then solved leaves-first with budgeted
+/// per-node repair. THE WALL holds: model output is spec TEXT that passes
+/// gen::parse + validate_wish before anything else touches it.
+fn cmd_decompose(args: &[String]) -> i32 {
+    let input = match args.get(2) {
+        Some(p) => p.clone(),
+        None => return usage("decompose needs <paper.txt|->"),
+    };
+    let flag = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|p| args.get(p + 1))
+            .cloned()
+    };
+    let yes = args.iter().any(|a| a == "--yes");
+    let outdir = flag("--outdir").unwrap_or_else(|| "decomposed".to_string());
+    let repair_rounds: usize =
+        flag("--repair-rounds").and_then(|v| v.parse().ok()).unwrap_or(2);
+    let recuts: usize = flag("--recuts").and_then(|v| v.parse().ok()).unwrap_or(2);
+
+    let paper = read_paper(&input);
+    let mut entries: Vec<String> = Vec::new();
+    let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
+    if let Ok(v) = Vault::open(&vault_dir) {
+        if let Ok(list) = v.list() {
+            for e in list {
+                entries.push(format!("{}  # {}", e.name, e.signature));
+            }
+        }
+    }
+    entries.sort();
+
+    let sopts = SolveOpts {
+        wish_path: String::new(),
+        wish_sel: None,
+        hand: vec![],
+        samples: 1,
+        seed: flag("--seed").and_then(|v| v.parse().ok()).unwrap_or(0x5EED),
+        forge: flag("--forge"),
+        sampler_backend: flag("--spec-backend").filter(|s| !s.starts_with("file:")),
+        endpoint: flag("--endpoint"),
+        model: flag("--model"),
+        api_key_env: None,
+    };
+    let fcfg = forge_config(&sopts);
+    let src = match ask::resolve_spec_source(flag("--spec-backend").as_deref(), fcfg.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("decompose: {}", e);
+            return 1;
+        }
+    };
+
+    let prompt = ask::build_decompose_prompt(&paper, &ask::inventory_block(&entries));
+    println!("decompose: drafting (backend {})…", spec_backend_label(&src));
+
+    let nodes_a = match fetch_validated(&src, &prompt) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("decompose: draft A failed: {}", e);
+            return 1;
+        }
+    };
+    // Differential: B compared on normalized signatures; unusable B gets
+    // bounded resamples, never silent acceptance.
+    let mut b_attempts = 0usize;
+    let nodes_b = loop {
+        match fetch_validated(&src, &prompt) {
+            Ok(nb) => break Some(nb),
+            Err(e) => {
+                b_attempts += 1;
+                if b_attempts > recuts {
+                    println!(
+                        "differential: draft B unusable after {} attempts ({}); proceeding on A alone",
+                        b_attempts, e
+                    );
+                    break None;
+                }
+            }
+        }
+    };
+    report_diff(&nodes_a, nodes_b.as_deref());
+
+    print_gate_table(&nodes_a);
+    if !yes {
+        print!("proceed with this tree? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
+        let mut ans = String::new();
+        if std::io::stdin().read_line(&mut ans).is_err() {
+            return 1;
+        }
+        let t = ans.trim().to_ascii_lowercase();
+        if !(t == "y" || t == "yes") {
+            println!("aborted at gate");
+            return 1;
+        }
+    }
+
+    if std::fs::create_dir_all(&outdir).is_err() {
+        eprintln!("decompose: cannot create {}", outdir);
+        return 1;
+    }
+    for (spec, _) in &nodes_a {
+        let p = std::path::Path::new(&outdir).join(&spec.filename);
+        if let Err(e) = std::fs::write(&p, &spec.text) {
+            eprintln!("decompose: write {}: {}", p.display(), e);
+            return 1;
+        }
+        let sidecar = serde_json::json!({
+            "backend": spec_backend_label(&src),
+            "seed": fcfg.seed,
+            "repair_budget": repair_rounds,
+            "recut_budget": recuts,
+            "prompt_sha256": ontic::sha256::sha256_hex(prompt.as_bytes()),
+        });
+        let _ = std::fs::write(
+            p.with_extension("ask.json"),
+            serde_json::to_string_pretty(&sidecar).unwrap(),
+        );
+        println!("wrote {}", p.display());
+    }
+
+    let order = match ask::topo_order(&nodes_a) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("decompose: {}", e);
+            return 1;
+        }
+    };
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ontic"));
+    let mut solved = 0usize;
+    for idx in order {
+        let (spec, _) = &nodes_a[idx];
+        let path = std::path::Path::new(&outdir).join(&spec.filename);
+        println!("\n=== solving {} ===", spec.filename);
+        let mut repairs = 0usize;
+        loop {
+            let sb = flag("--candidate-backend").unwrap_or_else(|| "gemini".into());
+            let csamples = flag("--candidate-samples").unwrap_or_else(|| "32".into());
+            match std::process::Command::new(&exe)
+                .arg("solve")
+                .arg(&path)
+                .arg("--sampler-backend")
+                .arg(&sb)
+                .arg("--samples")
+                .arg(&csamples)
+                .output()
+            {
+                Ok(o) if o.status.success() => {
+                    solved += 1;
+                    break;
+                }
+                Ok(o) => {
+                    let stderr_all = String::from_utf8_lossy(&o.stderr).to_string();
+                    let tail: String = stderr_all
+                        .lines()
+                        .rev()
+                        .take(6)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    // Candidate-side failures (sampler found nothing valid)
+                    // are not spec defects — spec repair cannot help.
+                    if stderr_all.contains("no candidate survived") {
+                        eprintln!("{}: no candidate survived the sieve (candidate-side); skipping spec repair", spec.filename);
+                        break;
+                    }
+                    if repairs >= repair_rounds {
+                        eprintln!("{}: solve failed; repair budget exhausted\n{}", spec.filename, tail);
+                        break;
+                    }
+                    repairs += 1;
+                    println!("{}: failed (repair {}/{}); asking spec backend", spec.filename, repairs, repair_rounds);
+                    match repair_node(&src, &prompt, &spec.filename, &tail) {
+                        Some(new_text) => {
+                            let _ = std::fs::write(&path, new_text);
+                        }
+                        None => println!("repair unavailable; retrying solve unchanged"),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}: solver spawn failed: {}", spec.filename, e);
+                    break;
+                }
+            }
+        }
+    }
+
+    println!("\ndecompose: {}/{} nodes solved", solved, nodes_a.len());
+    if solved == nodes_a.len() {
+        println!("roots ready — bind via pyous.gen(open(<file>).read())");
+        0
+    } else {
+        1
+    }
+}
+
+fn read_paper(input: &str) -> String {
+    if input == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        let _ = std::io::stdin().read_to_string(&mut s);
+        s
+    } else {
+        std::fs::read_to_string(input).unwrap_or_default()
+    }
+}
+
+fn fetch_validated(
+    src: &SpecSource,
+    prompt: &str,
+) -> Result<Vec<(ask::NodeSpec, gen::Gen)>, String> {
+    let d = ask::fetch_draft(src, prompt)?;
+    let nodes = ask::parse_tree(&d)?;
+    ask::validate_nodes(&nodes)
+}
+
+fn report_diff(a: &[(ask::NodeSpec, gen::Gen)], b: Option<&[(ask::NodeSpec, gen::Gen)]>) {
+    match b {
+        Some(b) => {
+            let diff = ask::draft_diff(&ask::normalize_tree(a), &ask::normalize_tree(b));
+            if diff.is_empty() {
+                println!("differential: drafts agree on signatures");
+            } else {
+                println!("differential: DRAFTS DISAGREE\n{}", diff);
+            }
+        }
+        None => println!("differential: skipped (no usable second draft)"),
+    }
+}
+
+fn repair_node(src: &SpecSource, prompt: &str, filename: &str, failure_tail: &str) -> Option<String> {
+    let rp = format!(
+        "{prompt}\n\nYOUR FILE {f} FAILED VALIDATION OR SOLVE:\n{tail}\n\n\
+         Re-emit ONLY that file, corrected, in the same === file: === block format.",
+        prompt = prompt,
+        f = filename,
+        tail = failure_tail
+    );
+    let raw = ask::fetch_draft(src, &rp).ok()?;
+    let nodes = ask::parse_tree(&raw).ok()?;
+    let text = nodes.into_iter().find(|n| n.filename == filename)?.text;
+    ask::validate_nodes(&[ask::NodeSpec {
+        filename: filename.to_string(),
+        text: text.clone(),
+    }])
+    .ok()?;
+    Some(text)
+}
+
+fn print_gate_table(nodes: &[(ask::NodeSpec, gen::Gen)]) {
+    println!("\nPROPOSED TREE ({} files):", nodes.len());
+    for (spec, g) in nodes {
+        let params: Vec<String> =
+            g.params.iter().map(|(n, t)| format!("%{}: {}", n, t.name())).collect();
+        println!(
+            "  {:<22} {}({}) -> {}   uses:[{}]  ex={} inv={}",
+            spec.filename,
+            g.path,
+            params.join(", "),
+            g.ret.name(),
+            g.deps.join(","),
+            g.transparent.len(),
+            g.invariants.len(),
+        );
+    }
+}
+
+fn spec_backend_label(src: &SpecSource) -> String {
+    match src {
+        SpecSource::File(p) => format!("file:{}", p),
+        SpecSource::Model(c) => c.backend.label().to_string(),
+    }
 }
