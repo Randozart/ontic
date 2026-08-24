@@ -268,7 +268,15 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             }
             Ok(if elem_ty == Ty::Int { Ty::ListInt } else { Ty::ListF64 })
         }
-        Expr::UnOp(UnOp::Neg, inner) => expect_ty(inner, env, &Ty::Int),
+        Expr::UnOp(UnOp::Neg, inner) => {
+            // Interp defines float negation (interp handles -f); Int-only
+            // here silently forced models through 0.0-x contortions.
+            let t = infer(inner, env)?;
+            match t {
+                Ty::Int | Ty::F64 => Ok(t),
+                other => Err(format!("neg on {}", other.name())),
+            }
+        }
         Expr::UnOp(UnOp::Not, inner) => expect_ty(inner, env, &Ty::Bool),
         Expr::If(c, t, f) => {
             expect_ty(c, env, &Ty::Bool)?;

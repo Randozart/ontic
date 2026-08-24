@@ -200,9 +200,13 @@ fn emit_expr(e: &Expr, em: &mut LlvmEmitter) -> Result<String, String> {
         ),
         Expr::UnOp(UnOp::Neg, inner) => {
             let x = emit_expr(inner, em)?;
-            let zero = em.const_i64(0);
             let r = em.fresh();
-            em.line(&format!("{} = sub i64 {}, {}", r, zero, x));
+            if expr_llvm_ty(inner, em)? == "double" {
+                em.line(&format!("{} = fneg double {}", r, x));
+            } else {
+                let zero = em.const_i64(0);
+                em.line(&format!("{} = sub i64 {}, {}", r, zero, x));
+            }
             Ok(r)
         }
         Expr::UnOp(UnOp::Not, inner) => {
@@ -400,9 +404,10 @@ fn emit_if(
 
     em.set_block(&merge);
     let result = em.fresh();
+    let phi_ty = expr_llvm_ty(t, em)?;
     em.line(&format!(
-        "{} = phi i64 [ {}, %{} ], [ {}, %{} ]",
-        result, tv, then_lbl, fv, else_lbl
+        "{} = phi {} [ {}, %{} ], [ {}, %{} ]",
+        result, phi_ty, tv, then_lbl, fv, else_lbl
     ));
     Ok(result)
 }

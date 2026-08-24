@@ -1,0 +1,8 @@
+wrapping
+fn Splat.alpha_at(%ca: F64, %cb: F64, %cc: F64, %dx: F64, %dy: F64, %op: F64) -> F64
+  | %op >= 0.0
+  | %op <= 1.0
+  hint "power = -0.5 * (ca*dx*dx + cc*dy*dy) - cb*dx*dy; result = op * exp(power) capped at 0.99 via an if expression"
+  => 1.0, 0.0, 1.0, 0.0, 0.0, 1.0 -> 1.0 ± 1e-12
+  => 1.0, 0.0, 1.0, 1.0, 0.0, 1.0 -> 0.6065306597126334 ± 1e-9
+  ?? 2.0, 0.0, 2.0, 2.0, 2.0, 1.0 -> 0.00033546262790251185 ± 1e-12

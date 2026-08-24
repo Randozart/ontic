@@ -511,3 +511,16 @@ nested-iteration wall is down. Library now compounds via vault deps.
 - Lesson recorded: when many correct-looking candidates die at S3 against
   one example, suspect the example. The sieve defends contracts even
   against their authors.
+
+### 2026-08-23 15:50 — Float negation fixed; Splat.alpha_at (3DGS) forge-solved
+- Checker gap: plain-path `infer` required Int for unary minus while the
+  dep-aware path allowed F64 — models were forced through `0.0-x`
+  contortions. Both paths now accept Int|F64 (interp already handled it).
+- Lowerers aligned (Golden Rule 6): MLIR emits arith.negf for F64 neg;
+  direct LLVM emits fneg; emit_if phi no longer hardcoded i64.
+- Splat.alpha_at vaulted via forge: power = -0.5*(ca*dx²+cc*dy²) - cb*dx*dy,
+  alpha = op*exp(power) capped at 0.99. This is the core 3DGS EWA splat
+  weight — first real graphics-paper equation through the full pipeline.
+- Gauss.weight also vaulted (exp falloff kernel).
+- Sieve caught MY wrong held-out value in gauss draft (expected e^-0.5
+  where truth was e^-1): candidates were right, spec was wrong.

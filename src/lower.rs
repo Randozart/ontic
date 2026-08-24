@@ -363,9 +363,13 @@ fn emit_expr(
         }
         Expr::UnOp(crate::sketch::UnOp::Neg, inner) => {
             let x = emit_expr(inner, env, tyenv, em)?;
-            let z = em.const_i64(0);
             let r = em.fresh("neg");
-            em.line(&format!("{} = arith.subi {}, {} : i64", r, z, x));
+            if expr_ty(inner, tyenv) == Ty::F64 {
+                em.line(&format!("{} = arith.negf {} : f64", r, x));
+            } else {
+                let z = em.const_i64(0);
+                em.line(&format!("{} = arith.subi {}, {} : i64", r, z, x));
+            }
             Ok(r)
         }
         Expr::UnOp(crate::sketch::UnOp::Not, inner) => {
