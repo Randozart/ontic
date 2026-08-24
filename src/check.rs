@@ -122,6 +122,18 @@ fn infer_dep(
             scoped.insert(acc.clone(), init_ty.clone());
             expect_dep(body, &scoped, &init_ty, deps)
         }
+        Expr::Map { var, list, body } => {
+            let list_ty = infer_dep(list, env, deps)?;
+            let elem_ty = match list_ty {
+                Ty::ListInt => Ty::Int,
+                Ty::ListF64 => Ty::F64,
+                other => return Err(format!("map over {}", other.name())),
+            };
+            let mut scoped = env.clone();
+            scoped.insert(var.clone(), elem_ty);
+            let body_ty = infer_dep(body, &scoped, deps)?;
+            Ok(if matches!(body_ty, Ty::F64) { Ty::ListF64 } else { Ty::ListInt })
+        }
         Expr::If(c, t, f) => {
             expect_ty_in(c, env, &Ty::Bool)?;
             let tt = infer_dep(t, env, deps)?;
@@ -221,6 +233,9 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             let t = infer(inner, env)?;
             builtin_ty(*b, t)
         }
+        Expr::Map { var: _, .. } => Err(
+            "map requires declared `use` dependency context".to_string()
+        ),
         Expr::Builtin2(b, l, r) => infer_builtin2(*b, l, r, env),
         Expr::ListCons(elems) => {
             if elems.is_empty() {

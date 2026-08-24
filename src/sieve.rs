@@ -380,6 +380,7 @@ pub fn ast_size(e: &Expr) -> usize {
         Expr::Builtin(_, i) | Expr::UnOp(_, i) => ast_size(i),
         Expr::ListCons(elems) => 1 + elems.iter().map(ast_size).sum::<usize>(),
         Expr::Builtin2(_, a, b) => ast_size(a) + ast_size(b),
+        Expr::Map { var: _, list, body } => 1 + ast_size(list) + ast_size(body),
         Expr::Call(_, args) => {
             1 + args.iter().map(ast_size).sum::<usize>()
         }

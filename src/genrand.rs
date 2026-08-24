@@ -191,6 +191,10 @@ pub fn render(e: &Expr) -> String {
             let inner: Vec<String> = elems.iter().map(render).collect();
             format!("[{}]", inner.join(", "))
         }
+        Map { var, list, body } => format!(
+            "map(%{} in {}) {{ {} }}",
+            var, render(list), render(body)
+        ),
         Call(p, args) => {
             let as_: Vec<String> = args.iter().map(render).collect();
             format!("{}({})", p, as_.join(", "))

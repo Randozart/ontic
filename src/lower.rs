@@ -73,6 +73,12 @@ pub fn expr_display(e: &Expr) -> String {
             expr_display(l),
             expr_display(r)
         ),
+        Expr::Map { var, list, body } => format!(
+            "map(%{} in {}) {{ {} }}",
+            var,
+            expr_display(list),
+            expr_display(body)
+        ),
         Expr::UnOp(crate::sketch::UnOp::Neg, i) => format!("(-{})", expr_display(i)),
         Expr::UnOp(crate::sketch::UnOp::Not, i) => format!("!{}", expr_display(i)),
         Expr::If(c, t, f) => format!(
@@ -314,6 +320,9 @@ fn emit_expr(
         Expr::Builtin(b, inner) => emit_builtin(*b, inner, env, tyenv, em),
         Expr::Builtin2(crate::sketch::Builtin::Index, l, r) => {
             emit_index(l, r, env, tyenv, em)
+        }
+        Expr::Map { var, list, body } => {
+            emit_map(var, list, body, env, tyenv, em)
         }
         Expr::Builtin2(b, _, _) => Err(format!(
             "lowering: builtin {:?} is unary",
@@ -792,6 +801,69 @@ fn emit_concat(
     Ok(alloc)
 }
 
+
+/// Emit a map transform: alloc result memref at same dim, scf.for loop
+/// evaluating body per element and storing. Element type from body's
+/// static inference.
+#[allow(clippy::too_many_arguments)]
+fn emit_map(
+    var: &str,
+    list: &Expr,
+    body: &Expr,
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let m = emit_expr(list, env, tyenv, em)?;
+    let elem_is_f64 = matches!(list, Expr::Var(n) if matches!(tyenv.get(n), Some(Ty::ListF64)))
+        || matches!(expr_ty(list, tyenv), Ty::ListF64);
+    let mty_in_str = if elem_is_f64 { "memref<?xf64>" } else { "memref<?xi64>" };
+
+    let idx0 = em.const_index(0);
+    let step = em.const_index(1);
+    let dim = em.fresh("mdim");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim, m, idx0, mty_in_str
+    ));
+
+    let out_ty = if matches!(expr_ty(body, tyenv), Ty::F64) { "f64" } else { "i64" };
+    let out_mty = if out_ty == "f64" { "memref<?xf64>" } else { "memref<?xi64>" };
+
+    let alloc = em.fresh("mout");
+    em.line(&format!(
+        "{} = memref.alloc({}) : {}",
+        alloc, dim, out_mty
+    ));
+
+    let iv = em.fresh("mi");
+    let accp = em.fresh("mac");
+    em.line(&format!(
+        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (index) {{",
+        accp, iv, idx0, dim, step, accp, idx0
+    ));
+    em.indent += 1;
+
+    let elem = em.fresh("me");
+    em.line(&format!(
+        "{} = memref.load {}[{}] : {}",
+        elem, m, iv, mty_in_str
+    ));
+    env.push(Binding { name: var.to_string(), ssa: elem });
+    tyenv.insert(var.to_string(), if elem_is_f64 { Ty::F64 } else { Ty::Int });
+
+    let body_v = emit_expr(body, env, tyenv, em)?;
+    em.line(&format!(
+        "memref.store {}, {}[{}] : {}",
+        body_v, alloc, iv, out_mty
+    ));
+    em.line(&format!("scf.yield {} : index", accp));
+    em.indent -= 1;
+    em.line("}");
+
+    Ok(alloc)
+}
+
 fn emit_if(
     c: &Expr,
     t: &Expr,
@@ -1069,6 +1141,10 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
             }
         }
         Expr::Builtin2(..) => Ty::Int,
+        Expr::Map { body, .. } => match expr_ty(body, tyenv) {
+            Ty::F64 => Ty::ListF64,
+            _ => Ty::ListInt,
+        },
         Expr::ListCons(_) => Ty::ListInt, // refined by caller via tyenv
         Expr::Builtin(b, inner) => match b {
             Builtin::Len => Ty::Int,

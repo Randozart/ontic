@@ -85,6 +85,13 @@ pub enum Expr {
     Builtin(Builtin, Box<Expr>),
     /// Binary builtins: Index(list, pos).
     Builtin2(Builtin, Box<Expr>, Box<Expr>),
+    /// Map transform: binds %var to each element of list, evaluates body.
+    /// Result is always a List of the same length as the input.
+    Map {
+        var: String,
+        list: Box<Expr>,
+        body: Box<Expr>,
+    },
     /// Expression-list constructor: [e1, e2, ...]. Elements may be any expr;
     /// typechecker enforces uniform element type. Distinct from ListLit/
     /// FloatListLit (pure literals) for backward compat.
@@ -237,7 +244,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
             let is_keyword = matches!(
                 &src[start..j],
                 "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log"
-                    | "abs" | "fold" | "let" | "if" | "else" | "true"
+                    | "abs" | "map" | "fold" | "let" | "if" | "else" | "true"
                     | "false" | "in" | "from" | "Int" | "F64" | "Bool"
                     | "List" | "fn" | "index" | "range"
             );
@@ -290,6 +297,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "true" => Some("true"),
                 "false" => Some("false"),
                 "len" => Some("len"),
+                "map" => Some("map"),
                 "index" => Some("index"),
                 "range" => Some("range"),
                 "sum" => Some("sum"),
@@ -730,6 +738,7 @@ impl Parser {
                     None => Ok(Expr::Builtin(op, Box::new(e))),
                 }
             }
+            Some(Tok::Word("map")) => self.parse_map(),
             Some(Tok::Word("fold")) => self.parse_fold(),
             other => {
                 let _ = other;
@@ -742,6 +751,24 @@ impl Parser {
     }
 
     /// `fold %v in <list-expr>, %acc from <init-expr> { <body-expr> }`
+    /// `map(%v in <list-expr>) { <body-expr> }`
+    fn parse_map(&mut self) -> Result<Expr, ParseError> {
+        self.eat_word("map")?;
+        self.eat_sym("(")?;
+        let var = self.eat_pident()?;
+        self.eat_word("in")?;
+        let list = self.parse_expr()?;
+        self.eat_sym(")")?;
+        self.eat_sym("{")?;
+        let body = self.parse_expr()?;
+        self.eat_sym("}")?;
+        Ok(Expr::Map {
+            var,
+            list: Box::new(list),
+            body: Box::new(body),
+        })
+    }
+
     fn parse_fold(&mut self) -> Result<Expr, ParseError> {
         self.eat_word("fold")?;
         let var = self.eat_pident()?;
@@ -824,7 +851,7 @@ cpath       ::= ident ("." ident)*
 callargs    ::= e (ws "," ws e)*
 unop1       ::= "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs" | "range"
 binop1      ::= "index"
-prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | binop1 ws "(" ws e ws "," ws e ws ")" | callx | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | binop1 ws "(" ws e ws "," ws e ws ")" | callx | "map" ws pid ws "in" ws e ws "{" ws e ws "}" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
 pid         ::= "%" [a-zA-Z_] [a-zA-Z0-9_]*
 listlit     ::= "[" ws "]" | "[" ws int (ws "," ws int)* ws "]"
 int         ::= "-"? [0-9]+

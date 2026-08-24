@@ -113,6 +113,10 @@ fn walk(e: &Expr, leaked: &HashSet<i64>, st: &mut Stats) {
         Expr::ListCons(elems) => {
             for e in elems { walk(e, leaked, st); }
         }
+        Expr::Map { var: _, list, body } => {
+            walk(list, leaked, st);
+            walk(body, leaked, st);
+        }
         Expr::Call(_, args) => {
             st.has_len = true;
             for a in args {
@@ -176,6 +180,10 @@ fn mentions_var(e: &Expr) -> bool {
         Expr::UnOp(_, i) => mentions_var(i),
         Expr::Builtin(_, i) => mentions_var(i),
         Expr::Builtin2(_, a, b) => mentions_var(a) || mentions_var(b),
+        Expr::Map { var, list, body } => {
+            let _ = var;
+            mentions_var(list) || mentions_var(body)
+        }
         Expr::ListCons(elems) => elems.iter().any(mentions_var),
         Expr::Call(_, args) => args.iter().any(mentions_var),
         Expr::If(c, t, f) => mentions_var(c) || mentions_var(t) || mentions_var(f),

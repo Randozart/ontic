@@ -402,6 +402,37 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
         Expr::FloatListLit(items) => Ok(Value::FloatList(items.clone())),
         Expr::Builtin(b, inner) => eval_builtin(*b, inner, env, ctx),
         Expr::Builtin2(b, l, r) => eval_builtin2(*b, l, r, env, ctx),
+        Expr::Map { var, list, body } => {
+            let items = match eval_ctx(list, env, ctx)? {
+                Value::List(vs) => vs.into_iter().map(Value::Int).collect::<Vec<_>>(),
+                Value::FloatList(vs) => vs.into_iter().map(Value::Float).collect::<Vec<_>>(),
+                other => return Err(EvalError::TypeError(format!("map over {}", other))),
+            };
+            let results: Result<Vec<Value>, EvalError> = items
+                .iter()
+                .map(|item| {
+                    let mut scoped = env.clone();
+                    scoped.insert(var.clone(), item.clone());
+                    eval_ctx(body, &scoped, ctx)
+                })
+                .collect();
+            let vals = results?;
+            let any_f = vals.iter().any(|v| matches!(v, Value::Float(_)));
+            if any_f {
+                let floats: Vec<f64> = vals.iter().filter_map(|v| match v {
+                    Value::Int(i) => Some(*i as f64),
+                    Value::Float(f) => Some(*f),
+                    _ => None,
+                }).collect();
+                Ok(Value::FloatList(floats))
+            } else {
+                let ints: Vec<i64> = vals.iter().filter_map(|v| match v {
+                    Value::Int(i) => Some(*i),
+                    _ => None,
+                }).collect();
+                Ok(Value::List(ints))
+            }
+        }
         Expr::ListCons(elems) => {
             let vals: Result<Vec<Value>, EvalError> = elems
                 .iter()
