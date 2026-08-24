@@ -31,6 +31,10 @@ pub fn expr_display(e: &Expr) -> String {
         Expr::IntLit(v) => v.to_string(),
         Expr::FloatLit(v) => format!("{:e}", v),
         Expr::BoolLit(b) => b.to_string(),
+        Expr::ListCons(elems) => format!(
+            "[{}]",
+            elems.iter().map(expr_display).collect::<Vec<_>>().join(", ")
+        ),
         Expr::Call(p, args) => format!(
             "{}({})",
             p,
@@ -314,6 +318,39 @@ fn emit_expr(
             "lowering: builtin {:?} is unary",
             b
         )),
+        Expr::ListCons(elems) => {
+            // Allocate result memref, evaluate each element, store.
+            let elem_f = elems.iter().any(|e| matches!(e, Expr::FloatLit(_)))
+                || matches!(
+                    expr_ty(&Expr::ListCons(elems.clone()), tyenv),
+                    Ty::ListF64
+                );
+            let mty = if elem_f { "memref<?xf64>" } else { "memref<?xi64>" };
+            let _ety = if elem_f { "f64" } else { "i64" };
+            let count = em.const_index(elems.len());
+            let alloc = em.fresh("lc");
+            em.line(&format!("{} = memref.alloc({}) : {}", alloc, count, mty));
+            for (i, e) in elems.iter().enumerate() {
+                let v = emit_expr(e, env, tyenv, em)?;
+                let v2 = if elem_f && !matches!(e, Expr::FloatLit(_)) {
+                    // Widen int-typed sub-expressions to f64.
+                    let w = em.fresh("widen");
+                    em.line(&format!(
+                        "{} = arith.sitofp {} : i64 to f64",
+                        w, v
+                    ));
+                    w
+                } else {
+                    v
+                };
+                let ix = em.const_index(i);
+                em.line(&format!(
+                    "memref.store {}, {}[{}] : {}",
+                    v2, alloc, ix, mty
+                ));
+            }
+            Ok(alloc)
+        }
         Expr::UnOp(crate::sketch::UnOp::Neg, inner) => {
             let x = emit_expr(inner, env, tyenv, em)?;
             let z = em.const_i64(0);
@@ -940,6 +977,7 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
             }
         }
         Expr::Builtin2(..) => Ty::Int,
+        Expr::ListCons(_) => Ty::ListInt, // refined by caller via tyenv
         Expr::Builtin(b, inner) => match b {
             Builtin::Len => Ty::Int,
             Builtin::Range => Ty::ListInt,

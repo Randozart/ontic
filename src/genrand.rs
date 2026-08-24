@@ -187,6 +187,10 @@ pub fn render(e: &Expr) -> String {
             "fold %{} in {}, %{} from {} {{ {} }}",
             var, render(list), acc, render(init), render(body)
         ),
+        ListCons(elems) => {
+            let inner: Vec<String> = elems.iter().map(render).collect();
+            format!("[{}]", inner.join(", "))
+        }
         Call(p, args) => {
             let as_: Vec<String> = args.iter().map(render).collect();
             format!("{}({})", p, as_.join(", "))

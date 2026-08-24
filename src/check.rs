@@ -221,6 +221,28 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             builtin_ty(*b, t)
         }
         Expr::Builtin2(b, l, r) => infer_builtin2(*b, l, r, env),
+        Expr::ListCons(elems) => {
+            if elems.is_empty() {
+                return Ok(Ty::ListInt); // empty list defaults to Int
+            }
+            let first = infer(&elems[0], env)?;
+            let elem_ty = match first {
+                Ty::Int | Ty::F64 => first,
+                other => return Err(format!("list-cons element {}", other.name())),
+            };
+            for e in &elems[1..] {
+                let t = infer(e, env)?;
+                match (t.clone(), elem_ty.clone()) {
+                    (Ty::Int, Ty::F64) | (Ty::F64, Ty::Int) | (Ty::F64, Ty::F64) => {}
+                    (Ty::Int, Ty::Int) => {}
+                    _ => return Err(format!(
+                        "list-cons type mismatch: {} vs {}",
+                        t.name(), elem_ty.name()
+                    )),
+                }
+            }
+            Ok(if elem_ty == Ty::Int { Ty::ListInt } else { Ty::ListF64 })
+        }
         Expr::UnOp(UnOp::Neg, inner) => expect_ty(inner, env, &Ty::Int),
         Expr::UnOp(UnOp::Not, inner) => expect_ty(inner, env, &Ty::Bool),
         Expr::If(c, t, f) => {
@@ -400,10 +422,10 @@ mod tests {
     }
 
     #[test]
-    fn test_fold_element_must_be_int_use() {
-        let c = sketch::parse("fn @t(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { %acc + len([%x]) } }").unwrap_err();
-        // len() takes an expression; [%x] is not valid syntax — parse must fail.
-        assert!(matches!(c, crate::sketch::ParseError { .. }));
+    fn test_expression_list_parses_and_typechecks() {
+        // With ListCons support, [%x] parses and typechecks.
+        let c = sketch::parse("fn @t(%items: List<Int>) -> Int { len([1, 2]) }").unwrap();
+        assert!(check(&c).is_ok());
     }
 
     #[test]

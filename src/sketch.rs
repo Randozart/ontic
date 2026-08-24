@@ -83,6 +83,10 @@ pub enum Expr {
     Builtin(Builtin, Box<Expr>),
     /// Binary builtins: Index(list, pos).
     Builtin2(Builtin, Box<Expr>, Box<Expr>),
+    /// Expression-list constructor: [e1, e2, ...]. Elements may be any expr;
+    /// typechecker enforces uniform element type. Distinct from ListLit/
+    /// FloatListLit (pure literals) for backward compat.
+    ListCons(Vec<Expr>),
     /// Vault dependency call: Path.name(arg, ...). Validated against the
     /// gen's declared `use` deps; executed from the vault at sieve time.
     Call(String, Vec<Expr>),
@@ -637,39 +641,40 @@ impl Parser {
             }
             Some(Tok::Sym("[")) => {
                 self.pos += 1;
-                let mut ints: Vec<i64> = Vec::new();
-                let mut floats: Vec<f64> = Vec::new();
-                let mut is_float = false;
+                let mut elems: Vec<Expr> = Vec::new();
                 if !matches!(self.peek(), Some(Tok::Sym("]"))) {
                     loop {
-                        match self.peek().cloned() {
-                            Some(Tok::Int(v)) => {
-                                ints.push(v);
-                                floats.push(v as f64);
-                                self.pos += 1;
-                            }
-                            Some(Tok::Float(v)) => {
-                                is_float = true;
-                                floats.push(v);
-                                self.pos += 1;
-                            }
-                            _ => return Err(err(self.offset(), "list literal: expected number")),
-                        }
+                        elems.push(self.parse_expr()?);
                         match self.peek() {
-                            Some(Tok::Sym(",")) => {
-                                self.pos += 1;
-                            }
+                            Some(Tok::Sym(",")) => { self.pos += 1; }
                             _ => break,
                         }
                     }
                 }
                 self.eat_sym("]")?;
-                if is_float {
-                    Ok(Expr::FloatListLit(floats))
+                // Backward-compat: pure-int lists stay ListLit,
+                // mixed int+float literal lists become FloatListLit,
+                // anything with expressions becomes ListCons.
+                let all_int = elems.iter().all(|e| matches!(e, Expr::IntLit(_)));
+                let all_num = elems.iter().all(|e| matches!(e, Expr::IntLit(_) | Expr::FloatLit(_)));
+                let any_f = elems.iter().any(|e| matches!(e, Expr::FloatLit(_)));
+                if all_int {
+                    let items: Vec<i64> = elems.iter().filter_map(|e| {
+                        if let Expr::IntLit(v) = e { Some(*v) } else { None }
+                    }).collect();
+                    Ok(Expr::ListLit(items))
+                } else if all_num && any_f {
+                    let items: Vec<f64> = elems.iter().filter_map(|e| match e {
+                        Expr::FloatLit(v) => Some(*v),
+                        Expr::IntLit(v) => Some(*v as f64),
+                        _ => None,
+                    }).collect();
+                    Ok(Expr::FloatListLit(items))
                 } else {
-                    Ok(Expr::ListLit(ints))
+                    Ok(Expr::ListCons(elems))
                 }
             }
+
             Some(Tok::Sym("(")) => {
                 self.pos += 1;
                 let e = self.parse_expr()?;

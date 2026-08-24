@@ -374,6 +374,28 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
         Expr::FloatListLit(items) => Ok(Value::FloatList(items.clone())),
         Expr::Builtin(b, inner) => eval_builtin(*b, inner, env, ctx),
         Expr::Builtin2(b, l, r) => eval_builtin2(*b, l, r, env, ctx),
+        Expr::ListCons(elems) => {
+            let vals: Result<Vec<Value>, EvalError> = elems
+                .iter()
+                .map(|e| eval_ctx(e, env, ctx))
+                .collect();
+            let vals = vals?;
+            let any_f = vals.iter().any(|v| matches!(v, Value::Float(_)));
+            if any_f {
+                let floats: Vec<f64> = vals.iter().filter_map(|v| match v {
+                    Value::Int(i) => Some(*i as f64),
+                    Value::Float(f) => Some(*f),
+                    _ => None,
+                }).collect();
+                Ok(Value::FloatList(floats))
+            } else {
+                let ints: Vec<i64> = vals.iter().filter_map(|v| match v {
+                    Value::Int(i) => Some(*i),
+                    _ => None,
+                }).collect();
+                Ok(Value::List(ints))
+            }
+        }
         Expr::Call(p, args) => eval_call(p, args, env, ctx),
         Expr::UnOp(UnOp::Neg, inner) => {
             let inner_v = eval_ctx(inner, env, ctx)?;
