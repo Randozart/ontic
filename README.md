@@ -6,79 +6,106 @@
 
 **A DSL whose products are verified native libraries.**
 
-Write a specification (`.ont`) — signatures, invariants, example evidence.
-A local transformer proposes implementations. A deterministic seven-stage
-sieve proves them against your evidence. The output: a shared library + C
-header that Python, C, C++, Rust — anything with an FFI — consumes at
-native speed.
-
-```python
-import pyous as po
-
-rms = po.gen("""
-  fn Stats.rms(%xs: List<F64>) -> F64
-    | %res >= 0.0
-    => [2.0, 8.0] -> 5.830951894845301 ± 1e-9
-""", tier="wrapping")
-
-rms([2.0, 8.0])   # → 5.830951894845301 at native speed
-```
-
-## THE WALL
-
-> **The transformer generates candidates. Everything else is deterministic
-> Rust.** The model proposes; it never validates, ranks, or decides.
-
-Trust scales with sieve strength, not model strength. Every capability gain
-came from verifier work while the model stayed frozen.
+You write a specification. A local transformer proposes implementations.
+A deterministic seven-stage sieve proves them against your evidence.
+What survives is machine code you can call from any language.
 
 ---
 
-## Two file formats
+## Writing gens
 
-| | `.ont` — Source Spec | `.ous` — Kernel Bundle |
-|---|---|---|
-| **What** | Human-written specification: signatures, invariants, evidence | Machine-produced verified artifact: manifest + sketch + MLIR + object + header |
-| **Who writes it** | You | The compiler (after forge + sieve pass) |
-| **Editable** | Yes — this is where you make changes | No — immutable build output; edit `.ont` and re-solve instead |
-| **Portable** | Needs Ontic installed to process | Self-contained: unpack + link + call on any machine with a C compiler |
-| **Contains** | `fn` signatures, `\|` invariants, `=>` transparent evidence, `??` opaque evidence, hints, tier declarations | Manifest JSON, sketch source, MLIR text, LLVM object code, C header |
+A gen is a specification: signature, invariants, evidence. You never write
+implementation code — the transformer proposes candidates and the sieve
+discards everything that doesn't hold up.
 
-### `.ont` example
+### A reduction
 
-```
-wrapping
+```ont
 fn Stats.rms(%xs: List<F64>) -> F64
   | %res >= 0.0
   hint "root mean square: sqrt(sum(x*x)/len)"
   => [2.0, 8.0] -> 5.830951894845301 ± 1e-9
+  => [1.0, 0.0] -> 1.0 ± 1e-9
   ?? [3.0] -> 1.7320508075688772 ± 1e-12
 ```
 
-- `wrapping` — overflow semantics tier (see below)
-- `| %res >= ...` — invariant: guides forge AND bounds probe oracle
-- `=> [2,8] -> 5.83` — **transparent** evidence: forge sees this
-- `?? [3] -> 1.73` — **opaque** evidence: held out; overfit killer
+| Marker | Meaning |
+|--------|---------|
+| `wrapping` | overflow tier: mod 2^64, bit-exact interp↔native |
+| `\|%res >= 0` | invariant: guides forge AND bounds probe oracle |
+| `=> [2,8] -> 5.83 ± tol` | **transparent** evidence: forge sees this |
+| `?? [3] -> 1.73 ± tol` | **opaque** evidence: held out; overfit killer |
+| `hint "..."` | author guidance for the forge (advice, never evidence) |
 
-### `.ous` lifecycle
+### A list transform
+
+```ont
+wrapping
+fn Transform.translate_scale(%pts: List<F64>, %s: F64, %off: F64) -> List<F64>
+  hint "scale then translate: map(%v in %pts) { %v * %s + %off }"
+  => [1.0, 2.0], 2.0, 10.0 -> [12.0, 14.0]
+  => [3.0], 1.0, 0.0 -> [3.0] ± 0
+  ?? [0.0, 0.0], 1.0, 7.0 -> [7.0, 7.0] ± 1e-9
+```
+
+### A matrix operation
+
+```ont
+wrapping
+fn Linalg.matvec(%mat: List<F64>, %vec: List<F64>) -> List<F64>
+  hint "row-major NxN; use map over row indices, inner fold per row"
+  => [1.0, 0.0, 0.0, 1.0], [3.0, 7.0] -> [3.0, 7.0] ± 1e-12
+  => [2.0, 0.0, 0.0, 3.0], [1.0, 1.0] -> [2.0, 3.0] ± 1e-12
+  ?? [1.0, 2.0, 3.0, 4.0], [1.0, 1.0] -> [3.0, 7.0] ± 1e-12
+```
+
+### What happens when you solve
+
+```bash
+ontic solve stats.ont --sampler-backend gemini --samples 8
+```
 
 ```
-ontic pack Stats.mean -o stats.ous     # bundle from vault
-# ship stats.ous anywhere
-ontic unpack stats.ous -d ./lib        # extract .so + .h
-gcc my_app.c -L./lib -lmean -o app     # link and call
+forge     : 8 candidates proposed by Gemini flash-lite under GBNF constraints
+S1 parse  : grammar-constrained sketch accepted
+S2 types  : typechecker validates body against signature
+S3 visible: transparent evidence matches exactly (± tolerance)
+S4 hidden : opaque evidence matches — overfit rejected
+S5 probes : 256+ random inputs checked against invariants
+S6 shape  : constant-guard ratio below threshold — no memorization
+S7 bench  : compiled performance ranking among survivors
+
+VAULTED Stats.rms (b388bfeb...)
+HEADER  : .ontic/vault/rms-b388bfeb.h
+LIB     : .ontic/vault/librms-b388bfeb.so
+OUS     : .ontic/vault/rms-b388bfeb.ous
 ```
+
+Three artifacts produced per solved gen: C header, shared library, and a
+single-file `.ous` bundle containing everything needed to use the kernel
+without Ontic installed.
 
 ---
 
-## PyOus — Python bridge
+## Consuming verified kernels
+
+### From C
+
+```c
+#include "rms-b388bfeb.h"    /* double rms(void*a, void*b, long o, long s, long st); */
+
+double buf[2] = {2.0, 8.0};
+double result = rms(buf, buf, 0, 2, 1);   /* → 5.831 */
+```
+
+### From Python
 
 [`pip install pyous`](https://pypi.org/project/pyous/)
 
 PyOus loads `.ous` kernels into Python via ctypes with zero-copy numpy
 support. Three API levels, all producing the same native callables.
 
-### Level 1 — Typed builder
+#### Typed builder
 
 ```python
 import pyous as po
@@ -96,10 +123,10 @@ rms = po.define(
         ([3.0], 1.7320508075688772),
     ],
 )
-rms([2.0, 8.0])  # → native speed
+rms([2.0, 8.0])  # → 5.830951894845301 at native speed
 ```
 
-### Level 2 — Decorator
+#### Decorator
 
 ```python
 @po.kernel(tier="wrapping", evidence=[([21], 42)])
@@ -110,7 +137,7 @@ def twice(n: int) -> int:
 Type hints auto-map (`float→F64`, `list[float]→List<F64>`). Docstring
 becomes forge guidance. Body is documentation only — never executed.
 
-### Level 3 — Pure data
+#### Pure data
 
 ```python
 rms = po.gen({
@@ -127,39 +154,27 @@ rms = po.gen({
 
 Cold genesis (forge → sieve → compile) costs seconds to minutes depending
 on sampler. Warm cache hits bind in microseconds. Every kernel persists in
-the vault — solve once, use forever. Ship `.ous` files to colleagues without
-Ontic installed.
+the vault — solve once, use forever.
 
 ---
 
-## Sieve pipeline
+## THE WALL
 
-Every candidate passes through seven deterministic stages:
+> **The transformer generates candidates. Everything else is deterministic
+> Rust.** The model proposes; it never validates, ranks, or decides.
 
-| Stage | Check | Kill condition |
-|-------|-------|---------------|
-| S1 parse | grammar-constrained sketch | malformed |
-| S2 well-formed | typechecker | type error |
-| S3 transparent | visible examples | wrong output |
-| S4 held-out | hidden examples | **overfit** |
-| S5 probes | random inputs ∩ invariants | violation / runtime error |
-| S6 shape | constant-guard ratio + table scan | memorization structure |
-| S7 bench | compiled performance ranking | tiebreak only |
-
-Overfit rejection is behavioral (S4+S5) AND structural (S6). Neither alone
-is sufficient.
+Trust scales with sieve strength, not model strength. Every capability gain
+came from verifier work while the model stayed frozen.
 
 ## Overflow tiers
 
 | Tier | Syntax | Semantics |
 |------|--------|-----------|
-| wrapping | `wrapping` line in gen | mod 2^64; bit-exact interp↔native; LLVM free to optimize |
+| wrapping | `wrapping` line | mod 2^64; bit-exact interp↔native; LLVM free to optimize |
 | checked *(default)* | absent | overflow kills candidates in sieve; traps natively |
 | proven *(M3)* | automatic | Z3 absence proof ⇒ flag-free codegen |
 
-Speed requires declaration (Golden Rule 16).
-
----
+Speed requires declaration.
 
 ## Setup
 
@@ -170,20 +185,6 @@ git clone https://github.com/Randozart/ontic.git
 cd ontic
 cargo build --release
 cargo test --lib
-
-# Install pyous bridge
-cd pyous_pkg && pip install -e . && cd ..
-
-# Solve a gen from spec
-./target/release/ontic solve examples/stats-mean.ont \
-  --sampler-backend gemini --samples 8
-
-# Call from Python
-python3 -c "
-import pyous as po
-mean = po.load('.ontic/vault', 'Stats.mean')
-print(mean([1.0, 2.0, 3.0]))
-"
 ```
 
 Environment variables:
@@ -193,7 +194,7 @@ Environment variables:
 | `ONTIC_BIN` | Path to ontic binary | PATH lookup |
 | `ONTIC_VAULT` | Vault directory | `.ontic/vault` |
 | `ONTIC_FORGE` | llama-server endpoint | `127.0.0.1:8279` |
-| `ONTIC_SAMPLER` | Backend: llama/openai/gemini | `llama` |
+| `ONTIC_SAMPLER` | Backend: llama/openai/gemini/uniform | `llama` |
 | `ONTIC_MODEL` | Model name (cloud) | varies by provider |
 | `GEMINI_API_KEY` | Gemini API key | required for cloud |
 | `ONTIC_MLIR_BIN` | LLVM toolchain directory | `/usr/lib/llvm-18/bin` |
@@ -201,5 +202,4 @@ Environment variables:
 
 ## License
 
-[Apache 2.0 WITH LLVM-exception](LICENSE) — compiled output exempt from
-source distribution requirements.
+[Apache 2.0 WITH LLVM-exception](LICENSE)
