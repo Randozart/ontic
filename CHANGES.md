@@ -548,3 +548,20 @@ nested-iteration wall is down. Library now compounds via vault deps.
 - Pipeline note: the mlir-opt validation step caught invalid IR before it
   could ship — deterministic gates catching compiler bugs is the system
   working as designed.
+
+### 2026-08-23 18:40 — P1 complete: depth-3 native composition (PG1)
+- emit_call now supports memref-returning vault deps (list results flow
+  through native calls; callee allocates, caller binds).
+- emit_map out-type inferred with loop variable in scope (probe tyenv) —
+  bodies like `v * v` previously allocated i64 and stored f64.
+- compose_modules dedupes private decls across flat-closure modules
+  (ontic_trap redefinition rejected by mlir-opt).
+- mlir-translate no longer invoked with input==output path (segfault on
+  larger composites); staged via temp file + rename.
+- Chain.mv2 (uses Linalg.matvec) and Chain.energy (uses mv2 + matvec)
+  forge-solved, vaulted with header+lib, verified from Python. Runtime
+  call chain: energy → mv2 → matvec. Kill criterion 1 PASSED.
+
+Forge lessons: hints must use FULL dep paths (Chain.mv2 not mv2) and
+arithmetically-correct bodies — the sieve caught a double-square in my
+own hint text via S3 (2482 vs 58).

@@ -612,42 +612,38 @@ fn emit_call(
         prepared.push((widened, pt.clone()));
     }
 
-    match target.ret {
-        Ty::F64 => {
-            let mut parts = Vec::new();
-            for (ssa, pt) in &prepared {
-                match pt {
-                    Ty::ListF64 | Ty::ListInt => parts.push(format!(
-                        "{}: {}",
-                        ssa,
-                        if matches!(pt, Ty::ListF64) { "memref<?xf64>" } else { "memref<?xi64>" }
-                    )),
-                    Ty::F64 => parts.push(format!("{}: f64", ssa)),
-                    _ => parts.push(format!("{}: i64", ssa)),
-                }
-            }
-            let out = em.fresh("call");
-            // func.call type suffix lists PARAM TYPES only, never SSA names.
-            let param_tys: Vec<&str> = prepared
-                .iter()
-                .map(|(_, pt)| match pt {
-                    Ty::ListF64 => "memref<?xf64>",
-                    Ty::ListInt => "memref<?xi64>",
-                    Ty::F64 => "f64",
-                    _ => "i64",
-                })
-                .collect();
-            em.line(&format!(
-                "{} = func.call @{}({}) : ({}) -> f64",
-                out,
-                target.symbol,
-                prepared.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(", "),
-                param_tys.join(", ")
-            ));
-            Ok(out)
+    // Callee signature types for every parameter.
+    let param_tys: Vec<&str> = prepared
+        .iter()
+        .map(|(_, pt)| match pt {
+            Ty::ListF64 => "memref<?xf64>",
+            Ty::ListInt => "memref<?xi64>",
+            Ty::F64 => "f64",
+            _ => "i64",
+        })
+        .collect();
+    let ret_ty = match target.ret {
+        Ty::F64 => "f64",
+        Ty::ListF64 => "memref<?xf64>",
+        Ty::ListInt => "memref<?xi64>",
+        other => {
+            return Err(format!(
+                "lowering: dep call return {:?} unsupported",
+                other
+            ))
         }
-        _ => Err("lowering: only F64-returning dep calls supported".to_string()),
-    }
+    };
+    let out = em.fresh("call");
+    // func.call type suffix lists PARAM TYPES only, never SSA names.
+    em.line(&format!(
+        "{} = func.call @{}({}) : ({}) -> {}",
+        out,
+        target.symbol,
+        prepared.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(", "),
+        param_tys.join(", "),
+        ret_ty
+    ));
+    Ok(out)
 }
 
 
@@ -833,7 +829,13 @@ fn emit_map(
         dim, m, idx0, mty_in_str
     ));
 
-    let out_ty = if matches!(expr_ty(body, tyenv), Ty::F64) { "f64" } else { "i64" };
+    // Output element type must be inferred WITH the loop variable in scope:
+    // bodies like `v * v` reference the var, which is unbound until the loop
+    // header. Pre-binding bug stored f64 products into memref<?xi64>.
+    let mut probe = tyenv.clone();
+    let var_is_f64 = if elem_is_f64 { Ty::F64 } else { Ty::Int };
+    probe.insert(var.to_string(), var_is_f64);
+    let out_ty = if matches!(expr_ty(body, &probe), Ty::F64) { "f64" } else { "i64" };
     let out_mty = if out_ty == "f64" { "memref<?xf64>" } else { "memref<?xi64>" };
 
     let alloc = em.fresh("mout");
@@ -1555,6 +1557,7 @@ pub fn compose_modules(mlirs: &[String]) -> Result<String, String> {
         return Err("no modules to compose".to_string());
     }
     let mut out = String::from("module {\n");
+    let mut seen_private: std::collections::HashSet<String> = Default::default();
     for m in mlirs {
         let t = m.trim();
         let inner = t
@@ -1564,11 +1567,20 @@ pub fn compose_modules(mlirs: &[String]) -> Result<String, String> {
         // Dedent one level (our emitter uses two-space indent uniformly).
         for line in inner.lines() {
             let l = line.strip_prefix("  ").unwrap_or(line);
-            if !l.trim().is_empty() {
-                out.push_str("  ");
-                out.push_str(l);
-                out.push('\n');
+            if l.trim().is_empty() {
+                continue;
             }
+            // Private declarations repeat across dep modules (ontic_trap,
+            // shared deps in a flat closure). Keep the first, drop the rest.
+            if let Some(rest) = l.trim().strip_prefix("func.func private @") {
+                let sym = rest.split(['(', ':']).next().unwrap_or("").trim();
+                if !seen_private.insert(sym.to_string()) {
+                    continue;
+                }
+            }
+            out.push_str("  ");
+            out.push_str(l);
+            out.push('\n');
         }
     }
     out.push('}');
@@ -1587,6 +1599,21 @@ mod compose_tests {
         assert!(c.contains("func.func @a"));
         assert!(c.contains("func.func @b"));
         assert_eq!(c.matches("module {").count(), 1);
+    }
+
+    #[test]
+    fn test_compose_dedupes_private_decls() {
+        // Flat closures re-list shared deps; ontic_trap appears in every
+        // module. Duplicate private decls are invalid MLIR (redefinition).
+        let a = "module {\n  func.func private @ontic_trap() -> i64\n  func.func @a() -> i64 {\n    return 0 : i64\n  }\n}".to_string();
+        let b = "module {\n  func.func private @ontic_trap() -> i64\n  func.func @b() -> i64 {\n    return 0 : i64\n  }\n}".to_string();
+        let c = compose_modules(&[a, b]).unwrap();
+        assert_eq!(
+            c.matches("func.func private @ontic_trap").count(),
+            1,
+            "private decls must dedupe across modules:\n{}",
+            c
+        );
     }
 }
 

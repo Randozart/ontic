@@ -123,16 +123,20 @@ pub fn mlir_to_llvmir(mlir_path: &std::path::Path, out_ll: &std::path::Path) -> 
         ],
         "mlir-opt lowering to llvm dialect",
     )?;
+    // Translate must never read and write the same path — mlir-translate
+    // truncates lazily and segfaults on larger modules. Stage via temp file.
+    let tmp_ll = out_ll.with_extension("ll.tmp");
     run(
         &translate,
         &[
             "--mlir-to-llvmir",
             out_ll.to_str().ok_or("bad ll path")?,
             "-o",
-            out_ll.to_str().ok_or("bad ll path")?,
+            tmp_ll.to_str().ok_or("bad tmp ll path")?,
         ],
         "mlir-translate to textual LLVM IR",
     )?;
+    std::fs::rename(&tmp_ll, out_ll).map_err(|e| format!("rename {}: {}", tmp_ll.display(), e))?;
     // Middle-end: llc alone runs codegen only; clang-built references get
     // the full opt pipeline (unroll, reassociate, vectorize). Match that.
     let opt = find_tool("opt").unwrap_or_else(|| PathBuf::from("opt"));
