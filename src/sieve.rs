@@ -118,9 +118,39 @@ pub struct SieveReport {
 }
 
 /// Validate gen-level preconditions before any candidate is examined:
-/// invariants must typecheck against signature + `%res`.
+/// invariants must typecheck against signature + `%res`, and every example
+/// (transparent, opaque, auto-hidden) must satisfy the input-side invariants.
+/// An example outside the declared contract would silently kill every honest
+/// candidate — the spec is broken, not the code.
 pub fn validate_wish(gen: &Gen) -> Result<(), String> {
-    check::check_invariants(&gen.invariants, &gen.params, &gen.ret)
+    check::check_invariants(&gen.invariants, &gen.params, &gen.ret)?;
+    let ctx = interp::Ctx::checked();
+    for (label, ex) in gen
+        .transparent
+        .iter()
+        .map(|e| ("transparent", e))
+        .chain(gen.opaque.iter().map(|e| ("opaque", e)))
+    {
+        let env: interp::Env = gen
+            .params
+            .iter()
+            .zip(ex.inputs.iter())
+            .map(|((n, _), v)| (n.clone(), v.clone()))
+            .collect();
+        for inv in &gen.invariants {
+            match interp::eval_ctx(inv, &env, &ctx) {
+                Ok(Value::Bool(true)) => {}
+                Ok(Value::Bool(false)) => {
+                    return Err(format!(
+                        "gen {} example (output {:?}) violates invariant `{}` on inputs {:?}",
+                        label, ex.output, crate::lower::expr_display(inv), ex.inputs
+                    ))
+                }
+                _ => {} // res-referencing or non-Bool: typechecked already
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Run the full pipeline over labeled candidate texts.
@@ -535,6 +565,24 @@ fn Ledger.total(%items: List<Int>) -> Int
             &interp::DepMap::new()
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_example_violating_invariant_is_wish_error() {
+        // n=1 with a 2-element list contradicts len(%a) == %n * %n; the
+        // spec is broken and must fail validation, never kill candidates.
+        let w = gen::parse(
+            "fn s(%s: F64, %a: List<F64>, %n: Int) -> List<F64>\n  | %n > 0\n  | len(%a) == %n * %n\n  => 0.5, [4.0], 1 -> [2.0]\n",
+        )
+        .unwrap();
+        assert!(validate_wish(&w).is_ok());
+
+        let bad = gen::parse(
+            "fn s(%s: F64, %a: List<F64>, %n: Int) -> List<F64>\n  | %n > 0\n  | len(%a) == %n * %n\n  => 0.5, [2.0, 4.0], 1 -> [1.0, 2.0]\n",
+        )
+        .unwrap();
+        let err = validate_wish(&bad).unwrap_err();
+        assert!(err.contains("violates invariant"), "got: {}", err);
     }
 
     #[test]

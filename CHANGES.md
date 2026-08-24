@@ -499,3 +499,15 @@ Hand-solved candidate passes full sieve and vaults correctly.
 
 Forge-solved today: Linalg.dot, Linalg.matvec, Linalg.matmul — the
 nested-iteration wall is down. Library now compounds via vault deps.
+
+### 2026-08-23 15:10 — Matops vaulted; example-contract validation
+- Mat.transpose, Mat.trace, Mat.scale forge-solved and vaulted.
+- New wish-level gate: validate_wish now checks every example (transparent
+  + opaque) against input-side invariants. A spec whose own examples
+  violate its contract previously killed all honest candidates silently;
+  it now fails fast with a named-invariant error. Found the hard way:
+  scale's first draft had n=1 with a 2-element list — the sieve killed
+  six perfect candidates before debug exposed MY bug, not the models'.
+- Lesson recorded: when many correct-looking candidates die at S3 against
+  one example, suspect the example. The sieve defends contracts even
+  against their authors.
