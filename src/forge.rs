@@ -216,6 +216,19 @@ fn extract_content(body: &str) -> Result<String, String> {
     Ok(extract_candidate(raw))
 }
 
+
+/// Markdown-fence stripper for free-form spec drafts. Unlike
+/// extract_candidate this never invents sketch scaffolding — it only drops
+/// ``` marker lines and trims.
+fn strip_fences(text: &str) -> String {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with("```"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Sample `cfg.samples` candidates in parallel. Returns texts ordered by
 /// sample index so downstream sieving is deterministic regardless of
 /// network completion order.
@@ -524,17 +537,24 @@ pub fn sample_text(prompt: &str, cfg: &ForgeConfig) -> Result<String, String> {
             Backend::OpenAICompat => {
                 crate::sampler::openai_body(&cfg.model, &chat_prompt_text, cfg.temperature, SPEC_TOKENS)
             }
-            _ => crate::sampler::gemini_body(&chat_prompt_text, cfg.temperature, SPEC_TOKENS),
+            _ => crate::sampler::gemini_body_free(&chat_prompt_text, cfg.temperature, SPEC_TOKENS),
         };
         let resp = crate::cloud::post_json(&url, Some((&key, style)), &[], &body, 180)?;
         if resp.status != 200 {
             return Err(format!("HTTP {}: {}", resp.status, resp.body));
         }
         let raw = match cfg.backend {
-            Backend::GeminiNative => crate::sampler::gemini_parse(&resp.body)?.0,
+            Backend::GeminiNative => crate::sampler::gemini_parse_text(&resp.body)?.0,
             _ => crate::sampler::openai_parse(&resp.body)?.0,
         };
-        return Ok(extract_candidate(&raw));
+        if std::env::var("ONTIC_DEBUG").is_ok() {
+            eprintln!("DEBUG spec-raw: {}", &raw[..raw.len().min(2500)]);
+        }
+        let cleaned = raw;
+        if std::env::var("ONTIC_DEBUG").is_ok() {
+            eprintln!("DEBUG spec-clean: {}", &cleaned[..cleaned.len().min(2500)]);
+        }
+        return Ok(strip_fences(&cleaned));
     }
     // Local llama-server.
     let mut client = HttpClient::connect(&cfg.host, cfg.port)?;

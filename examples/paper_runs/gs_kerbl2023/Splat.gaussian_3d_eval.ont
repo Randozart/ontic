@@ -1,0 +1,8 @@
+wrapping
+use Splat.gaussian_3d
+fn Splat.gaussian_3d_eval(%quad: F64) -> F64
+  | %quad >= 0.0
+  hint "sqrt(%quad)"
+  => 0.0 -> 1.0 ± 1e-12
+  => 4.0 -> 0.135335283237 ± 1e-12
+  ?? 2.0 -> 0.367879441171 ± 1e-12

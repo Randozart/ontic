@@ -1865,7 +1865,14 @@ fn fetch_validated(
 ) -> Result<Vec<(ask::NodeSpec, gen::Gen)>, String> {
     let d = ask::fetch_draft(src, prompt)?;
     let nodes = ask::parse_tree(&d)?;
-    ask::validate_nodes(&nodes)
+    let (ok, errs) = ask::validate_nodes_lenient(&nodes);
+    if ok.is_empty() {
+        return Err(errs.join("; "));
+    }
+    for e in &errs {
+        println!("draft file dropped: {}", e);
+    }
+    Ok(ok)
 }
 
 fn report_diff(a: &[(ask::NodeSpec, gen::Gen)], b: Option<&[(ask::NodeSpec, gen::Gen)]>) {

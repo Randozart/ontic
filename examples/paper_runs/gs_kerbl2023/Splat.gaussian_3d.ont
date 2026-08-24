@@ -1,0 +1,7 @@
+wrapping
+fn Splat.gaussian_3d(%quad_form: F64) -> F64
+  | %quad_form >= 0.0 && res > 0.0 && res <= 1.0
+  hint "exp(-0.5 * %quad_form)"
+  => 0.0 -> 1.0 ± 1e-12
+  => 2.0 -> 0.367879441171 ± 1e-12
+  ?? 4.0 -> 0.135335283237 ± 1e-12

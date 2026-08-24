@@ -565,3 +565,18 @@ nested-iteration wall is down. Library now compounds via vault deps.
 Forge lessons: hints must use FULL dep paths (Chain.mv2 not mv2) and
 arithmetically-correct bodies — the sieve caught a double-square in my
 own hint text via S3 (2482 vs 58).
+
+### 2026-08-23 20:10 — P3: 3DGS paper through decompose, flywheel closed
+- Real corpus: Kerbl et al. 2023 sections 4+6 fetched from arXiv HTML,
+  fed verbatim to `ontic decompose --spec-backend gemini`.
+- Pass 1: 2/2 solved (Splat.gaussian_3d = eq.4 quadratic-form Gaussian;
+  Splat.alpha_eval = volumetric alpha term). Model authored res-
+  postconditions unprompted. Zero hand-written specs.
+- Pass 2: decomposer CITED the fresh deposit (`use Splat.gaussian_3d`) —
+  self-reinforcement loop demonstrated with data.
+- Pipeline hardening landed during P3: gemini free-form body (candidate
+  responseSchema was squeezing spec drafts), text-only parse variant,
+  fence-stripping instead of candidate extraction for spec text, lenient
+  per-node validation + draft union at gate.
+- Sieve moment: pass-2 model hint said sqrt() — mathematically wrong for
+  its own examples; vaulted kernel passes anyway because evidence rules.

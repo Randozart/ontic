@@ -132,6 +132,23 @@ pub fn gemini_body(prompt: &str, temp: f64, max_tokens: usize) -> String {
 }
 
 /// Full endpoint URL from base + model.
+
+/// Free-form generation body: no candidate responseSchema. Used by the
+/// spec-synthesis pipeline whose output is .ont file blocks, not sketch.
+pub fn gemini_body_free(prompt: &str, temp: f64, max_tokens: usize) -> String {
+    json!({
+        "contents": [
+            {"role": "user", "parts": [{"text": prompt}]}
+        ],
+        "generationConfig": {
+            "temperature": temp,
+            "maxOutputTokens": max_tokens,
+            "candidateCount": 1
+        }
+    })
+    .to_string()
+}
+
 pub fn gemini_url(base: &str, model: &str) -> String {
     format!("{}/models/{}:generateContent", base.trim_end_matches('/'), model)
 }
@@ -151,6 +168,35 @@ pub fn reassemble(name: &str, params: &[(String, String)], ret: &str, body: &str
 
 /// Parse native Gemini response: extract schema JSON from parts[0], then
 /// reassemble sketch text. Returns (sketch_text, usage).
+
+/// Gemini response -> (raw text part, usage). Unlike gemini_parse this does
+/// NOT interpret the text as candidate-schema JSON — free-form output only.
+pub fn gemini_parse_text(body: &str) -> Result<(String, Usage), String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("bad JSON: {}", e))?;
+    let text = v
+        .pointer("/candidates/0/content/parts/0/text")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| {
+            format!(
+                "no candidates[0] text: {}",
+                &body[..body.len().min(200)]
+            )
+        })?
+        .to_string();
+    let usage = Usage {
+        prompt: v
+            .pointer("/usageMetadata/promptTokenCount")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
+        completion: v
+            .pointer("/usageMetadata/candidatesTokenCount")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
+    };
+    Ok((text, usage))
+}
+
 pub fn gemini_parse(body: &str) -> Result<(String, Usage), String> {
     let v: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("bad JSON: {}", e))?;
