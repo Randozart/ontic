@@ -1,20 +1,28 @@
 {
   "name": "ontic-language",
   "displayName": "Ontic Language",
-  "description": "Syntax highlighting for Ontic (.ont) — stochastic specification compiler",
+  "description": "Syntax highlighting for Ontic (.ont) \u2014 stochastic specification compiler",
   "version": "0.1.0",
   "publisher": "ontic",
   "license": "MIT",
   "engines": {
     "vscode": "^1.60.0"
   },
-  "categories": ["Programming Languages"],
+  "categories": [
+    "Programming Languages"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "ontic",
-        "aliases": ["Ontic", "ontic"],
-        "extensions": [".ont", ".sketch"],
+        "aliases": [
+          "Ontic",
+          "ontic"
+        ],
+        "extensions": [
+          ".ont",
+          ".sketch"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -25,5 +33,6 @@
         "path": "./syntaxes/ontic.tmLanguage.json"
       }
     ]
-  }
+  },
+  "icon": "icon.svg"
 }

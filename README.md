@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="ontic-logo.svg" width="128" height="128" alt="Ontic logo"/>
+</p>
+
 # Ontic
 
 **A DSL whose products are verified native libraries.**
