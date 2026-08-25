@@ -163,6 +163,7 @@ fn table_of(gen: &Gen) -> Table {
             Ty::ListInt | Ty::ListF64 | Ty::ListF32 => {
                 entries.push((n.clone(), Kind::Length))
             }
+            Ty::Tuple(_) => {}
             Ty::F64 | Ty::F32 => {}
         }
     }

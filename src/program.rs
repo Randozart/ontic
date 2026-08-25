@@ -69,7 +69,13 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
     for stmt in &prog.body {
         match stmt {
             Stmt::BindLit(name, value) => {
+                if matches!(value, crate::gen::Value::Tuple(_)) {
+                    return Err(format!(
+                        "recipe literal `{name}`: tuple values are kernel outputs, not recipe literals"
+                    ));
+                }
                 match value {
+                    crate::gen::Value::Tuple(_) => unreachable!("rejected above"),
                     crate::gen::Value::List(vs) => {
                         let cn = format!("v{}", seq);
                         seq += 1;
@@ -148,6 +154,9 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                             }
                         },
                         (CallArg::Lit(value), false) => match value {
+                            crate::gen::Value::Tuple(_) => {
+                                return Err("recipe call arg: tuple literals unsupported".to_string())
+                            }
                             crate::gen::Value::Int(v) => {
                                 call_args.push_str(&format!("{}L, ", v))
                             }

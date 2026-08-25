@@ -408,6 +408,11 @@ fn evidence_holds(want: &Value, got: &Value, tol: f64) -> bool {
             ws.len() == gs.len()
                 && ws.iter().zip(gs.iter()).all(|(w, g)| f_ok(*w, *g))
         }
+        // Tuples hold componentwise; tolerance applies to every float leaf.
+        (Value::Tuple(ws), Value::Tuple(gs)) => {
+            ws.len() == gs.len()
+                && ws.iter().zip(gs.iter()).all(|(w, g)| evidence_holds(w, g, tol))
+        }
         _ => want == got,
     }
 }

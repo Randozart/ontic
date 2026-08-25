@@ -671,7 +671,7 @@ fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
                         path.clone(),
                         lower::CallTarget {
                             symbol: sym,
-                            params: cand.params.iter().map(|(_, t)| *t).collect(),
+                            params: cand.params.iter().map(|(_, t)| t.clone()).collect(),
                             ret: cand.ret,
                         },
                     );

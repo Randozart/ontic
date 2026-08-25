@@ -56,6 +56,8 @@ fn lit_of(ty: &Ty) -> Expr {
         Ty::Bool => Expr::BoolLit(true),
         Ty::ListInt => Expr::ListLit(vec![1, 2]),
         Ty::ListF64 | Ty::ListF32 => Expr::ListLit(vec![1, 2]), // int lists widen in broadcasts
+        // Gens are single-output; tuples never reach candidate generation.
+        Ty::Tuple(_) => Expr::IntLit(0),
     }
 }
 
@@ -66,6 +68,7 @@ fn gen_expr(ty: &Ty, ctx: &mut Ctx) -> Expr {
     }
     // Weighted shape choice per target type.
     match ty {
+        Ty::Tuple(_) => return ctx.var_or_lit(ty),
         Ty::Bool => {
             ctx.depth_budget -= 1;
             let a = gen_expr(&Ty::Int, ctx);

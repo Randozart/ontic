@@ -100,6 +100,8 @@ fn edges(ty: &Ty) -> Vec<Value> {
             Value::FloatList(vec![1.5]),
             Value::FloatList(vec![-2.5]),
         ],
+        // Tuple params are rejected by the checker before probing.
+        Ty::Tuple(_) => vec![],
     }
 }
 
@@ -115,6 +117,7 @@ fn sample(ty: &Ty, rng: &mut Rng) -> Value {
                 .collect();
             Value::FloatList(items)
         }
+        Ty::Tuple(_) => Value::Int(0),
         Ty::Bool => Value::Bool(rng.next_u64() % 2 == 0),
         Ty::ListInt => {
             let len = rng.below(LIST_LEN_MAX);
@@ -144,6 +147,7 @@ fn materialize(
             Ty::Int => row.push(Value::Int(scalar(n)?)),
             Ty::Bool => row.push(Value::Bool(scalar(n)? != 0)),
             Ty::F64 | Ty::F32 => row.push(sample(t, rng)),
+            Ty::Tuple(_) => {},
             Ty::ListInt => {
                 let len = length(n)?;
                 let items = (0..len).map(|_| rng.range_i64(ELEM_LO, ELEM_HI)).collect();

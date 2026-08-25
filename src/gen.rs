@@ -22,6 +22,8 @@ pub enum Value {
     Bool(bool),
     List(Vec<i64>),
     FloatList(Vec<f64>),
+    /// Multi-component example output for tuple-returning gens.
+    Tuple(Vec<Value>),
 }
 
 impl Value {
@@ -33,6 +35,7 @@ impl Value {
             Value::Bool(_) => Ty::Bool,
             Value::List(_) => Ty::ListInt,
             Value::FloatList(_) => Ty::ListF64,
+            Value::Tuple(vs) => Ty::Tuple(vs.iter().map(|v| v.ty()).collect()),
         }
     }
 }
@@ -40,6 +43,16 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Tuple(vs) => {
+                write!(f, "(")?;
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                write!(f, ")")
+            }
             Value::Int(v) => write!(f, "{}", v),
             Value::Float(v) => write!(f, "{}", v),
             Value::Bool(v) => write!(f, "{}", v),
@@ -107,6 +120,16 @@ pub fn parse_example_line_pub(line: &str) -> Result<Example, String> {
 /// Parse a single value token: int, bool, or `[i,i,...]` list literal.
 fn parse_value(s: &str) -> Result<Value, String> {
     let t = s.trim();
+    // Tuple literal: `(v1, v2, ...)`. Components parse recursively.
+    if t.starts_with('(') && t.ends_with(')') {
+        let inner = &t[1..t.len() - 1];
+        let parts: Result<Vec<Value>, String> = inner
+            .split(',')
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| parse_value(p).map_err(|e| format!("tuple component: {e}")))
+            .collect();
+        return Ok(Value::Tuple(parts?));
+    }
     if t == "true" {
         return Ok(Value::Bool(true));
     }
@@ -331,6 +354,16 @@ fn parse_pident(s: &str) -> Result<String, String> {
 }
 
 fn parse_type(s: &str) -> Result<Ty, String> {
+    let t = s.trim();
+    if t.starts_with('(') && t.ends_with(')') {
+        let inner = &t[1..t.len() - 1];
+        let parts: Result<Vec<Ty>, String> = inner
+            .split(',')
+            .map(|p| parse_type(p).map_err(|e| format!("tuple component: {e}")))
+            .collect();
+        return Ok(Ty::Tuple(parts?));
+    }
+    let s = t;
     match s {
         "Int" => Ok(Ty::Int),
         "F64" => Ok(Ty::F64),

@@ -2,8 +2,8 @@
 //! One grammar, two consumers: `GRAMMAR` (GBNF, constrains server-side
 //! sampling) and `Parser` (Rust mirror, stage S1). They MUST change together.
 
-/// Sketch value types. v1: Int (i64), F64, Bool, List<Int>, List<F64>.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Sketch value types. v1: Int (i64), F64/F32, Bool, List<T>, tuples.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Int,
     F64,
@@ -12,19 +12,34 @@ pub enum Ty {
     ListInt,
     ListF64,
     ListF32,
+    /// Multi-value return: components in declaration order. Params of
+    /// tuple type are rejected at S2; only return positions allow them.
+    Tuple(Vec<Ty>),
 }
 
 impl Ty {
     /// Human-readable name used in signatures and errors.
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> String {
         match self {
-            Ty::Int => "Int",
-            Ty::F64 => "F64",
-            Ty::F32 => "F32",
-            Ty::Bool => "Bool",
-            Ty::ListInt => "List<Int>",
-            Ty::ListF64 => "List<F64>",
-            Ty::ListF32 => "List<F32>",
+            Ty::Int => "Int".to_string(),
+            Ty::F64 => "F64".to_string(),
+            Ty::F32 => "F32".to_string(),
+            Ty::Bool => "Bool".to_string(),
+            Ty::ListInt => "List<Int>".to_string(),
+            Ty::ListF64 => "List<F64>".to_string(),
+            Ty::ListF32 => "List<F32>".to_string(),
+            Ty::Tuple(ts) => format!(
+                "({})",
+                ts.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+
+    /// Component types of a tuple; empty for scalars/lists.
+    pub fn tuple_components(&self) -> Option<&[Ty]> {
+        match self {
+            Ty::Tuple(ts) => Some(ts),
+            _ => None,
         }
     }
 }
@@ -480,6 +495,29 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Result<Ty, ParseError> {
+        // Tuple type: `(T, U, ...)`. Only valid in return position; the
+        // checker rejects tuple params at S2.
+        if matches!(self.peek(), Some(Tok::Sym("("))) {
+            let open = self.offset();
+            self.pos += 1;
+            let mut parts = Vec::new();
+            loop {
+                parts.push(self.parse_type()?);
+                match self.peek() {
+                    Some(Tok::Sym(",")) => {
+                        self.pos += 1;
+                    }
+                    Some(Tok::Sym(")")) => {
+                        self.pos += 1;
+                        break;
+                    }
+                    _ => {
+                        return Err(err(open, "expected `,` or `)` in tuple type"));
+                    }
+                }
+            }
+            return Ok(Ty::Tuple(parts));
+        }
         match self.peek() {
             Some(Tok::Word("Int")) => {
                 self.pos += 1;
@@ -927,7 +965,8 @@ root        ::= name ws "(" ws params ws ")" ws "->" ws type ws "{" ws e ws "}" 
 name        ::= [a-z_] [a-zA-Z0-9_]*
 params      ::= param (ws "," ws param)*
 param       ::= pid ws ":" ws type
-type        ::= "Int" | "F64" | "F32" | "Bool" | "List" "<" ("Int"| "F64" | "F32") ">"
+type        ::= "Int" | "F64" | "F32" | "Bool" | "List" "<" ("Int"| "F64" | "F32") ">" | "(" ws tupparts ws ")"
+tupparts    ::= type (ws "," ws type)*
 e           ::= letx | ifx | orx
 letx        ::= "let" ws pid ws "=" ws e ws ";" ws e
 ifx         ::= "if" ws e ws "{" ws e ws "}" ws "else" ws "{" ws e ws "}"

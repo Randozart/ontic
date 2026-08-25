@@ -259,7 +259,7 @@ fn typecheck_call(
     for (i, (a, w)) in args.iter().zip(want_ps.iter()).enumerate() {
         let got = infer_dep(a, env, deps)?;
         let numeric_pair = matches!(
-            (got, *w),
+            (&got, w),
             (Ty::Int | Ty::F64 | Ty::F32, Ty::Int | Ty::F64 | Ty::F32)
         );
         let ok = got == *w || (numeric_pair && matches!(w, Ty::F64 | Ty::F32));
@@ -273,7 +273,7 @@ fn typecheck_call(
             ));
         }
     }
-    Ok(*want_rt)
+    Ok(want_rt.clone())
 }
 
 /// Infer the type of `e` under `env` (let/fold scopes included).
@@ -430,9 +430,11 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             let no_deps = DepSigs::new();
             infer_binop(*op, l, r, env, &no_deps)
         }
-        Expr::Tuple(_) => Err(
-            "tuple expressions are only valid as multi-accumulator fold bodies".to_string(),
-        ),
+        Expr::Tuple(items) => {
+            let parts: Result<Vec<Ty>, String> =
+                items.iter().map(|it| infer(it, env)).collect();
+            Ok(Ty::Tuple(parts?))
+        }
     }
 }
 

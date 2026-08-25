@@ -489,13 +489,9 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
             ctx,
         ),
         Expr::Tuple(items) => {
-            // Tuples never become runtime values; multi-acc folds evaluate
-            // components directly in eval_fold.
-            let _ = items;
-            Err(EvalError::TypeError(
-                "tuple expressions are only valid as multi-accumulator fold bodies"
-                    .to_string(),
-            ))
+            let vals: Result<Vec<Value>, EvalError> =
+                items.iter().map(|it| eval_ctx(it, env, ctx)).collect();
+            Ok(Value::Tuple(vals?))
         }
         Expr::BinOp(op, l, r) => eval_binop(*op, l, r, env, ctx),
     }
