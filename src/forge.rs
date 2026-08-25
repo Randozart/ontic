@@ -16,6 +16,9 @@ use std::time::Duration;
 /// Default endpoint matches VITRIOL's memory-mode shim port.
 pub const DEFAULT_FORGE: &str = "127.0.0.1:8279";
 const MAX_TOKENS: usize = 512;
+/// VITRIOL dual-slot: reserved forge slot on the shared llama-server
+/// (slot 0 belongs to hermes-agent; slot 1 is capped at 8192 ctx).
+const ONTIC_SLOT: i64 = 1;
 /// Parallel TCP workers — deliberately low: the llama-server endpoint is
 /// often SHARED and frequently launched with --parallel 1; slot exhaustion
 /// manifests as connection resets. Override via ONTIC_FORGE_WORKERS.
@@ -186,6 +189,8 @@ pub fn body_for(prompt: &str, cfg: &ForgeConfig, sample_index: usize) -> String 
         "grammar": sketch::GRAMMAR,
         "seed": cfg.seed.wrapping_add(sample_index as u64),
         "cache_prompt": true,
+        // VITRIOL dual-slot: pin to the reserved 8k forge slot (slot 0 is hermes')
+        "id_slot": ONTIC_SLOT,
     })
     .to_string()
 }
