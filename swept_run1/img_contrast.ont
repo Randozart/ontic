@@ -1,0 +1,7 @@
+wrapping
+fn Img.contrast(%x: F64, %factor: F64, %mid: F64) -> F64
+  | %factor >= 0.0
+  hint "%mid + (%x - %mid) * %factor"
+  => 100.0, 1.5, 128.0 -> 94.0 ± 1e-6
+  => 200.0, 0.5, 128.0 -> 164.0 ± 1e-6
+  ?? 50.0, 2.0, 100.0 -> 0.0 ± 1e-6

@@ -1,0 +1,8 @@
+wrapping
+use act_sigmoid.ont
+fn Act.silu(%x: F64) -> F64
+  | true
+  hint "%x * Act.sigmoid(%x)"
+  => 0.0 -> 0.0 ± 1e-12
+  => 1.0 -> 0.73105857863 ± 1e-12
+  ?? -1.0 -> -0.26894142137 ± 1e-12

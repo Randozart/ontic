@@ -1,0 +1,8 @@
+wrapping
+fn Solver.fixed_point_half(%x: F64) -> F64
+  | %x >= 1.0
+  | res >= 0.0
+  hint "fold k in range(64), g from %x { (g + %x / g) * 0.5 } until abs(g - %x * 0.5) < 1e-9"
+  => 4.0 -> 2.0 ± 1e-6
+  => 9.0 -> 3.0 ± 1e-6
+  ?? 16.0 -> 4.0 ± 1e-6

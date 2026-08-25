@@ -1,0 +1,7 @@
+wrapping
+fn Act.leaky_relu(%x: F64, %slope: F64) -> F64
+  | true
+  hint "if %x > 0.0 { %x } else { %slope * %x }"
+  => 2.0, 0.1 -> 2.0 ± 1e-12
+  => -2.0, 0.1 -> -0.2 ± 1e-12
+  ?? -5.0, 0.2 -> -1.0 ± 1e-12

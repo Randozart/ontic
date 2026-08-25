@@ -1,0 +1,7 @@
+wrapping
+fn Solver.newton_inv(%x: F64) -> F64
+  | %x >= 0.5
+  hint "fold k in range(64), g from (1.0 / %x) { g * (2.0 - %x * g) } until abs(g * %x - 1.0) < 1e-10"
+  => 2.0 -> 0.5 ± 1e-10
+  => 4.0 -> 0.25 ± 1e-10
+  ?? 1.0 -> 1.0 ± 1e-10

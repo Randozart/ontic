@@ -1,0 +1,7 @@
+wrapping
+fn Agg.jaccard_min(%a: List<F64>, %b: List<F64>) -> List<F64>
+  | len(%a) == len(%b)
+  hint "map(i in range(len(%a))) { let x = index(%a, i); let y = index(%b, i); if x < y { x } else { y } }"
+  => [1.0, 2.0], [2.0, 1.0] -> [1.0, 1.0] ± 1e-12
+  => [0.5, 0.5], [0.5, 0.5] -> [0.5, 0.5] ± 1e-12
+  ?? [2.0, 3.0], [1.0, 4.0] -> [1.0, 3.0] ± 1e-12

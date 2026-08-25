@@ -1,0 +1,10 @@
+wrapping
+fn Fin.simple_interest(%p: F64, %rate: F64, %periods: F64) -> F64
+  | %p >= 0.0
+  | %rate >= 0.0
+  | %periods >= 0.0
+  | res >= 0.0
+  hint "%p * (1.0 + %rate * %periods)"
+  => 100.0, 0.05, 2.0 -> 110.0 ± 1e-9
+  => 1000.0, 0.1, 5.0 -> 1500.0 ± 1e-9
+  ?? 500.0, 0.04, 3.0 -> 560.0 ± 1e-9

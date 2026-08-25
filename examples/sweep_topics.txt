@@ -1,0 +1,48 @@
+Kernel: Stats.zscore(xs) -> List<F64> — subtract mean, divide by population standard deviation; 2 visible examples with small whole numbers, 1 hidden.
+Kernel: Stats.ema(xs, alpha) -> List<F64> — exponential moving average, seeded with first element; alpha in [0,1].
+Kernel: Stats.cov2(a, b) -> F64 — population covariance of two equal-length lists.
+Kernel: Stats.rms_ratio(a, b) -> F64 — RMS of a divided by RMS of b; lists equal length non-empty.
+Kernel: L1.manhattan(a, b) -> F64 — sum of absolute differences of two equal-length vectors.
+Kernel: L1.chebyshev(a, b) -> F64 — maximum absolute difference of two equal-length vectors.
+Kernel: L2.sqdist(a, b) -> F64 — squared euclidean distance between two equal-length vectors.
+Kernel: Act.relu(x) -> F64 — max(0, x) scalar.
+Kernel: Act.leaky_relu(x, slope) -> F64 — x when positive else slope*x.
+Kernel: Act.silu(x) -> F64 — x * sigmoid(x).
+Kernel: Act.gelu_tanh(x) -> F64 — tanh-approximate gelu: 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))).
+Kernel: Vec.hadamard(a, b) -> List<F64> — elementwise product of two equal-length lists.
+Kernel: Vec.axpy(a, x, y) -> List<F64> — a*x + y elementwise, y list, a scalar.
+Kernel: Vec.scale_inv(xs, d) -> List<F64> — divide every element by scalar d; invariant d != 0.
+Kernel: Vec.shift(xs, n, k) -> List<F64> — output[i] = xs[(i+k) mod n]; rotation by k.
+Kernel: Mat.frobenius(m, n) -> F64 — sqrt of sum of squares over flattened row-major n-by-n matrix.
+Kernel: Mat.diag_sum_abs(m, n) -> F64 — sum of absolute diagonal entries.
+Kernel: Mat.col_mean(m, n, j) -> F64 — mean of column j of flattened row-major n-by-n matrix; invariant 0 <= j < n.
+Kernel: Mat.row_argmax(m, n, i) -> Int — index of largest entry in row i; invariant 0 <= i < n.
+Kernel: Poly.eval(coeffs, x) -> F64 — evaluate polynomial with coeffs[i] as coefficient of x^i via horner fold.
+Kernel: Poly.derivative_value(coeffs, x) -> F64 — value of the derivative at x via horner on shifted coefficients.
+Kernel: Sig.diff(xs) -> List<F64> — first difference: output has len-1 elements, out[i]=xs[i+1]-xs[i].
+Kernel: Sig.rectify_diff(xs) -> List<F64> — rectified first difference, max(0, diff).
+Kernel: Sig.mov_avg3(xs) -> List<F64> — 3-tap moving average [1,1,1]/3 valid mode: output length len-2.
+Kernel: Sig.energy(xs) -> F64 — sum of squares (signal energy).
+Kernel: Sig.hann(i, n) -> F64 — hann window sample 0.5*(1-cos(2*pi*i/(n-1))); invariants 0<=i<n, n>=2.
+Kernel: Num.clamp01(x) -> F64 — clamp into [0,1].
+Kernel: Num.smoothstep(a, b, x) -> F64 — clamp t=(x-a)/(b-a) to [0,1], return t*t*(3-2*t); invariant a<b.
+Kernel: Num.dist2d(ax, ay, bx, by) -> F64 — euclidean distance between two points.
+Kernel: Num.logsumexp2(a, b) -> F64 — log(exp(a)+exp(b)) computed stably as max + log(1+exp(-abs(a-b))).
+Kernel: Num.hypot_approx(a, b) -> F64 — sqrt(a*a+b*b).
+Kernel: Num.mean_abs_dev(xs) -> F64 — mean of absolute deviations from the mean.
+Kernel: Num.rms_to_peak(xs) -> F64 — rms divided by max absolute value; invariant list nonempty and peak > 0.
+Kernel: Solver.newton_inv(x) -> F64 — reciprocal of x by newton iteration g=g*(2-x*g) budget 64 until abs(g*x-1)<1e-10; invariant x >= 0.5.
+Kernel: Solver.babylonian4(x) -> F64 — fourth root of x by halving square-root steps twice with until convergence; invariant x >= 1.
+Kernel: Solver.fixed_point_half(x) -> F64 — iterate g=(g+x/g)/2 style fixed point for sqrt(x/2)? no — iterate g toward x/2 via g=(g+x/2)/2 budget 64 until abs(g - x/2) < 1e-9; result approaches x/2; invariant x>=1.
+Kernel: Series.sum_powers(r, eps) -> F64 — sum r^k for k=0.. while term stays above eps, single fold with until using running product carried in body; invariant 0<=r<1, eps>0. Track product inside acc by folding over range and keeping s only if you also carry p... if impossible with one accumulator, instead compute closed form 1/(1-r) and return that.
+Kernel: Geo.circle_area(r) -> F64 — pi*r*r; invariant r>=0.
+Kernel: Geo.sector_area(r, theta) -> F64 — 0.5*r*r*theta; invariants r>=0, 0<=theta<=2*pi.
+Kernel: Geo.poly_perimeter(side, n) -> F64 — regular n-gon perimeter; invariant n>=3.
+Kernel: Fin.compound(p, rate, periods) -> F64 — compound growth p*(1+rate)^periods via exp(log); invariants p>=0, periods>=0 integer.
+Kernel: Fin.simple_interest(p, rate, periods) -> F64 — p*(1+rate*periods); same invariants.
+Kernel: Str_len_like.count_nonneg(xs) -> Int — count elements >= 0 via fold returning int.
+Kernel: Agg.dot_norm(a, b) -> F64 — dot product divided by product of magnitudes times magnitude of a only: dot(a,b)/|a|.
+Kernel: Agg.cosine_distance(a, b) -> F64 — 1 minus cosine similarity; unit-length invariant optional via normalization inside.
+Kernel: Agg.jaccard_cont(a, b) -> F64 — soft jaccard: sum(min)/sum(max) elementwise for equal-length nonnegative lists.
+Kernel: Img.brightness(xs) -> F64 — mean intensity of pixel list.
+Kernel: Img.contrast(xs, factor, mid) -> F64-list? NO — keep scalar: contrast stretch single pixel x: mid+(x-mid)*factor.

@@ -1,0 +1,7 @@
+wrapping
+fn L1.manhattan(%a: List<F64>, %b: List<F64>) -> F64
+  | len(%a) == len(%b)
+  hint "fold i in range(len(%a)), acc from 0.0 { acc + abs(index(%a, i) - index(%b, i)) }"
+  => [1.0, 2.0], [3.0, 1.0] -> 3.0 ± 1e-12
+  => [0.0, 0.0], [0.0, 0.0] -> 0.0 ± 1e-12
+  ?? [-1.0, 4.0], [2.0, 1.0] -> 6.0 ± 1e-12

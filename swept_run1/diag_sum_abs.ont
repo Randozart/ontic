@@ -1,0 +1,10 @@
+wrapping
+use Mat.trace
+
+fn Mat.diag_sum_abs(%mat: List<F64>, %n: Int) -> F64
+  | len(%mat) == %n * %n && %n > 0
+  | res >= 0.0
+  hint "fold i in range(%n), acc from 0.0 { let idx = i * %n + i; let v = index(%mat, idx); acc + if v < 0.0 { 0.0 - v } else { v } }"
+  => [1.0, -2.0, 3.0, 4.0], 2 -> 5.0 ± 1e-12
+  => [-1.0, 0.0, 0.0, -5.0], 2 -> 6.0 ± 1e-12
+  ?? [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, -4.0], 3 -> 9.0 ± 1e-12

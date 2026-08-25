@@ -1,0 +1,9 @@
+wrapping
+use Newt.sqrt
+fn Solver.babylonian4(%x: F64) -> F64
+  | %x >= 1.0
+  | res >= 1.0
+  hint "let s = fold k in range(32), g from %x { (g + %x / g) * 0.5 } until abs(g * g - %x) < 1e-12; fold k in range(32), h from s { (h + s / h) * 0.5 } until abs(h * h - s) < 1e-12"
+  => 16.0 -> 2.0 ± 1e-9
+  => 81.0 -> 3.0 ± 1e-9
+  ?? 256.0 -> 4.0 ± 1e-9

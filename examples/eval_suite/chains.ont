@@ -1,0 +1,8 @@
+wrapping
+use Linalg.matvec
+fn EvalChain.mad_rows(%mat: List<F64>, %vec: List<F64>) -> F64
+  | len(%vec) > 0 && len(%mat) == len(%vec) * len(%vec)
+  hint "fold v in map(w in Linalg.matvec(mat, vec)) { abs(w) }, s from 0.0 { s + v }; then divide by the number of rows: ... / n where n = len(vec)"
+  => [1.0, 0.0, 0.0, -1.0], [3.0, 7.0] -> 5.0 ± 1e-12
+  => [2.0, 0.0, 0.0, 2.0], [1.0, 1.0] -> 2.0 ± 1e-12
+  ?? [1.0, 2.0, 3.0, 4.0], [1.0, 1.0] -> 5.0 ± 1e-12

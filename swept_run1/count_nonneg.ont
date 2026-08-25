@@ -1,0 +1,7 @@
+wrapping
+fn Str_len_like.count_nonneg(%xs: List<F64>) -> Int
+  | len(%xs) >= 0
+  hint "fold x in %xs, acc from 0 { if x >= 0 { acc + 1 } else { acc } }"
+  => [1.0, -2.0, 3.0, 0.0] -> 3
+  => [-1.0, -5.0] -> 0
+  ?? [0.0, 0.0, 0.0] -> 3

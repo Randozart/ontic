@@ -51,6 +51,25 @@ ontic corpus export --format dpo  --out dpo.jsonl   # chosen/rejected pairs
 - Backfill records are flagged `reconstructed:true`; down-weight them at
   training time if you care about exact historical prompts.
 
+## Eval protocol (before/after a fine-tune)
+
+```bash
+# 1. Baseline with the stock sampler:
+ontic eval --suite examples/eval_suite --tag baseline-gemini \
+    --sampler-backend gemini --samples 6
+# 2. Export splits (exclude any gens the sampler must never train on):
+ontic corpus export --format chat --out sft.jsonl --exclude-key <keys>
+ontic corpus export --format dpo  --out dpo.jsonl
+# 3. Train externally (unsloth-class LoRA on the chat records).
+# 4. Re-eval under your sampler tag and diff .ontic/eval/*.json:
+ontic eval --suite examples/eval_suite --tag lora-v1 \
+    --trained-on .ontic/corpus/train.jsonl
+```
+
+`--trained-on` skips contaminated gens so S4 overfit detection stays
+meaningful for whatever remains. The suite spans difficulty tiers: scalar,
+reductions, transforms, until-solvers, composed chains over vault deps.
+
 ## What the corpus teaches
 
 1. **SFT pairs**: spec contract → verified implementation. This is the core

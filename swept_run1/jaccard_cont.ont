@@ -1,0 +1,10 @@
+wrapping
+use Agg.jaccard_min
+use Agg.jaccard_max
+use Stats.mean
+fn Agg.jaccard_cont(%a: List<F64>, %b: List<F64>) -> F64
+  | len(%a) == len(%b)
+  hint "let mins = Agg.jaccard_min(%a, %b); let maxs = Agg.jaccard_max(%a, %b); Stats.mean(mins) / Stats.mean(maxs)"
+  => [1.0, 2.0], [2.0, 1.0] -> 1.0 ± 1e-12
+  => [1.0, 3.0], [2.0, 2.0] -> 0.75 ± 1e-12
+  ?? [2.0, 4.0], [4.0, 2.0] -> 0.75 ± 1e-12

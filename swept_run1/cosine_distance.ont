@@ -1,0 +1,10 @@
+wrapping
+use Linalg.dot
+use Linalg.normalize
+fn Agg.cosine_distance(%a: List<F64>, %b: List<F64>) -> F64
+  | len(%a) == len(%b)
+  | len(%a) > 0
+  hint "let na = Linalg.normalize(%a); let nb = Linalg.normalize(%b); 1.0 - Linalg.dot(na, nb)"
+  => [1.0, 0.0], [1.0, 0.0] -> 0.0 ± 1e-12
+  => [1.0, 0.0], [0.0, 1.0] -> 1.0 ± 1e-12
+  ?? [1.0, 1.0], [-1.0, -1.0] -> 2.0 ± 1e-12

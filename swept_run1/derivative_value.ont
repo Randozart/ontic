@@ -1,0 +1,9 @@
+wrapping
+use Newt.sqrt
+
+fn Poly.derivative_value(%coeffs: List<F64>, %x: F64) -> F64
+  | len(%coeffs) >= 2
+  hint "fold i in range(len(%coeffs) - 1, acc from 0.0 { acc * %x + index(%coeffs, i) * (to_float(len(%coeffs) - 1 - i)) }"
+  => [1.0, 2.0, 3.0], 2.0 -> 10.0 ± 1e-12
+  => [4.0, 1.0], 5.0 -> 4.0 ± 1e-12
+  ?? [1.0, 0.0, 1.0], 3.0 -> 6.0 ± 1e-12

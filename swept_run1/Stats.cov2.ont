@@ -1,0 +1,8 @@
+wrapping
+use Stats.mean
+fn Stats.cov2(%a: List<F64>, %b: List<F64>) -> F64
+  | len(%a) == len(%b) && len(%a) > 0
+  hint "let ma = Stats.mean(%a); let mb = Stats.mean(%b); fold i in range(len(%a)), acc from 0.0 { acc + (index(%a, i) - ma) * (index(%b, i) - mb) } / len(%a)"
+  => [1.0, 2.0, 3.0], [1.0, 4.0, 9.0] -> 5.333333333333333 ± 1e-9
+  => [0.0, 0.0], [0.0, 0.0] -> 0.0 ± 1e-9
+  ?? [1.0, 3.0, 5.0, 7.0], [2.0, 4.0, 6.0, 8.0] -> 5.0 ± 1e-9

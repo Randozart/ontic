@@ -1,0 +1,9 @@
+wrapping
+use Act.sigmoid
+
+fn Act.gelu_tanh(%x: F64) -> F64
+  | true
+  hint "let c1 = 0.7978845608028654; let c2 = 0.044715; let inner = c1 * (%x + c2 * %x * %x * %x); 0.5 * %x * (1.0 + (exp(inner) - exp(-inner)) / (exp(inner) + exp(-inner)))"
+  => 0.0 -> 0.0 ± 1e-12
+  => 1.0 -> 0.8411919988 ± 1e-12
+  ?? -1.0 -> -0.1586552539 ± 1e-12

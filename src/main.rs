@@ -35,6 +35,8 @@ fn dispatch(args: &[String]) -> i32 {
         Some("solve") => cmd_solve(args),
         Some("decompose") => cmd_decompose(args),
         Some("corpus") => cmd_corpus(args),
+        Some("eval") => cmd_eval(args),
+        Some("sweep") => cmd_sweep(args),
         Some("bench") => cmd_bench(args),
         Some("vault") => cmd_vault(args),
         Some("lib") => cmd_lib(args),
@@ -2197,6 +2199,345 @@ fn corpus_export(args: &[String]) -> i32 {
     println!(
         "corpus export: {} records -> {} ({} excluded by key)",
         written, out_path, skipped
+    );
+    0
+}
+
+// ================================ eval ===================================
+
+/// `ontic eval --suite DIR --tag NAME [opts]` — solve held-out gens fresh,
+/// score pass@N + best ns/call, persist `.ontic/eval/<tag>.json` for
+/// before/after comparison of sampler quality behind the same wall.
+fn cmd_eval(args: &[String]) -> i32 {
+    let flag = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|p| args.get(p + 1))
+            .cloned()
+    };
+    let suite = match flag("--suite") {
+        Some(d) => d,
+        None => return usage("eval needs --suite <dir>"),
+    };
+    let tag = flag("--tag").unwrap_or_else(|| "untagged".into());
+    let backend = flag("--sampler-backend").unwrap_or_else(|| "gemini".into());
+    let samples = flag("--samples").unwrap_or_else(|| "6".into());
+    let trained_on = flag("--trained-on");
+
+    // Contamination guard: keys present in the training corpus are skipped.
+    let mut trained_keys: std::collections::HashSet<String> = Default::default();
+    if let Some(path) = &trained_on {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            for line in raw.lines() {
+                if let Ok(r) = serde_json::from_str::<ontic::corpus::Record>(line) {
+                    trained_keys.insert(r.gen_key);
+                }
+            }
+        }
+    }
+
+    let mut files: Vec<std::path::PathBuf> = match std::fs::read_dir(&suite) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "ont").unwrap_or(false))
+            .collect(),
+        Err(e) => {
+            eprintln!("eval: {}: {}", suite, e);
+            return 1;
+        }
+    };
+    files.sort();
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ontic"));
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut passed = 0usize;
+    let mut contaminated = 0usize;
+    for f in &files {
+        let text = match std::fs::read_to_string(f) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        // Files may hold several gens; evaluate each independently.
+        let gens = match ontic::recipe::parse_ont(&text) {
+            Ok(of) => of.gens,
+            Err(e) => {
+                eprintln!("eval skip {}: invalid gen: {}", f.display(), e);
+                continue;
+            }
+        };
+        for g in gens {
+        let key = Vault::key_for(&g);
+        if !trained_keys.is_empty() && trained_keys.contains(&key) {
+            println!(
+                "{:<28} SKIP (contaminated: key in training data)",
+                g.path
+            );
+            contaminated += 1;
+            results.push(serde_json::json!({
+                "file": f.display().to_string(), "gen_key": key,
+                "path": g.path, "passed": null, "contaminated": true,
+            }));
+            continue;
+        }
+        print!("{:<28} ", g.path);
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        // Collection stays OFF during eval children regardless of .env:
+        // held-out solves must never leak into training records.
+        let out = std::process::Command::new(&exe)
+            .arg("solve")
+            .arg(f)
+            .arg("--sampler-backend")
+            .arg(&backend)
+            .arg("--samples")
+            .arg(&samples)
+            .env("ONTIC_COLLECT", "0")
+            .output();
+        let (ok, ns) = match out {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                let success = o.status.success();
+                // Best survivor timing from PASS lines.
+                let mut best_ns: Option<u64> = None;
+                for line in stdout.lines() {
+                    if line.starts_with("PASS") {
+                        let toks: Vec<&str> = line.split_whitespace().collect();
+                        if toks.len() >= 3 {
+                            if let Ok(v) = toks[2].parse::<u64>() {
+                                best_ns = Some(best_ns.map_or(v, |b: u64| b.min(v)));
+                            }
+                        }
+                    }
+                }
+                (success, best_ns)
+            }
+            Err(e) => {
+                eprintln!("spawn failed: {}", e);
+                (false, None)
+            }
+        };
+        if ok {
+            passed += 1;
+        }
+        println!(
+            "{}{}",
+            if ok { "PASS" } else { "FAIL" },
+            ns.map(|v| format!(" ({:.1}µs)", v as f64 / 1000.0)).unwrap_or_default()
+        );
+        results.push(serde_json::json!({
+            "file": f.display().to_string(), "gen_key": key,
+            "path": g.path, "passed": ok, "best_ns": ns,
+        }));
+        }
+    }
+
+    let scored = results.len() - contaminated;
+    let rate = if scored > 0 { passed as f64 / scored as f64 } else { 0.0 };
+    println!(
+        "\neval [{tag}]: {passed}/{scored} passed ({rate:.1}%), {contaminated} contaminated-skips"
+    );
+    let report = serde_json::json!({
+        "tag": tag, "backend": backend, "samples": samples,
+        "pass_rate": rate, "results": results,
+    });
+    let dir = std::path::Path::new(".ontic").join("eval");
+    let _ = std::fs::create_dir_all(&dir);
+    let out_path = dir.join(format!("{}.json", tag));
+    match serde_json::to_string_pretty(&report)
+        .map_err(|e| e.to_string())
+        .and_then(|s| std::fs::write(&out_path, s).map_err(|e| e.to_string()))
+    {
+        Ok(_) => println!("eval: persisted {}", out_path.display()),
+        Err(e) => eprintln!("eval: persist failed: {}", e),
+    }
+    0
+}
+
+// ================================ sweep ==================================
+
+/// `ontic sweep <topics.txt> [opts]` — corpus growth: one-line kernel
+/// requests through the full gate chain (draft → validate → dedup →
+/// solve). Records land in the corpus automatically via ONTIC_COLLECT.
+fn cmd_sweep(args: &[String]) -> i32 {
+    let flag = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|p| args.get(p + 1))
+            .cloned()
+    };
+    let topics_path = match args.get(2) {
+        Some(p) => p.clone(),
+        None => return usage("sweep needs <topics.txt>"),
+    };
+    let outdir = flag("--outdir").unwrap_or_else(|| "swept".into());
+    let limit: usize = flag("--limit").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let spec_backend = flag("--spec-backend");
+    let candidate_backend =
+        flag("--candidate-backend").unwrap_or_else(|| "gemini".into());
+
+    let topics = match std::fs::read_to_string(&topics_path) {
+        Ok(t) => t
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            eprintln!("sweep: {}: {}", topics_path, e);
+            return 1;
+        }
+    };
+    println!("sweep: {} topics", topics.len());
+
+    // Keys already in the corpus: skip duplicates by construction.
+    let mut have_keys: std::collections::HashSet<String> = Default::default();
+    {
+        let vault_dir =
+            std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
+        let corpus = std::path::Path::new(&vault_dir)
+            .parent()
+            .unwrap_or(std::path::Path::new(".ontic"))
+            .join("corpus")
+            .join("train.jsonl");
+        if let Ok(raw) = std::fs::read_to_string(&corpus) {
+            for line in raw.lines() {
+                if let Ok(r) = serde_json::from_str::<ontic::corpus::Record>(line) {
+                    have_keys.insert(r.gen_key);
+                }
+            }
+        }
+    }
+
+    let sopts = SolveOpts {
+        wish_path: String::new(),
+        wish_sel: None,
+        hand: vec![],
+        samples: 1,
+        seed: flag("--seed").and_then(|v| v.parse().ok()).unwrap_or(0x5EED),
+        forge: flag("--forge"),
+        sampler_backend: spec_backend.clone().filter(|s| !s.starts_with("file:")),
+        endpoint: flag("--endpoint"),
+        model: flag("--model"),
+        api_key_env: None,
+    };
+    let fcfg = forge_config(&sopts);
+    let src = match ask::resolve_spec_source(spec_backend.as_deref(), fcfg.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("sweep: {}", e);
+            return 1;
+        }
+    };
+
+    if std::fs::create_dir_all(&outdir).is_err() {
+        eprintln!("sweep: cannot create {}", outdir);
+        return 1;
+    }
+
+    let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
+    let mut entries: Vec<String> = Vec::new();
+    if let Ok(v) = Vault::open(&vault_dir) {
+        if let Ok(list) = v.list() {
+            for e in list {
+                entries.push(format!("{}  # {}", e.name, e.signature));
+            }
+        }
+    }
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ontic"));
+    let mut solved = 0usize;
+    let mut drafted = 0usize;
+    let mut dupes = 0usize;
+    'topics: for (idx, topic) in topics.iter().enumerate() {
+        if drafted >= limit {
+            break;
+        }
+        let prompt = format!(
+            "{}\n\n{}\n\nREQUEST:\n{}\n",
+            include_str!("ask_langref.txt"),
+            ask::inventory_block(&entries),
+            topic
+        );
+        let _ = prompt;
+        let nodes = loop {
+            match ask::fetch_draft(&src, &prompt).and_then(|d| ask::parse_tree(&d)) {
+                Ok(n) => break n,
+                Err(e) => {
+                    eprintln!("sweep[{}] draft failed ({}); retrying once", idx, e);
+                    if let Ok(n) = ask::fetch_draft(&src, &prompt).and_then(|d| ask::parse_tree(&d)) {
+                        break n;
+                    }
+                    println!("sweep[{}] draft unavailable; skipping", idx);
+                    continue 'topics;
+                }
+            }
+        };
+        let valid = match ask::validate_nodes_lenient(&nodes) {
+            (v, _) if !v.is_empty() => v,
+            (_, errs) => {
+                eprintln!("sweep[{}] invalid draft: {}", idx, errs.first().cloned().unwrap_or_default());
+                continue;
+            }
+        };
+        for (spec, g) in valid {
+            let key = Vault::key_for(&g);
+            if have_keys.contains(&key) {
+                dupes += 1;
+                println!("sweep[{}] duplicate key — skipped", idx);
+                continue;
+            }
+            have_keys.insert(key.clone());
+            let path = std::path::Path::new(&outdir).join(&spec.filename);
+            std::fs::write(&path, &spec.text).ok();
+            // Spec-kind record for the authored contract.
+            if ontic::corpus::enabled() {
+                let mut rec = ontic::corpus::Record::new(
+                    ontic::corpus::Kind::Spec,
+                    format!("{}-{}", &key[..12.min(key.len())], idx),
+                    spec_backend_label(&src),
+                    fcfg.model.clone(),
+                    format!("REQUEST:\n{}\n", topic),
+                )
+                .with_winner(&spec.text);
+                ontic::corpus::append(&rec);
+            }
+            drafted += 1;
+            print!("sweep[{}] {:<28} ", idx, g.path);
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+            let out = std::process::Command::new(&exe)
+                .arg("solve")
+                .arg(&path)
+                .arg("--sampler-backend")
+                .arg(&candidate_backend)
+                .arg("--samples")
+                .arg("6")
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    solved += 1;
+                    println!("PASS");
+                }
+                Ok(o) => {
+                    let tail: String = String::from_utf8_lossy(&o.stderr)
+                        .lines()
+                        .rev()
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    println!("FAIL ({})", tail);
+                }
+                Err(e) => println!("spawn failed: {}", e),
+            }
+        }
+    }
+    println!(
+        "\nsweep: {}/{} topics drafted, {} solved, {} duplicates",
+        drafted,
+        topics.len(),
+        solved,
+        dupes
     );
     0
 }

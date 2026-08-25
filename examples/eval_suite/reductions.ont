@@ -1,0 +1,21 @@
+wrapping
+fn EvalStats.variance(%xs: List<F64>) -> F64
+  | len(%xs) > 0
+  hint "let %s = fold v in xs, a from 0.0 { a + v }; let %q = fold v in xs, b from 0.0 { b + v * v }; (q - s * s / len(xs)) / len(xs)"
+  => [1.0, 2.0, 3.0] -> 0.6666666666666666 ± 1e-9
+  => [5.0, 5.0] -> 0.0 ± 1e-12
+  ?? [0.0, 4.0] -> 4.0 ± 1e-9
+
+fn EvalStats.maxabs(%xs: List<F64>) -> F64
+  | len(%xs) > 0
+  hint "fold v in xs, a from 0.0 { if abs(v) > a { abs(v) } else { a } }"
+  => [-5.0, 2.0, -9.0] -> 9.0 ± 1e-12
+  => [3.5] -> 3.5 ± 1e-12
+  ?? [-0.5, 0.25] -> 0.5 ± 1e-12
+
+fn EvalVec.cosine(%a: List<F64>, %b: List<F64>) -> F64
+  | len(%a) == len(%b) && len(%a) > 0
+  hint "let d = fold i in range(len(a)), s from 0.0 { s + index(a,i)*index(b,i)}; let na = sqrt(fold i in range(len(a)), s2 from 0.0 { s2 + index(a,i)*index(a,i)}); let nb = sqrt(fold i in range(len(b)), s3 from 0.0 { s3 + index(b,i)*index(b,i)}); d / (na * nb)"
+  => [1.0, 0.0], [0.0, 1.0] -> 0.0 ± 1e-12
+  => [1.0, 1.0], [2.0, 2.0] -> 1.0 ± 1e-9
+  ?? [1.0, 2.0], [3.0, 1.0] -> 0.7071067811865475 ± 1e-9

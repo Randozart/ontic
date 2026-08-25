@@ -1,0 +1,8 @@
+wrapping
+use Stats.mean
+fn Num.mean_abs_dev(%xs: List<F64>) -> F64
+  | len(%xs) > 0
+  hint "let m = Stats.mean(%xs); fold x in %xs, acc from 0.0 { acc + abs(x - m) } / len(%xs)"
+  => [1.0, 2.0, 3.0] -> 0.666666666667 ± 1e-6
+  => [0.0, 0.0, 0.0, 0.0] -> 0.0 ± 1e-12
+  ?? [1.0, 3.0, 5.0, 7.0] -> 2.0 ± 1e-6

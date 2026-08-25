@@ -1,0 +1,12 @@
+wrapping
+use Newt.sqrt
+use Stats.meansqdev
+
+fn Mat.frobenius(%mat: List<F64>, %n: Int) -> F64
+  | len(%mat) == %n * %n
+  | %n > 0
+  | res >= 0.0
+  hint "let sq = Stats.meansqdev(%mat); let mean_sq = sq + Stats.mean(%mat) * Stats.mean(%mat); Newt.sqrt(mean_sq * (len(%mat) * 1.0))"
+  => [3.0, 4.0, 0.0, 12.0], 2 -> 13.0 ± 1e-12
+  => [1.0, 0.0, 0.0, 1.0], 2 -> 1.4142135623730951 ± 1e-12
+  ?? [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 3 -> 0.0 ± 1e-12

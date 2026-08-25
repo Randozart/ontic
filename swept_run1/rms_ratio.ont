@@ -1,0 +1,8 @@
+wrapping
+use Stats.rms
+fn Stats.rms_ratio(%a: List<F64>, %b: List<F64>) -> F64
+  | len(%a) == len(%b) && len(%a) > 0
+  hint "Stats.rms(%a) / Stats.rms(%b)"
+  => [3.0, 4.0], [1.0, 1.0] -> 3.5355339059327378 ± 1e-12
+  => [0.0, 0.0], [2.0, 2.0] -> 0.0 ± 1e-12
+  ?? [1.0, 1.0], [1.0, 1.0] -> 1.0 ± 1e-12

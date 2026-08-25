@@ -1,0 +1,14 @@
+wrapping
+fn EvalNewt.cbrt(%x: F64) -> F64
+  | %x >= 1.0
+  hint "fold k in range(64), g from x * 0.5 + 0.5 { (g * 2.0 + x / (g * g)) / 3.0 } until abs(g * g * g - x) < 0.000000001"
+  => 27.0 -> 3.0 ± 0.000001
+  => 8.0 -> 2.0 ± 0.000001
+  ?? 64.0 -> 4.0 ± 0.000001
+
+fn EvalSearch.first_pow2(%x: Int) -> Int
+  | %x >= 1
+  hint "fold k in range(62), p from 1 { p * 2 } until p >= x"
+  => 5 -> 8
+  => 17 -> 32
+  ?? 1 -> 1

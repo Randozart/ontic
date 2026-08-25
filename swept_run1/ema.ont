@@ -1,0 +1,7 @@
+wrapping
+fn Stats.ema(%xs: List<F64>, %alpha: F64) -> List<F64>
+  | len(%xs) > 0 && %alpha >= 0.0 && %alpha <= 1.0
+  hint "fold v in %xs, acc from [index(%xs, 0)] { let prev = index(acc, len(acc) - 1); let next_val = prev + %alpha * (v - prev); next_val }"
+  => [1.0, 2.0, 3.0], 0.5 -> [1.0, 1.5, 2.25] ± 1e-12
+  => [10.0, 20.0], 0.0 -> [10.0, 10.0] ± 1e-12
+  ?? [5.0, 5.0, 5.0], 1.0 -> [5.0, 5.0, 5.0] ± 1e-12

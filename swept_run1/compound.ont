@@ -1,0 +1,8 @@
+wrapping
+fn Fin.compound(%p: F64, %rate: F64, %periods: F64) -> F64
+  | %p >= 0.0
+  | %periods >= 0.0
+  hint "let growth = 1.0 + %rate; %p * exp(%periods * log(growth))"
+  => 100.0, 0.05, 2.0 -> 110.25 ± 1e-6
+  => 50.0, 0.1, 1.0 -> 55.0 ± 1e-6
+  ?? 200.0, 0.02, 3.0 -> 212.2416 ± 1e-4

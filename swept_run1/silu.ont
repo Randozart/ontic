@@ -1,0 +1,8 @@
+wrapping
+use Act.sigmoid
+fn Act.silu(%x: F64) -> F64
+  | true
+  hint "let s = Act.sigmoid(%x); %x * s"
+  => 0.0 -> 0.0 ± 1e-12
+  => 1.0 -> 0.7310585786300049 ± 1e-12
+  ?? -1.0 -> -0.2689414213699951 ± 1e-12

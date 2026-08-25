@@ -1,0 +1,10 @@
+wrapping
+use Llinalg.dot
+use Llinalg.normalize
+fn Agg.dot_norm(%a: List<F64>, %b: List<F64>) -> F64
+  | len(%a) == len(%b)
+  | len(%a) > 0
+  hint "let norm_a = Llinalg.normalize(%a); Llinalg.dot(norm_a, %b)"
+  => [1.0, 0.0], [0.0, 1.0] -> 0.0 ± 1e-12
+  => [3.0, 4.0], [3.0, 4.0] -> 5.0 ± 1e-12
+  ?? [1.0, 1.0], [2.0, 2.0] -> 2.8284271247461903 ± 1e-12
