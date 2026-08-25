@@ -49,6 +49,8 @@ pub enum BinOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     Len,
+    MinEl,
+    MaxEl,
     Index,
     Range,
     Sum,
@@ -109,7 +111,13 @@ pub enum Expr {
         /// iteration; loop stops when it yields Bool(true). Budget is the
         /// list/range length — termination stays decidable.
         until: Option<Box<Expr>>,
+        /// Extra carried accumulators: `, %name from INIT` each. When
+        /// non-empty the body must be a restricted tuple expression with
+        /// one component per accumulator (acc first).
+        aux: Vec<(String, Box<Expr>)>,
     },
+    /// Restricted tuple expression: multi-accumulator fold bodies only.
+    Tuple(Vec<Expr>),
 }
 
 /// A parsed candidate: `fn @name(%p: T, ...) -> T { expr }`.
@@ -251,6 +259,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                     | "abs" | "map" | "fold" | "let" | "if" | "else" | "true"
                     | "false" | "in" | "from" | "Int" | "F64" | "Bool"
                     | "List" | "fn" | "index" | "range" | "until"
+                    | "min_el" | "max_el"
             );
             if !is_keyword {
                 // Speculative dotted-path scan: ident ('.' ident)* then ws+'('
@@ -313,6 +322,8 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "abs" => Some("abs"),
                 "fold" => Some("fold"),
                 "until" => Some("until"),
+                "min_el" => Some("min_el"),
+                "max_el" => Some("max_el"),
                 "in" => Some("in"),
                 "from" => Some("from"),
                 "Int" => Some("Int"),
@@ -418,6 +429,17 @@ impl Parser {
                 Ok(())
             }
             _ => Err(err(self.offset(), format!("expected `{}`", s))),
+        }
+    }
+
+    /// Consume a symbol when present; report whether it was there.
+    fn try_eat_sym(&mut self, w: &str) -> bool {
+        match self.peek() {
+            Some(Tok::Sym(x)) if *x == w => {
+                self.pos += 1;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -710,6 +732,23 @@ impl Parser {
             Some(Tok::Sym("(")) => {
                 self.pos += 1;
                 let e = self.parse_expr()?;
+                // Restricted tuple literal — valid only as multi-acc fold
+                // bodies (checker enforces the restriction).
+                if self.try_eat_sym(",") {
+                    let mut items = vec![e];
+                    loop {
+                        items.push(self.parse_expr()?);
+                        if !self.try_eat_sym(",") {
+                            break;
+                        }
+                        // trailing comma tolerated
+                        if matches!(self.peek(), Some(Tok::Sym(")"))) {
+                            break;
+                        }
+                    }
+                    self.eat_sym(")")?;
+                    return Ok(Expr::Tuple(items));
+                }
                 self.eat_sym(")")?;
                 Ok(e)
             }
@@ -735,8 +774,8 @@ impl Parser {
                 self.pos += 1;
                 self.eat_sym("(")?;
                 let e = self.parse_expr()?;
-                // index takes a second argument (the position).
-                let second = if w == "index" {
+                // index and elementwise min/max take a second argument.
+                let second = if w == "index" || w == "min_el" || w == "max_el" {
                     self.eat_sym(",")?;
                     Some(self.parse_expr()?)
                 } else {
@@ -750,6 +789,8 @@ impl Parser {
                     "sum" => Builtin::Sum,
                     "max" => Builtin::Max,
                     "min" => Builtin::Min,
+                    "min_el" => Builtin::MinEl,
+                    "max_el" => Builtin::MaxEl,
                     "sqrt" => Builtin::Sqrt,
                     "exp" => Builtin::Exp,
                     "log" => Builtin::Log,
@@ -800,6 +841,16 @@ impl Parser {
         let acc = self.eat_pident()?;
         self.eat_word("from")?;
         let init = self.parse_expr()?;
+        let mut aux: Vec<(String, Box<Expr>)> = Vec::new();
+        while self.try_eat_sym(",") {
+            let name = self.eat_pident()?;
+            self.eat_word("from")?;
+            let e = self.parse_expr()?;
+            if aux.len() >= 3 {
+                return Err(err(self.offset(), "too many accumulators (max acc + 3)"));
+            }
+            aux.push((name, Box::new(e)));
+        }
         self.eat_sym("{")?;
         let body = self.parse_expr()?;
         self.eat_sym("}")?;
@@ -815,6 +866,7 @@ impl Parser {
             init: Box::new(init),
             body: Box::new(body),
             until,
+            aux,
         })
     }
 }

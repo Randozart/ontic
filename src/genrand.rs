@@ -164,6 +164,8 @@ pub fn render(e: &Expr) -> String {
                 crate::sketch::Builtin::Sum => "sum",
                 crate::sketch::Builtin::Max => "max",
                 crate::sketch::Builtin::Min => "min",
+                crate::sketch::Builtin::MinEl => "min_el",
+                crate::sketch::Builtin::MaxEl => "max_el",
                 crate::sketch::Builtin::Sqrt => "sqrt",
                 crate::sketch::Builtin::Exp => "exp",
                 crate::sketch::Builtin::Log => "log",
@@ -183,18 +185,25 @@ pub fn render(e: &Expr) -> String {
             render(c), render(t), render(f)
         ),
         Let(n, v, b) => format!("let %{} = {}; {}", n, render(v), render(b)),
-        Fold { var, acc, list, init, body, until } => format!(
-            "fold %{} in {}, %{} from {} {{ {} }}{}",
+        Fold { var, acc, list, init, body, until, aux } => format!(
+            "fold %{} in {}, %{} from {}{} {{ {} }}{}",
             var,
             render(list),
             acc,
             render(init),
+            aux.iter()
+                .map(|(n, e)| format!(", %{} from {}", n, render(e)))
+                .collect::<String>(),
             render(body),
             match until {
                 Some(u) => format!(" until {}", render(u)),
                 None => String::new(),
             }
         ),
+        Tuple(items) => {
+            let inner: Vec<String> = items.iter().map(render).collect();
+            format!("({})", inner.join(", "))
+        }
         ListCons(elems) => {
             let inner: Vec<String> = elems.iter().map(render).collect();
             format!("[{}]", inner.join(", "))

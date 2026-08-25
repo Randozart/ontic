@@ -168,6 +168,9 @@ fn _is_list(ty: &Ty) -> bool {
 
 fn emit_expr(e: &Expr, em: &mut LlvmEmitter) -> Result<String, String> {
     match e {
+        Expr::Tuple(_) => Err(
+            "direct LLVM: tuple bodies require the MLIR pipeline".to_string(),
+        ),
         Expr::IntLit(v) => {
             let r = em.fresh();
             em.line(&format!("{} = add i64 {}, 0", r, v));
@@ -238,8 +241,9 @@ fn emit_expr(e: &Expr, em: &mut LlvmEmitter) -> Result<String, String> {
             init,
             body,
             ref until,
+            ref aux,
         } => {
-            if until.is_some() {
+            if until.is_some() || !aux.is_empty() {
                 return Err(
                     "direct LLVM: until-folds require the MLIR pipeline".to_string(),
                 );

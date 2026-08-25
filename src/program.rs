@@ -580,6 +580,7 @@ mod ffi_tests {
             &cand.params,
             &cand.ret,
             "testkey1",
+            false,
         )
         .unwrap();
         let h_path = dir.join("Twice.h");

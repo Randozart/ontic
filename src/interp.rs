@@ -130,6 +130,9 @@ fn eval_builtin(b: Builtin, inner: &Expr, env: &Env, ctx: &Ctx) -> Result<Value,
             Value::FloatList(vs) => Ok(Value::Int(vs.len() as i64)),
             other => Err(EvalError::TypeError(format!("len of non-list {}", other))),
         },
+        Builtin::MinEl | Builtin::MaxEl => Err(EvalError::TypeError(
+            "internal: elementwise min/max are binary".to_string(),
+        )),
         Builtin::Sum => match v {
             Value::List(vs) => Ok(Value::Int(vs.iter().sum())),
             Value::FloatList(vs) => Ok(Value::Float(vs.iter().sum())),
@@ -343,6 +346,29 @@ fn eval_builtin2(
                 other => Err(EvalError::TypeError(format!("index of {}", other))),
             }
         }
+        Builtin::MinEl | Builtin::MaxEl => {
+            let lv = eval_ctx(l, env, ctx)?;
+            let rv = eval_ctx(r, env, ctx)?;
+            let is_min = matches!(b, Builtin::MinEl);
+            let pick = |a: i64, b2: i64| {
+                if is_min { a.min(b2) } else { a.max(b2) }
+            };
+            let pickf = |a: f64, b2: f64| {
+                if is_min { a.min(b2) } else { a.max(b2) }
+            };
+            match (lv, rv) {
+                (Value::Int(a), Value::Int(b2)) => Ok(Value::Int(pick(a, b2))),
+                (Value::Float(a), Value::Float(b2)) => Ok(Value::Float(pickf(a, b2))),
+                (Value::Int(a), Value::Float(b2)) => Ok(Value::Float(pickf(a as f64, b2))),
+                (Value::Float(a), Value::Int(b2)) => Ok(Value::Float(pickf(a, b2 as f64))),
+                (a, b2) => Err(EvalError::TypeError(format!(
+                    "{} of {} vs {}",
+                    if is_min { "min_el" } else { "max_el" },
+                    a,
+                    b2
+                ))),
+            }
+        }
         _ => Err(EvalError::TypeError("binary builtin".to_string())),
     }
 }
@@ -490,7 +516,27 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
             init,
             body,
             ref until,
-        } => eval_fold(var, acc, list, init, body, until.as_deref(), env, ctx),
+            ref aux,
+        } => eval_fold(
+            var,
+            acc,
+            list,
+            init,
+            body,
+            until.as_deref(),
+            aux,
+            env,
+            ctx,
+        ),
+        Expr::Tuple(items) => {
+            // Tuples never become runtime values; multi-acc folds evaluate
+            // components directly in eval_fold.
+            let _ = items;
+            Err(EvalError::TypeError(
+                "tuple expressions are only valid as multi-accumulator fold bodies"
+                    .to_string(),
+            ))
+        }
         Expr::BinOp(op, l, r) => eval_binop(*op, l, r, env, ctx),
     }
 }
@@ -504,26 +550,34 @@ fn eval_fold(
     init: &Expr,
     body: &Expr,
     until: Option<&Expr>,
+    aux: &[(String, Box<crate::sketch::Expr>)],
     env: &Env,
     ctx: &Ctx,
 ) -> Result<Value, EvalError> {
-    let mut running = eval_ctx(init, env, ctx)?;
-    let step = |env: &Env, item: Value, running: Value| -> Result<Value, EvalError> {
-        let mut scoped = env.clone();
-        scoped.insert(var.to_string(), item);
-        scoped.insert(acc.to_string(), running);
-        eval_ctx(body, &scoped, ctx)
+    // State vector: [acc, aux...]. Multi-accumulator bodies are restricted
+    // tuple expressions evaluated component-wise (no tuple values exist).
+    let mut state: Vec<Value> = Vec::with_capacity(aux.len() + 1);
+    state.push(eval_ctx(init, env, ctx)?);
+    for (_, ie) in aux {
+        state.push(eval_ctx(ie, env, ctx)?);
+    }
+
+    let bind = |env: &Env, item: Value, st: &[Value]| -> Env {
+        let mut s = env.clone();
+        s.insert(var.to_string(), item);
+        s.insert(acc.to_string(), st[0].clone());
+        for ((n, _), v) in aux.iter().zip(st[1..].iter()) {
+            s.insert(n.clone(), v.clone());
+        }
+        s
     };
-    // Pre-test early exit: `until` is evaluated on the current iteration
-    // variable and accumulator BEFORE the step. Zero iterations when the
-    // initial state already satisfies it; full budget otherwise.
-    let done = |k: Value, a: &Value| -> Result<bool, EvalError> {
+
+    // Pre-test early exit on (index, all carried state).
+    let done = |k: Value, st: &[Value]| -> Result<bool, EvalError> {
         match until {
             None => Ok(false),
             Some(u) => {
-                let mut scoped = env.clone();
-                scoped.insert(var.to_string(), k);
-                scoped.insert(acc.to_string(), a.clone());
+                let scoped = bind(env, k, st);
                 match eval_ctx(u, &scoped, ctx)? {
                     Value::Bool(b) => Ok(b),
                     other => Err(EvalError::TypeError(format!(
@@ -534,26 +588,69 @@ fn eval_fold(
             }
         }
     };
+
+    // Step: single-acc bodies yield the next acc directly; multi-acc bodies
+    // are restricted tuples yielding one component per accumulator.
+    let step = |env: &Env, item: Value, st: &[Value]| -> Result<Vec<Value>, EvalError> {
+        let scoped = bind(env, item, st);
+        if aux.is_empty() {
+            Ok(vec![eval_ctx(body, &scoped, ctx)?])
+        } else {
+            match body {
+                crate::sketch::Expr::Tuple(items) => {
+                    if items.len() != st.len() {
+                        return Err(EvalError::TypeError(format!(
+                            "fold body yields {} values, {} accumulators present",
+                            items.len(),
+                            st.len()
+                        )));
+                    }
+                    items
+                        .iter()
+                        .map(|e| eval_ctx(e, &scoped, ctx))
+                        .collect()
+                }
+                _ => Err(EvalError::TypeError(
+                    "multi-accumulator fold bodies must be tuple expressions".to_string(),
+                )),
+            }
+        }
+    };
+
+    fn step_all(
+        env: &Env,
+        step: &dyn Fn(&Env, Value, &[Value]) -> Result<Vec<Value>, EvalError>,
+        done: &dyn Fn(Value, &[Value]) -> Result<bool, EvalError>,
+        item: Value,
+        state: &mut Vec<Value>,
+    ) -> Result<(), EvalError> {
+        if done(item.clone(), state)? {
+            return Ok(());
+        }
+        *state = step(env, item, state)?;
+        Ok(())
+    }
+
     match eval_ctx(list, env, ctx)? {
         Value::List(vs) => {
             for (idx, item) in vs.iter().enumerate() {
-                if done(Value::Int(idx as i64), &running)? {
+                if done(Value::Int(idx as i64), &state)? {
                     break;
                 }
-                running = step(env, Value::Int(*item), running)?;
+                step_all(env, &step, &done, Value::Int(*item), &mut state)?;
             }
         }
         Value::FloatList(vs) => {
             for (idx, item) in vs.iter().enumerate() {
-                if done(Value::Int(idx as i64), &running)? {
+                if done(Value::Int(idx as i64), &state)? {
                     break;
                 }
-                running = step(env, Value::Float(*item), running)?;
+                step_all(env, &step, &done, Value::Float(*item), &mut state)?;
             }
         }
         other => return Err(EvalError::TypeError(format!("fold over {}", other))),
     }
-    Ok(running)
+    Ok(state[0].clone())
 }
 
 fn eval_binop(

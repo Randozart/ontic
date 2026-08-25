@@ -805,6 +805,7 @@ fn emit_and_store(
                     &survivor.candidate.params,
                     &survivor.candidate.ret,
                     &key8,
+                    false,
                 ) {
                     Ok(h) => match std::fs::write(&hdr_path, h) {
                         Ok(_) => {
@@ -845,6 +846,52 @@ fn emit_and_store(
                         Err(e) => eprintln!("header write failed: {}", e),
                     },
                     Err(e) => eprintln!("header generation failed: {}", e),
+                }
+                // Guarded twin: C shim wrapping the kernel with runtime
+                // precondition checks.  Non-fatal — raw .so always lands.
+                let guarded_lib_name = format!("lib{}-{}.guarded.so", survivor.candidate.name, key8);
+                let guarded_so_path = std::path::Path::new(&vault_dir).join(&guarded_lib_name);
+                match lower::emit_shim_c(
+                    &survivor.candidate.name,
+                    &survivor.candidate.params,
+                    &survivor.candidate.ret,
+                    &key8,
+                    &w.invariants,
+                ) {
+                    Ok(shim_src) => {
+                        match pipeline::build_shared_so_guarded(
+                            &validation_text,
+                            &shim_src,
+                            &guarded_so_path,
+                        ) {
+                            Ok(_shim_text) => {
+                                println!("GUARDED : {}/{}", vault_dir, guarded_lib_name);
+                                let shim_name = format!("{}-{}.guarded.c", survivor.candidate.name, key8);
+                                let shim_path = std::path::Path::new(&vault_dir).join(&shim_name);
+                                let _ = std::fs::write(&shim_path, &shim_src);
+                                artifacts.insert(
+                                    "guarded_lib".to_string(),
+                                    serde_json::Value::String(guarded_lib_name),
+                                );
+                                artifacts.insert(
+                                    "guarded_shim".to_string(),
+                                    serde_json::Value::String(shim_name),
+                                );
+                                // Regenerate header with guarded section.
+                                if let Ok(guarded_hdr) = lower::emit_header(
+                                    &survivor.candidate.name,
+                                    &survivor.candidate.params,
+                                    &survivor.candidate.ret,
+                                    &key8,
+                                    true,
+                                ) {
+                                    let _ = std::fs::write(&hdr_path, guarded_hdr);
+                                }
+                            }
+                            Err(e) => eprintln!("guarded build warning: {}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("guarded shim generation warning: {}", e),
                 }
             }
             Err(e) => eprintln!("shared library build failed: {}", e),
@@ -1012,6 +1059,7 @@ fn emit_ous(
         &survivor.candidate.params,
         &survivor.candidate.ret,
         &key[..8.min(key.len())],
+        false,
     ).unwrap_or_default();
 
     let entry = ontic::vault::Entry {
@@ -1182,6 +1230,7 @@ fn cmd_lib_build(args: &[String]) -> i32 {
                 &g.params,
                 &g.ret,
                 &key[..8.min(key.len())],
+                false,
             )
             .unwrap();
             headers.push(h);
@@ -1251,7 +1300,7 @@ fn cmd_lib_build(args: &[String]) -> i32 {
                 all_funcs.push(chunk);
             }
         }
-        let h = lower::emit_header(&g.name, &g.params, &g.ret, &key[..8.min(key.len())])
+        let h = lower::emit_header(&g.name, &g.params, &g.ret, &key[..8.min(key.len())], false)
             .unwrap();
         headers.push(h);
         members.push(key.clone());
@@ -1622,6 +1671,7 @@ fn cmd_pack(args: &[String]) -> i32 {
                 &cand.params,
                 &cand.ret,
                 &entry.key[..8.min(entry.key.len())],
+                false,
             )
         }) {
         Ok(h) => h,

@@ -781,3 +781,92 @@ pub fn build_shared_so(composite_mlir: &str, out_so: &Path) -> Result<(), String
         "shared link",
     )
 }
+
+/// Build a guarded shared library: rename the MLIR kernel to `__raw`, compile
+/// the C shim that owns the public ABI symbol, and link everything into
+/// `out_so`.  The shim source is returned for vault reproducibility.
+pub fn build_shared_so_guarded(
+    composite_mlir: &str,
+    shim_source: &str,
+    out_so: &Path,
+) -> Result<String, String> {
+    let dir = scratch_dir("so_guarded");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    // Rename kernel: func.func @<name>(...)  →  func.func @<name>__raw(...)
+    let guarded_mlir = composite_mlir
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("func.func @") {
+                // Replace the first @name with @name__raw
+                if let Some(at_pos) = line.find('@') {
+                    let after_at = &line[at_pos + 1..];
+                    if let Some(paren_pos) = after_at.find('(') {
+                        let name = &after_at[..paren_pos];
+                        if !name.ends_with("__raw") {
+                            return format!(
+                                "{}@{}__raw{}",
+                                &line[..at_pos],
+                                name,
+                                &after_at[paren_pos..]
+                            );
+                        }
+                    }
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mlir_p = dir.join("composite_guarded.mlir");
+    let ll_mlir = dir.join("composite_guarded_llvm.mlir");
+    let o_p = dir.join("composite_guarded.o");
+    let shim_c = dir.join("shim.c");
+    let shim_o = dir.join("shim.o");
+
+    std::fs::write(&mlir_p, &guarded_mlir)
+        .map_err(|e| format!("write {}: {}", mlir_p.display(), e))?;
+    std::fs::write(&shim_c, shim_source)
+        .map_err(|e| format!("write shim: {}", e))?;
+
+    mlir_to_llvmir(&mlir_p, &ll_mlir)
+        .map_err(|e| format!("guarded lower-to-llvm: {}", e))?;
+    object_from_ll(&ll_mlir, &o_p)
+        .map_err(|e| format!("guarded object: {}", e))?;
+
+    let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
+    // Compile shim object
+    run(
+        &cc,
+        &["-fPIC", "-c", shim_c.to_str().ok_or("bad shim")?, "-o", shim_o.to_str().ok_or("bad shim_o")?],
+        "guarded shim compile",
+    )?;
+
+    // Trap stub
+    let trap_c = dir.join("trap.c");
+    std::fs::write(
+        &trap_c,
+        "#include <stdlib.h>\nlong ontic_trap(void) { abort(); }\ndouble ontic_trapf(void) { abort(); }\n",
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Link: kernel .o + shim .o + trap stub
+    run(
+        &cc,
+        &[
+            "-shared",
+            "-O2",
+            "-lm",
+            "-lpthread",
+            o_p.to_str().ok_or("bad obj")?,
+            shim_o.to_str().ok_or("bad shim_o")?,
+            trap_c.to_str().ok_or("bad trap")?,
+            "-o",
+            out_so.to_str().ok_or("bad so")?,
+        ],
+        "guarded shared link",
+    )?;
+
+    Ok(shim_source.to_string())
+}

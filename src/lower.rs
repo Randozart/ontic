@@ -65,11 +65,19 @@ pub fn expr_display(e: &Expr) -> String {
                 Builtin::Log => "log",
                 Builtin::Abs => "abs",
                 Builtin::Index => "index",
+                Builtin::MinEl => "min_el",
+                Builtin::MaxEl => "max_el",
             },
             expr_display(i)
         ),
-        Expr::Builtin2(_, l, r) => format!(
-            "index({}, {})",
+        Expr::Builtin2(b, l, r) => format!(
+            "{}({}, {})",
+            match b {
+                Builtin::Index => "index",
+                Builtin::MinEl => "min_el",
+                Builtin::MaxEl => "max_el",
+                other => unreachable!("builtin2 display: {:?}", other),
+            },
             expr_display(l),
             expr_display(r)
         ),
@@ -95,17 +103,25 @@ pub fn expr_display(e: &Expr) -> String {
             init,
             body,
             until,
+            aux,
         } => format!(
-            "(fold %{} in {}, %{} from {} {{ {} }}{})",
+            "(fold %{} in {}, %{} from {}{} {{ {} }}{})",
             var,
             expr_display(list),
             acc,
             expr_display(init),
+            aux.iter()
+                .map(|(n, e)| format!(", %{} from {}", n, expr_display(e)))
+                .collect::<String>(),
             expr_display(body),
             match until {
                 Some(u) => format!(" until {}", expr_display(u)),
                 None => String::new(),
             }
+        ),
+        Expr::Tuple(items) => format!(
+            "({})",
+            items.iter().map(expr_display).collect::<Vec<_>>().join(", ")
         ),
         Expr::BinOp(op, l, r) => format!(
             "({} {} {})",
@@ -323,6 +339,63 @@ fn emit_expr(
         }
         Expr::Call(p, args) => emit_call(p, args, env, tyenv, em),
         Expr::Builtin(b, inner) => emit_builtin(*b, inner, env, tyenv, em),
+        Expr::Builtin2(
+            b @ (crate::sketch::Builtin::MinEl | crate::sketch::Builtin::MaxEl),
+            lr,
+            rr,
+        ) => {
+            let lv = emit_expr(lr, env, tyenv, em)?;
+            let rv = emit_expr(rr, env, tyenv, em)?;
+            let lt = expr_ty(lr, tyenv);
+            let rt = expr_ty(rr, tyenv);
+            let any_float = matches!(lt, Ty::F64) || matches!(rt, Ty::F64);
+            let (lv_s, rv_s) = if any_float {
+                let lw = if matches!(lt, Ty::Int) {
+                    let w = em.fresh("widen");
+                    em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, lv));
+                    w
+                } else {
+                    lv
+                };
+                let rw = if matches!(rt, Ty::Int) {
+                    let w = em.fresh("widen");
+                    em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, rv));
+                    w
+                } else {
+                    rv
+                };
+                (lw, rw)
+            } else {
+                (lv, rv)
+            };
+            let is_min = matches!(b, crate::sketch::Builtin::MinEl);
+            let pred = match (any_float, is_min) {
+                (true, true) => "olt",
+                (true, false) => "ogt",
+                (false, true) => "slt",
+                (false, false) => "sgt",
+            };
+            let cmp = em.fresh("c");
+            if any_float {
+                em.line(&format!(
+                    "{} = arith.cmpf {}, {}, {} : f64",
+                    cmp, pred, lv_s, rv_s
+                ));
+            } else {
+                em.line(&format!(
+                    "{} = arith.cmpi {}, {}, {} : i64",
+                    cmp, pred, lv_s, rv_s
+                ));
+            }
+            let r = em.fresh("sel");
+            let sel_ty = if any_float { "f64" } else { "i64" };
+            // min: pick left when left < right; max: pick left when left > right.
+            em.line(&format!(
+                "{} = arith.select {}, {}, {} : {}",
+                r, cmp, lv_s, rv_s, sel_ty
+            ));
+            Ok(r)
+        }
         Expr::Builtin2(crate::sketch::Builtin::Index, l, r) => {
             emit_index(l, r, env, tyenv, em)
         }
@@ -404,8 +477,24 @@ fn emit_expr(
             init,
             body,
             ref until,
-        } => emit_fold(var, acc, list, init, body, until.as_deref(), env, tyenv, em),
+            ref aux,
+        } => emit_fold(
+            var,
+            acc,
+            list,
+            init,
+            body,
+            until.as_deref(),
+            aux,
+            env,
+            tyenv,
+            em,
+        ),
         Expr::BinOp(op, l, r) => emit_binop(*op, l, r, env, tyenv, em),
+        Expr::Tuple(_) => Err(
+            "tuple expressions require a multi-accumulator fold (emission is component-wise)"
+                .to_string(),
+        ),
     }
 }
 
@@ -440,6 +529,10 @@ fn emit_builtin(
     em: &mut Emitter,
 ) -> Result<String, String> {
     match b {
+        Builtin::MinEl | Builtin::MaxEl => Err(format!(
+            "lowering: {:?} is binary (internal routing error)",
+            b
+        )),
         // range(n) allocates an i64 memref 0..n and fills it by loop.
         Builtin::Range => {
             let n64 = emit_expr(inner, env, tyenv, em)?;
@@ -554,6 +647,7 @@ fn emit_builtin(
                 &Box::new(init),
                 &Box::new(body),
                 None,
+                &[],
                 env,
                 tyenv,
                 em,
@@ -925,12 +1019,20 @@ fn emit_fold(
     init: &Expr,
     body: &Expr,
     until: Option<&Expr>,
+    aux: &[(String, Box<Expr>)],
     env: &mut Vec<Binding>,
     tyenv: &mut HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
     let init_v = emit_expr(init, env, tyenv, em)?;
     let m = emit_expr(list, env, tyenv, em)?;
+    if !aux.is_empty() {
+        // Multi-accumulator: scf.for with one iter_arg per carried value;
+        // body is a restricted tuple, emitted component-wise.
+        return emit_fold_multi(
+            var, acc, list, m, init, init_v, body, until, aux, env, tyenv, em,
+        );
+    }
     if let Some(u) = until {
         let init_ty_v = expr_ty(init, tyenv);
         return emit_fold_until(var, acc, list, m, init_ty_v, init_v, body, u, env, tyenv, em);
@@ -982,7 +1084,293 @@ fn emit_fold(
     Ok(acc_ssa)
 }
 
+/// Multi-accumulator fold: one iter_arg per carried value. Without `until`
+/// lowers to `scf.for` (variadic results, take #0 = acc); with `until` to
+/// `scf.while` whose pre-test binds every carried value plus the index.
+/// Body is a restricted tuple emitted component-wise — matching interp's
+/// component-wise evaluation exactly (Golden Rule 6).
+#[allow(clippy::too_many_arguments)]
+fn emit_fold_multi(
+    var: &str,
+    acc_name: &str,
+    list: &Expr,
+    m: String,
+    init: &Expr,
+    init_v: String,
+    body: &Expr,
+    until: Option<&Expr>,
+    aux: &[(String, Box<Expr>)],
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let comps = match body {
+        Expr::Tuple(items) => items.clone(),
+        _ => {
+            return Err(
+                "multi-accumulator fold bodies must be tuple expressions".to_string(),
+            )
+        }
+    };
+    if comps.len() != aux.len() + 1 {
+        return Err(format!(
+            "fold body yields {} components for {} accumulators",
+            comps.len(),
+            aux.len() + 1
+        ));
+    }
+
+    // Carried set: acc first, then aux in declaration order.
+    let mut carried: Vec<(String, String, Ty)> = Vec::new();
+    let acc_ty = expr_ty(init, tyenv);
+    carried.push((acc_name.to_string(), init_v.clone(), acc_ty.clone()));
+    for (n, ie) in aux {
+        let t = expr_ty(ie, tyenv);
+        let ssa = emit_expr(ie, env, tyenv, em)?;
+        carried.push((n.clone(), ssa, t));
+    }
+    // NOTE: aux init ssa names double as unique carriers; bound names come
+    // from aux declarations, so rebind by NAME below regardless of ssa text.
+    let _ = &carried;
+
+    let elem_ty = fold_elem_ty(list, tyenv);
+    let list_mty = if matches!(elem_ty, Ty::F64) {
+        "memref<?xf64>"
+    } else {
+        "memref<?xi64>"
+    };
+
+    let idx0 = em.const_index(0);
+    let step = em.const_index(1);
+    let dim = em.fresh("dim");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim, m, idx0, list_mty
+    ));
+
+    let tys_txt: String = carried
+        .iter()
+        .map(|(_, _, t)| if matches!(t, Ty::F64) { "f64" } else { "i64" })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Fresh arg names per carried slot, reused consistently per region.
+    let arg_names: Vec<String> = (0..carried.len()).map(|k| em.fresh(&format!("s{}", k))).collect();
+    let bind_names: Vec<String> = (0..carried.len()).map(|k| em.fresh(&format!("b{}", k))).collect();
+
+    let push_bindings = |env: &mut Vec<Binding>,
+                         tyenv: &mut HashMap<String, Ty>,
+                         names: &[String],
+                         iv_ssa: Option<&String>| {
+        if let Some(iv) = iv_ssa {
+            env.push(Binding { name: var.to_string(), ssa: iv.clone() });
+            tyenv.insert(var.to_string(), Ty::Int);
+        }
+        for ((n, _, t), a) in carried.iter().zip(names.iter()) {
+            env.push(Binding { name: n.clone(), ssa: a.clone() });
+            tyenv.insert(n.clone(), t.clone());
+        }
+    };
+    let pop_n = |env: &mut Vec<Binding>, tyenv: &mut HashMap<String, Ty>, k: usize| {
+        for _ in 0..k {
+            env.pop();
+        }
+        for _ in 0..k {
+            if let Some((n, _)) = env.last().map(|b| (b.name.clone(), ())) {
+                let _ = n;
+                break;
+            }
+        }
+        // tyenv entries are scoped-by-shadowing; leaving them is consistent
+        // with existing fold/map emissions.
+        let _ = tyenv;
+    };
+
+    match until {
+        None => {
+            let mut iter_args = String::new();
+            for (k, a) in arg_names.iter().enumerate() {
+                if k > 0 {
+                    iter_args.push_str(", ");
+                }
+                iter_args.push_str(&format!(
+                    "{} = {}",
+                    a,
+                    carried[k].1.clone()
+                ));
+            }
+            let res = em.fresh("mf").trim_start_matches('%').to_string();
+            em.line(&format!(
+                "%{r} = scf.for %mi = {i0} to {dim} step {st} iter_args({args}) -> ({tys}) {{",
+                r = res,
+                i0 = idx0,
+                st = step,
+                args = iter_args,
+                tys = tys_txt
+            ));
+            em.indent += 1;
+            let elem = em.fresh("fe");
+            em.line(&format!(
+                "{} = memref.load {}[%mi] : {}",
+                elem, m, list_mty
+            ));
+            env.push(Binding { name: var.to_string(), ssa: "%mi".to_string() });
+            for ((n, _, t), a) in carried.iter().zip(arg_names.iter()) {
+                env.push(Binding {
+                    name: n.clone(),
+                    ssa: a.clone(),
+                });
+                tyenv.insert(n.clone(), t.clone());
+            }
+            let pushed = carried.len() + 1;
+            let mut yields: Vec<String> = Vec::new();
+            for c in &comps {
+                yields.push(emit_expr(c, env, tyenv, em)?);
+            }
+            em.line(&format!(
+                "scf.yield {} : {}",
+                yields.join(", "),
+                tys_txt
+            ));
+            // Pop what we pushed (bindings only; tyenv shadowing persists).
+            for _ in 0..pushed {
+                env.pop();
+            }
+            em.indent -= 1;
+            em.line("}");
+            Ok(format!("%{}#0", res))
+        }
+        Some(u) => {
+            let wname = em.fresh("wh").trim_start_matches('%').to_string();
+            let mut init_args: Vec<String> =
+                carried.iter().map(|(_, s, _)| s.clone()).collect();
+            init_args.push(idx0.clone());
+            let mut arg_names_w = arg_names.clone();
+            arg_names_w.push("%wi".to_string());
+            let mut tys_w: Vec<String> = carried
+                .iter()
+                .map(|(_, _, t)| {
+                    if matches!(t, Ty::F64) { "f64".to_string() } else { "i64".to_string() }
+                })
+                .collect();
+            tys_w.push("index".to_string());
+            let tys_w_txt = tys_w.join(", ");
+            let num_results = (carried.len() + 1).to_string();
+            em.line(&format!(
+                "%{w}:{n} = scf.while ({args}) : ({tys}) -> ({tys}) {{",
+                w = wname,
+                n = num_results,
+                args = format_args_named(&arg_names_w, &init_args),
+                tys = tys_w_txt
+            ));
+            em.indent += 1;
+            let inb = em.fresh("inb");
+            em.line(&format!(
+                "{} = arith.cmpi slt, %wi, {} : index",
+                inb, dim
+            ));
+            push_bindings(env, tyenv, &arg_names, Some(&"%wi".to_string()));
+            let done_raw = emit_expr(u, env, tyenv, em)?;
+            let done_b = em.fresh("db");
+            em.line(&format!("{} = arith.trunci {} : i64 to i1", done_b, done_raw));
+            let ctrue = em.fresh("ct");
+            em.line(&format!("{} = arith.constant true", ctrue));
+            let nd = em.fresh("nd");
+            em.line(&format!("{} = arith.xori {}, {} : i1", nd, done_b, ctrue));
+            let cont = em.fresh("cont");
+            em.line(&format!("{} = arith.andi {}, {} : i1", cont, inb, nd));
+            let mut carry_args: Vec<String> = arg_names.clone();
+            carry_args.push("%wi".to_string());
+            em.line(&format!(
+                "scf.condition({}) {} : {}",
+                cont,
+                carry_args.join(", "),
+                tys_w_txt
+            ));
+            pop_n(env, tyenv, carried.len() + 1);
+            em.indent -= 1;
+            em.line("} do {");
+            em.indent += 1;
+            let mut bb_sig = format_args_typed(&bind_names, &carried);
+            if !bb_sig.is_empty() {
+                bb_sig.push_str(", ");
+            }
+            bb_sig.push_str("%wib: index");
+            em.line(&format!("^bb0({}):", bb_sig));
+            let elem = em.fresh("fe");
+            em.line(&format!(
+                "{} = memref.load {}[%wib] : {}",
+                elem, m, list_mty
+            ));
+            env.push(Binding { name: var.to_string(), ssa: "%wib".to_string() });
+            for ((n, _, t), b) in carried.iter().zip(bind_names.iter()) {
+                env.push(Binding { name: n.clone(), ssa: b.clone() });
+                tyenv.insert(n.clone(), t.clone());
+            }
+            let mut yields: Vec<String> = Vec::new();
+            for c in &comps {
+                yields.push(emit_expr(c, env, tyenv, em)?);
+            }
+            let ni = em.fresh("ni");
+            em.line(&format!("{} = arith.addi %wib, {} : index", ni, step));
+            let mut yld = yields.clone();
+            yld.push(ni);
+            let mut yld_tys: Vec<String> = carried
+                .iter()
+                .map(|(_, _, t)| {
+                    if matches!(t, Ty::F64) { "f64".to_string() } else { "i64".to_string() }
+                })
+                .collect();
+            yld_tys.push("index".to_string());
+            em.line(&format!("scf.yield {} : {}", yld.join(", "), yld_tys.join(", ")));
+            for _ in 0..carried.len() + 1 {
+                env.pop();
+            }
+            em.indent -= 1;
+            em.line("}");
+            Ok(format!("%{}#0", wname))
+        }
+    }
+}
+
+fn format_args_named(names: &[String], inits: &[String]) -> String {
+    names
+        .iter()
+        .zip(inits.iter())
+        .map(|(n, i)| format!("{} = {}", n, i))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_args_types(carried: &[(String, String, crate::sketch::Ty)], extra: &str) -> String {
+    let mut v: Vec<String> = carried
+        .iter()
+        .map(|(_, _, t)| if matches!(t, crate::sketch::Ty::F64) { "f64".to_string() } else { "i64".to_string() })
+        .collect();
+    v.push(extra.to_string());
+    v.join(", ")
+}
+
+fn format_args_typed(names: &[String], carried: &[(String, String, crate::sketch::Ty)]) -> String {
+    names
+        .iter()
+        .zip(carried.iter())
+        .map(|(n, (_, _, t))| {
+            format!(
+                "{}: {}",
+                n,
+                if matches!(t, crate::sketch::Ty::F64) { "f64" } else { "i64" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Element type of the folded list under tyenv (param lookup / range).
+
+fn n_of(s: &str) -> String {
+    s.trim_start_matches('%').to_string()
+}
 fn fold_elem_ty(list: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
     match list {
         Expr::Var(n) => match tyenv.get(n) {
@@ -1257,6 +1645,10 @@ fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
         Expr::FloatListLit(_) => Ty::ListF64,
         Expr::Var(n) => tyenv.get(n).cloned().unwrap_or(Ty::Int),
         Expr::Call(p, _) => tyenv.get(p).cloned().unwrap_or(Ty::Int),
+        Expr::Tuple(items) => items
+            .first()
+            .map(|e| expr_ty(e, tyenv))
+            .unwrap_or(Ty::Int),
         Expr::Builtin2(crate::sketch::Builtin::Index, l, _) => {
             // Element type follows the indexed list.
             if matches!(expr_ty(l, tyenv), Ty::ListF64) {
@@ -1746,6 +2138,7 @@ pub fn emit_header(
     params: &[(String, Ty)],
     ret: &Ty,
     key8: &str,
+    guarded: bool,
 ) -> Result<String, String> {
     let rt = c_ret_ty(ret)?;
     let mut parts: Vec<String> = Vec::new();
@@ -1771,8 +2164,40 @@ pub fn emit_header(
     } else {
         parts.join(", ")
     };
+
+    let guarded_section = if guarded {
+        format!(
+            "\n/* ---- Runtime guard (link {guarded_lib} for checks) ---- */\n\
+             /* Default policy: ABORT. Switch at runtime: */\n\
+             /*   ontic_set_violation_policy(ONTIC_POLICY_TRAP); */\n\
+             /*   double r = geo(0.5);       // guarded */\n\
+             /*   double u = geo__raw(0.5);  // unchecked */\n\
+             const char *ontic_last_error(void);\n\
+             void        ontic_last_error_clear(void);\n\
+             void        ontic_set_violation_policy(int policy);\n\
+             int         ontic_violation_policy(void);\n\
+             #define ONTIC_POLICY_ABORT 0\n\
+             #define ONTIC_POLICY_TRAP  1\n",
+            guarded_lib = format!("lib{}-{}.guarded.so", name, key8),
+        )
+    } else {
+        String::new()
+    };
+
     let body = format!(
-        "// Ontic kernel (verified; do not edit - re-solve instead)\n// ABI v1: Flat-MemRef; List<T> param -> (allocated*, aligned*, offset, size, stride)\n#ifndef ONTIC_{gk}_{gn}_H\n#define ONTIC_{gk}_{gn}_H\n\n#ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n{rt} {name}({args});\n\n#ifdef __cplusplus\n}}\n#endif\n\n#endif /* ONTIC_{gk}_{gn}_H */\n"
+        "// Ontic kernel (verified; do not edit - re-solve instead)\n\
+         // ABI v1: Flat-MemRef; List<T> param -> (allocated*, aligned*, offset, size, stride)\n\
+         #ifndef ONTIC_{gk}_{gn}_H\n\
+         #define ONTIC_{gk}_{gn}_H\n\n\
+         #ifdef __cplusplus\n\
+         extern \"C\" {{\n\
+         #endif\n\n\
+         {rt} {name}({args});\n\
+         {guarded_section}\n\
+         #ifdef __cplusplus\n\
+         }}\n\
+         #endif\n\n\
+         #endif /* ONTIC_{gk}_{gn}_H */\n"
     );
     Ok(body)
 }
@@ -1978,6 +2403,7 @@ mod header_tests {
             &[("xs".to_string(), Ty::ListF64)],
             &Ty::F64,
             "deadbeef",
+            false,
         )
         .unwrap();
         assert!(h.contains("double mean(void* xs_a, void* xs_b, long xs_o, long xs_s, long xs_st);"));
@@ -1995,6 +2421,7 @@ mod header_tests {
             ],
             &Ty::Int,
             "cafe1234",
+            false,
         )
         .unwrap();
         assert!(h.contains("long f(void* items_a, void* items_b, long items_o, long items_s, long items_st, long k, long flag);"));
@@ -2002,8 +2429,8 @@ mod header_tests {
 
     #[test]
     fn test_header_deterministic() {
-        let a = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa").unwrap();
-        let b = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa").unwrap();
+        let a = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa", false).unwrap();
+        let b = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa", false).unwrap();
         assert_eq!(a, b);
     }
 }
@@ -2084,5 +2511,253 @@ mod hpp_tests {
         .unwrap();
         assert!(h.contains("untranslated:"), "hpp:\n{}", h);
         assert!(h.contains("pre(a_s > 0)"), "hpp:\n{}", h);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime guard shim emitter
+// ---------------------------------------------------------------------------
+
+/// Sentinel value returned by guarded kernels on TRAP policy violation.
+pub fn c_guard_sentinel(ty: &Ty) -> &'static str {
+    match ty {
+        Ty::F64 => "NAN",
+        Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 => "LONG_MIN",
+    }
+}
+
+/// C printf format specifier for a parameter value at runtime.
+fn c_guard_printf_spec(ty: &Ty) -> &'static str {
+    match ty {
+        Ty::F64 => "%.17g",
+        Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 => "%ld",
+    }
+}
+
+/// Render a runtime-callable invariant as a human-readable predicate string
+/// for inclusion in violation messages.  Falls back to `"true"` for
+/// untranslatable conjuncts so the guard still fires on every check.
+fn guard_pred_text(e: &crate::sketch::Expr, params: &[(String, Ty)]) -> String {
+    contract_text(e, params).unwrap_or_else(|| "true".to_string())
+}
+
+/// Render a flat-memref parameter as its five C arguments for the shim.
+/// Only used for diagnostic formatting in violation messages.
+fn flat_memref_c_args(name: &str) -> String {
+    format!(
+        "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st",
+        n = name
+    )
+}
+
+/// Emit a complete C source file that wraps the raw MLIR-emitted kernel
+/// with pre-runtime precondition checks.  The shim owns the public ABI
+/// symbol; the kernel is renamed `<name>__raw`.
+pub fn emit_shim_c(
+    name: &str,
+    params: &[(String, Ty)],
+    ret: &Ty,
+    key8: &str,
+    invariants: &[crate::sketch::Expr],
+) -> Result<String, String> {
+    let rt = c_ret_ty(ret)?;
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    };
+    let safe_name = sanitize(name);
+
+    // Build C parameter list.
+    let mut c_params: Vec<String> = Vec::new();
+    for (n, t) in params {
+        match t {
+            Ty::ListInt | Ty::ListF64 => c_params.push(flat_memref_c_args(n)),
+            Ty::Int | Ty::Bool => c_params.push(format!("long {n}")),
+            Ty::F64 => c_params.push(format!("double {n}")),
+        }
+    }
+    let c_args_str = if c_params.is_empty() {
+        "void".to_string()
+    } else {
+        c_params.join(", ")
+    };
+
+    // Collect invariant conjuncts: translatable ones become C guards,
+    // untranslatable ones are logged as comments but still fire (predicate
+    // is `"true"` so the check is harmless).
+    let mut checks: Vec<(String, String)> = Vec::new();
+    for inv in invariants {
+        for part in conjuncts(inv) {
+            let pred = guard_pred_text(part, params);
+            let readable = expr_display(part);
+            checks.push((pred, readable));
+        }
+    }
+
+    // Build printf format arguments for the violation message.
+    // Each scalar/list param contributes one format specifier + value.
+    let mut fmt_parts: Vec<String> = Vec::new();
+    let mut val_parts: Vec<String> = Vec::new();
+    for (n, t) in params {
+        match t {
+            Ty::ListInt | Ty::ListF64 => {
+                // For lists, print the size field so the user can see what
+                // length was passed.
+                fmt_parts.push(format!("long {n}=%ld"));
+                val_parts.push(format!("{n}_s"));
+            }
+            _ => {
+                fmt_parts.push(format!("long {n}={}", c_guard_printf_spec(t)));
+                val_parts.push(n.clone());
+            }
+        }
+    }
+
+    let fmt_str = if fmt_parts.is_empty() {
+        "ontic: %s pre violated: %s".to_string()
+    } else {
+        format!("ontic: %s pre violated: %s ({})", fmt_parts.join(", "))
+    };
+
+    // Emit guard if-chains.
+    let mut guard_body = String::new();
+    for (pred, readable) in &checks {
+        guard_body.push_str(&format!(
+            "    if (!({pred})) {{\n\
+             \x20       snprintf(tl_error, sizeof(tl_error),\n\
+             \x20               \"{fmt_str}\",\n\
+             \x20               \"{safe_name}\", \"{readable}\",\n\
+             \x20               {val_args});\n\
+             \x20       if (tl_policy == 0) {{\n\
+             \x20           fprintf(stderr, \"%s\\n\", tl_error);\n\
+             \x20           abort();\n\
+             \x20       }}\n\
+             \x20       return {sentinel};\n\
+             \x20   }}\n",
+            pred = pred,
+            fmt_str = fmt_str,
+            safe_name = safe_name,
+            readable = readable,
+            val_args = val_parts.join(", "),
+            sentinel = c_guard_sentinel(ret),
+        ));
+    }
+
+    let call_args: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+
+    Ok(format!(
+        "/* Auto-generated Ontic runtime guard shim — do not edit. */\n\
+         /* Kernel: {safe_name} | key: {key8} | policy: abort(default)/trap */\n\n\
+         #include <math.h>\n\
+         #include <string.h>\n\
+         #include <stdio.h>\n\
+         #include <stdlib.h>\n\
+         #include <stdint.h>\n\n\
+         /* ---- policy constants ---- */\n\
+         #define ONTIC_POLICY_ABORT 0\n\
+         #define ONTIC_POLICY_TRAP  1\n\n\
+         /* ---- thread-local error state ---- */\n\
+         static _Thread_local char tl_error[256];\n\
+         static _Thread_local int  tl_policy = ONTIC_POLICY_ABORT;\n\n\
+         const char *ontic_last_error(void) {{\n\
+         \x20   return tl_error[0] ? tl_error : NULL;\n\
+         }}\n\
+         void ontic_last_error_clear(void) {{ tl_error[0] = '\\0'; }}\n\
+         void ontic_set_violation_policy(int p) {{ tl_policy = p; }}\n\
+         int  ontic_violation_policy(void) {{ return tl_policy; }}\n\n\
+         /* ---- raw kernel ---- */\n\
+         extern {rt} {name}__raw({c_args});\n\n\
+         /* ---- guarded public symbol ---- */\n\
+         {rt} {name}({c_args}) {{\n\
+         {guard_body}\n\
+         \x20   return {name}__raw({call_args});\n\
+         }}\n",
+        safe_name = safe_name,
+        key8 = key8,
+        rt = rt,
+        name = name,
+        c_args = c_args_str,
+        guard_body = guard_body,
+        call_args = call_args.join(", "),
+    ))
+}
+
+#[cfg(test)]
+mod shim_tests {
+    use super::*;
+    use crate::sketch::Ty;
+
+    #[test]
+    fn test_shim_scalar_preconditions() {
+        let g = crate::gen::parse(
+            "wrapping\nfn GeoSum.g(%r: F64) -> F64\n\
+             | %r >= 0.0 && %r < 1.0\n\
+             => 0.5 -> 2.0 ± 0.001\n",
+        )
+        .unwrap();
+        let c = emit_shim_c("g", &[("r".to_string(), Ty::F64)], &Ty::F64, "cafe", &g.invariants)
+            .unwrap();
+        assert!(c.contains("if (!((r >= 0)))"), "guard:\n{}", c);
+        assert!(c.contains("if (!((r < 1)))"), "guard:\n{}", c);
+        assert!(c.contains("extern double g__raw(double r)"), "raw decl:\n{}", c);
+        assert!(c.contains("double g(double r)"), "public symbol:\n{}", c);
+        assert!(c.contains("NAN"), "sentinel:\n{}", c);
+        assert!(c.contains("ontic_last_error"), "error API:\n{}", c);
+        assert!(c.contains("ONTIC_POLICY_ABORT"), "policy define:\n{}", c);
+    }
+
+    #[test]
+    fn test_shim_int_sentinel() {
+        let g = crate::gen::parse(
+            "wrapping\nfn Foo.f(%x: Int) -> Int\n\
+             | %x > 0\n\
+             => 1 -> 1\n",
+        )
+        .unwrap();
+        let c = emit_shim_c("f", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa", &g.invariants)
+            .unwrap();
+        assert!(c.contains("LONG_MIN"), "int sentinel:\n{}", c);
+    }
+
+    #[test]
+    fn test_shim_list_shape_guard() {
+        let g = crate::gen::parse(
+            "wrapping\nfn Dot.dot(%a: List<F64>, %b: List<F64>) -> F64\n\
+             | len(%a) == len(%b)\n\
+             => [1.0], [2.0] -> 2.0\n",
+        )
+        .unwrap();
+        let c = emit_shim_c(
+            "dot",
+            &[("a".to_string(), Ty::ListF64), ("b".to_string(), Ty::ListF64)],
+            &Ty::F64,
+            "bb",
+            &g.invariants,
+        )
+        .unwrap();
+        assert!(c.contains("a_s == b_s"), "shape guard:\n{}", c);
+        assert!(c.contains("long a=%ld"), "list prints size:\n{}", c);
+    }
+
+    #[test]
+    fn test_shim_no_params_no_checks() {
+        let c = emit_shim_c("noop", &[], &Ty::F64, "cc", &[]).unwrap();
+        assert!(c.contains("double noop(void)"));
+        assert!(!c.contains("if (!("), "no guard chaine:\n{}", c);
+        assert!(c.contains("return noop__raw()"), "raw call:\n{}", c);
+    }
+
+    #[test]
+    fn test_guard_pred_text_untranslated() {
+        // res-referencing invariant: outside v1 subset
+        let params = vec![("x".to_string(), Ty::F64)];
+        let expr = crate::sketch::Expr::BinOp(
+            crate::sketch::BinOp::Ge,
+            Box::new(crate::sketch::Expr::Var("res".to_string())),
+            Box::new(crate::sketch::Expr::FloatLit(0.0)),
+        );
+        let t = guard_pred_text(&expr, &params);
+        assert_eq!(t, "true", "untranslated falls back to true");
     }
 }

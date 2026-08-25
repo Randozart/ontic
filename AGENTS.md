@@ -99,6 +99,11 @@ Patches are unacceptable. There is no "go fast and break things."
 - **Machine-readable failures.** Every sieve kill produces a structured
   reason (`SieveRejection { stage, detail }`) consumed by the forge feedback
   round and by `ontic check`. Human prose is a rendering, not the format.
+- **Runtime guards are a declared tier.** Every vaulted kernel produces twin
+  artifacts: raw `.so` (zero overhead) and guarded `.so` (C shim with
+  precondition checks). Guarded builds are non-fatal — raw always lands.
+  Violation messages carry actual param values as evidence (GR12).
+  See `docs/GUARDS.md`.
 
 ## Sieve Rules
 

@@ -1,0 +1,7 @@
+wrapping
+fn EvalSeries.geo_sum(%r: F64) -> F64
+  | %r >= 0.0 && %r < 1.0
+  hint "fold k in range(60), s from 1.0, p from %r { s + p, p * r } until p < 0.000000001"
+  => 0.5 -> 2.0 ± 0.000001
+  => 0.25 -> 1.3333333333333333 ± 0.000001
+  ?? 0.75 -> 4.0 ± 0.000001

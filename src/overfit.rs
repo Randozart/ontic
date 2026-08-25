@@ -89,6 +89,13 @@ fn walk(e: &Expr, leaked: &HashSet<i64>, st: &mut Stats) {
         // int-typed); they are honest computation constants.
         Expr::FloatLit(_) => {}
         Expr::BoolLit(_) | Expr::Var(_) => {}
+        // Restricted tuples only occur in multi-acc fold bodies; their
+        // components are walked via the Fold arm's body traversal.
+        Expr::Tuple(items) => {
+            for it in items {
+                walk(it, leaked, st);
+            }
+        }
         Expr::FloatListLit(items) => {
             st.int_literals.extend(items.iter().map(|v| *v as i64));
         }
@@ -180,6 +187,7 @@ fn mentions_var(e: &Expr) -> bool {
         Expr::UnOp(_, i) => mentions_var(i),
         Expr::Builtin(_, i) => mentions_var(i),
         Expr::Builtin2(_, a, b) => mentions_var(a) || mentions_var(b),
+        Expr::Tuple(items) => items.iter().any(mentions_var),
         Expr::Map { var, list, body } => {
             let _ = var;
             mentions_var(list) || mentions_var(body)

@@ -51,14 +51,16 @@ research reports P1–P3).
 | Sketch candidates | Transformer (GBNF-constrained / schema-constrained) | never trusted |
 | Recipes | Human | deterministic driver-code generation |
 | Trusted intrinsics & writers | Rust stdlib | verified once vs reference fixtures |
-| Membrane code (shells, sorts, pixel loops) | Consumer languages | C++26 contracts emitted from `[pre][post]`; violations are deterministic failures |
+| Membrane code (shells, sorts, pixel loops) | Consumer languages | C++26 contracts emitted from `[pre][post]`; runtime guard shim on `.guarded.so` (abort/trap policy); violations carry evidence |
 
 ## Product surface
 
 | Artifact | Role |
 |---|---|
 | `.so` / `.dll` | Verified machine code, Flat-MemRef ABI, depth-N composites linked |
-| `.h` | Generated C header (`extern "C"`, include-guarded); contracted `.hpp` planned |
+| `.guarded.so` | Runtime guard shim (precondition checks, error API, abort/trap policy) |
+| `.h` | Generated C header (`extern "C"`, include-guarded); guarded section when `.guarded.so` present |
+| `.hpp` | C++26 contracted twin (`pre()` under `ONTIC_CONTRACTS`; portable fallback) |
 | `.ous` | Single-file distribution bundle (manifest + sketch + IR + object + header) |
 | `.ont` | Editable source of truth — signatures, invariants, evidence |
 | `reuse.json` | Append-only flywheel ledger: which cores fed which solves |

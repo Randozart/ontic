@@ -24,6 +24,10 @@ fn builtin_ty(b: Builtin, t: Ty) -> Result<Ty, String> {
             Ty::Int => Ok(Ty::ListInt),
             other => Err(format!("range of {}", other.name())),
         },
+        Builtin::MinEl | Builtin::MaxEl => Err(format!(
+            "{:?} is elementwise (two arguments)",
+            b
+        )),
         Builtin::Sum | Builtin::Max | Builtin::Min => match t {
             Ty::ListInt => Ok(Ty::Int),
             Ty::ListF64 => Ok(Ty::F64),
@@ -110,6 +114,7 @@ fn infer_dep(
             init,
             body,
             ref until,
+            ref aux,
         } => {
             let list_ty = infer_dep(list, env, deps)?;
             let elem = match list_ty {
@@ -121,7 +126,17 @@ fn infer_dep(
             let mut scoped = env.clone();
             scoped.insert(var.clone(), elem);
             scoped.insert(acc.clone(), init_ty.clone());
-            expect_dep(body, &scoped, &init_ty, deps)?;
+            let mut want = vec![init_ty.clone()];
+            for (n, ie) in aux {
+                let t = infer_dep(ie, env, deps)?;
+                scoped.insert(n.clone(), t.clone());
+                want.push(t);
+            }
+            if aux.is_empty() {
+                expect_dep(body, &scoped, &init_ty, deps)?;
+            } else {
+                expect_tuple_components(body, &scoped, &want, deps)?;
+            }
             if let Some(u) = until {
                 expect_dep(u, &scoped, &Ty::Bool, deps)?;
             }
@@ -162,6 +177,34 @@ fn infer_dep(
         Expr::UnOp(UnOp::Not, inner) => expect_ty_in(inner, env, &Ty::Bool),
         Expr::BinOp(op, l, r) => infer_binop(*op, l, r, env, deps),
         leaf => infer(leaf, env),
+    }
+}
+
+/// Type a restricted tuple body against expected component types.
+fn expect_tuple_components(
+    body: &Expr,
+    env: &HashMap<String, Ty>,
+    want: &[Ty],
+    deps: &DepSigs,
+) -> Result<(), String> {
+    match body {
+        Expr::Tuple(items) => {
+            if items.len() != want.len() {
+                return Err(format!(
+                    "fold body yields {} values, accumulators want {}",
+                    items.len(),
+                    want.len()
+                ));
+            }
+            for (it, w) in items.iter().zip(want.iter()) {
+                expect_dep(it, env, w, deps)?;
+            }
+            Ok(())
+        }
+        _ => Err(
+            "multi-accumulator fold bodies must be tuple expressions `(a, b, ...)`"
+                .to_string(),
+        ),
     }
 }
 
@@ -313,6 +356,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             init,
             body,
             ref until,
+            ref aux,
         } => {
             let list_ty = infer(list, env)?;
             let elem_ty = match list_ty {
@@ -329,7 +373,35 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             let mut scoped = env.clone();
             scoped.insert(var.clone(), elem_ty);
             scoped.insert(acc.clone(), init_ty.clone());
-            expect_ty_in(body, &scoped, &init_ty)?;
+            let mut want = vec![init_ty.clone()];
+            for (n, ie) in aux {
+                let t = infer(ie, env)?;
+                scoped.insert(n.clone(), t.clone());
+                want.push(t);
+            }
+            if aux.is_empty() {
+                expect_ty_in(body, &scoped, &init_ty)?;
+            } else {
+                // Plain-path tuple check via per-component expect.
+                match &**body {
+                    Expr::Tuple(items) => {
+                        if items.len() != want.len() {
+                            return Err(format!(
+                                "fold body yields {} values, accumulators want {}",
+                                items.len(),
+                                want.len()
+                            ));
+                        }
+                        for (it, w) in items.iter().zip(want.iter()) {
+                            expect_ty_in(it, &scoped, w)?;
+                        }
+                    }
+                    _ => return Err(
+                        "multi-accumulator fold bodies must be tuple expressions `(a, b, ...)`"
+                            .to_string(),
+                    ),
+                }
+            }
             if let Some(u) = until {
                 expect_ty_in(u, &scoped, &Ty::Bool)?;
             }
@@ -339,6 +411,9 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             let no_deps = DepSigs::new();
             infer_binop(*op, l, r, env, &no_deps)
         }
+        Expr::Tuple(_) => Err(
+            "tuple expressions are only valid as multi-accumulator fold bodies".to_string(),
+        ),
     }
 }
 
@@ -369,6 +444,21 @@ fn infer_builtin2(b: Builtin, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> 
                 return Err(format!("index position must be Int, got {}", rt.name()));
             }
             Ok(elem)
+        }
+        Builtin::MinEl | Builtin::MaxEl => {
+            if !matches!(lt, Ty::Int | Ty::F64) || !matches!(rt, Ty::Int | Ty::F64) {
+                return Err(format!(
+                    "{:?} needs two scalars, got {} vs {}",
+                    b,
+                    lt.name(),
+                    rt.name()
+                ));
+            }
+            Ok(if matches!(lt, Ty::F64) || matches!(rt, Ty::F64) {
+                Ty::F64
+            } else {
+                Ty::Int
+            })
         }
         _ => Err(format!("builtin {:?} is unary", b)),
     }
