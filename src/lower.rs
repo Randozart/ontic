@@ -2572,11 +2572,7 @@ fn c_guard_printf_spec(ty: &Ty) -> &'static str {
 }
 
 /// Render a runtime-callable invariant as a human-readable predicate string
-/// for inclusion in violation messages.  Falls back to `"true"` for
-/// untranslatable conjuncts so the guard still fires on every check.
-fn guard_pred_text(e: &crate::sketch::Expr, params: &[(String, Ty)]) -> String {
-    contract_text(e, params).unwrap_or_else(|| "true".to_string())
-}
+/// for inclusion in violation messages.
 
 /// Render a flat-memref parameter as its five C arguments for the shim.
 /// Only used for diagnostic formatting in violation messages.
@@ -2585,6 +2581,23 @@ fn flat_memref_c_args(name: &str) -> String {
         "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st",
         n = name
     )
+}
+
+/// True when the expression references the postcondition variable `res`.
+/// Such conjuncts constrain the OUTPUT, so they are not preconditions and
+/// cannot be checked by a pre-call guard shim.
+fn expr_refs_res(e: &crate::sketch::Expr) -> bool {
+    match e {
+        crate::sketch::Expr::Var(n) => n == "res",
+        crate::sketch::Expr::BinOp(_, l, r) => expr_refs_res(l) || expr_refs_res(r),
+        crate::sketch::Expr::UnOp(_, x) | crate::sketch::Expr::Builtin(_, x) => expr_refs_res(x),
+        crate::sketch::Expr::Builtin2(_, a, b) => expr_refs_res(a) || expr_refs_res(b),
+        crate::sketch::Expr::If(c, t, f) => {
+            expr_refs_res(c) || expr_refs_res(t) || expr_refs_res(f)
+        }
+        crate::sketch::Expr::Let(_, b, body) => expr_refs_res(b) || expr_refs_res(body),
+        _ => false,
+    }
 }
 
 /// Emit a complete C source file that wraps the raw MLIR-emitted kernel
@@ -2621,16 +2634,34 @@ pub fn emit_shim_c(
         c_params.join(", ")
     };
 
-    // Collect invariant conjuncts: translatable ones become C guards,
-    // untranslatable ones are logged as comments but still fire (predicate
-    // is `"true"` so the check is harmless).
+    // Collect invariant conjuncts. Fail-closed policy:
+    //   - translatable conjunct  -> C guard
+    //   - res-referencing        -> postcondition, skipped (never
+    //     checkable pre-call; skipping loses no enforcement)
+    //   - anything else          -> REFUSE the guarded build; a dead
+    //     `if(!(true))` guard would silently drop declared enforcement.
     let mut checks: Vec<(String, String)> = Vec::new();
+    let mut untranslated: Vec<String> = Vec::new();
     for inv in invariants {
         for part in conjuncts(inv) {
-            let pred = guard_pred_text(part, params);
-            let readable = expr_display(part);
-            checks.push((pred, readable));
+            if expr_refs_res(part) {
+                continue;
+            }
+            match contract_text(part, params) {
+                Some(pred) => {
+                    let readable = expr_display(part);
+                    checks.push((pred, readable));
+                }
+                None => untranslated.push(expr_display(part)),
+            }
         }
+    }
+    if !untranslated.is_empty() {
+        return Err(format!(
+            "guarded build refused: {} invariant conjunct(s) cannot be translated to C checks: {}",
+            untranslated.len(),
+            untranslated.join("; ")
+        ));
     }
 
     // Build printf format arguments for the violation message.
@@ -2788,15 +2819,48 @@ mod shim_tests {
     }
 
     #[test]
-    fn test_guard_pred_text_untranslated() {
-        // res-referencing invariant: outside v1 subset
+    fn test_shim_untranslated_invariant_refused() {
+        // sqrt(%x) >= 0.0: input-side but outside the translatable subset.
+        // Fail-closed: the guarded build must be refused, never emitted
+        // with a dead `if(!(true))` check.
         let params = vec![("x".to_string(), Ty::F64)];
-        let expr = crate::sketch::Expr::BinOp(
+        let expr = crate::sketch::Expr::Builtin(
+            crate::sketch::Builtin::Sqrt,
+            Box::new(crate::sketch::Expr::Var("x".to_string())),
+        );
+        let ge = crate::sketch::Expr::BinOp(
+            crate::sketch::BinOp::Ge,
+            Box::new(expr),
+            Box::new(crate::sketch::Expr::FloatLit(0.0)),
+        );
+        let err = emit_shim_c("f", &params, &Ty::F64, "cc", &[ge]).unwrap_err();
+        assert!(err.contains("guarded build refused"), "{err}");
+    }
+
+    #[test]
+    fn test_shim_postcondition_conjunct_skipped_not_refused() {
+        // res-referencing conjunct constrains the output, not the call:
+        // skipped (nothing to check pre-call), never a refusal reason.
+        let params = vec![("x".to_string(), Ty::F64)];
+        let post = crate::sketch::Expr::BinOp(
             crate::sketch::BinOp::Ge,
             Box::new(crate::sketch::Expr::Var("res".to_string())),
             Box::new(crate::sketch::Expr::FloatLit(0.0)),
         );
-        let t = guard_pred_text(&expr, &params);
-        assert_eq!(t, "true", "untranslated falls back to true");
+        let c = emit_shim_c("f", &params, &Ty::F64, "cc", &[post]).unwrap();
+        assert!(!c.contains("if (!("), "no checks expected:\n{}", c);
+    }
+
+    #[test]
+    fn test_shim_translatable_invariant_still_emits_check() {
+        let params = vec![("x".to_string(), Ty::F64)];
+        let expr = crate::sketch::Expr::BinOp(
+            crate::sketch::BinOp::Gt,
+            Box::new(crate::sketch::Expr::Var("x".to_string())),
+            Box::new(crate::sketch::Expr::FloatLit(0.0)),
+        );
+        let c = emit_shim_c("f", &params, &Ty::F64, "cc", &[expr]).unwrap();
+        assert!(c.contains("if (!((x > 0)))"), "real check:\n{}", c);
+        assert!(!c.contains("if (!((true)))"), "no dead guard:\n{}", c);
     }
 }

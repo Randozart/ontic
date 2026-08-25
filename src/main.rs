@@ -883,7 +883,11 @@ fn emit_and_store(
                             Err(e) => eprintln!("guarded build warning: {}", e),
                         }
                     }
-                    Err(e) => eprintln!("guarded shim generation warning: {}", e),
+                    Err(e) => eprintln!(
+                        "GUARDED SKIPPED (fail-closed): {e}\n\
+                         raw .so is vaulted but enforces NOTHING at runtime; \
+                         restate the invariant in translatable form or drop the guarded tier"
+                    ),
                 }
             }
             Err(e) => eprintln!("shared library build failed: {}", e),

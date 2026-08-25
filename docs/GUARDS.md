@@ -139,11 +139,16 @@ Sieve-proven invariants are translated to C guard expressions:
 | `%x >= 0.0` | `x >= 0` |
 | `len(%a) == len(%b)` | `a_s == b_s` (flat-memref size) |
 | `%r >= 0.0 && %r < 1.0` | two separate if-chains (one per conjunct) |
-| Untranslatable (e.g. `res >= 0`) | commented out, guard defaults to `"true"` |
 
 Translation uses the same `contract_text` engine as the C++26 `.hpp`
-headers.  Conjuncts are split: one untranslatable conjunct does not
-discard the provable ones beside it.
+headers.
+
+**Fail-closed policy (2026-08-25):** an invariant that cannot be translated
+(e.g. a `res`-referencing postcondition) REFUSES the guarded build with an
+error naming each untranslated predicate. The raw `.so` still vaults, but no
+`.guarded.so` is produced — a guard that silently checks nothing would be
+worse than no guard. Restate the invariant in translatable form to recover
+the guarded twin.
 
 ## Golden Rule compliance
 
