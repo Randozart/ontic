@@ -1,8 +1,0 @@
-wrapping
-fn Metrics.stddev(%xs: List<F64>) -> F64
-  | len(%xs) > 0
-  | %res >= 0.0
-  hint "sqrt of population variance; reuse the variance shape inside sqrt"
-  => [2.0, 4.0] -> 1.0 ± 1e-9
-  => [7.0] -> 0.0 ± 0
-  ?? [1.0, 2.0, 3.0, 4.0, 5.0] -> 1.4142135623730951 ± 1e-9

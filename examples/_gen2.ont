@@ -1,7 +1,0 @@
-wrapping
-fn Metrics.mean(%xs: List<F64>) -> F64
-  | len(%xs) > 0
-  hint "sum then divide: let %s = fold %v in %xs, %acc from 0.0 { %acc + %v }; %s / len(%xs)"
-  => [2.0, 4.0] -> 3.0 ± 1e-12
-  => [5.0] -> 5.0 ± 1e-12
-  ?? [1.0, 2.0, 3.0, 4.0, 5.0] -> 3.0 ± 1e-12

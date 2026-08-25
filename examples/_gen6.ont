@@ -1,7 +1,0 @@
-wrapping
-fn Metrics.zscores(%xs: List<F64>) -> List<F64>
-  | len(%xs) > 0
-  | len(%res) == len(%xs)
-  hint "standardize each element: mean m = sum/len, std s = sqrt(var); map(%v in %xs) { (%v - m) / s }"
-  => [2.0, 4.0] -> [ -1.0, 1.0 ] ± 1e-9
-  ?? [1.0, 2.0, 3.0] -> [ -1.224744871391589, 0.0, 1.224744871391589 ] ± 1e-9

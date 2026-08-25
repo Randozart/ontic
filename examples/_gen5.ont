@@ -1,7 +1,0 @@
-wrapping
-fn Metrics.maxdev(%xs: List<F64>) -> F64
-  | len(%xs) > 0
-  hint "max absolute deviation from the mean: let %m = fold %v in %xs, %acc from 0.0 { %acc + %v } / len(%xs); fold over v in xs, acc from 0.0 { if abs(%v - %m) > acc { abs(%v - %m) } else { acc } }"
-  => [1.0, 2.0, 3.0] -> 1.0 ± 1e-12
-  => [5.0] -> 0.0 ± 0
-  ?? [1.0, 1.0, 1.0, 5.0] -> 2.0 ± 1e-12

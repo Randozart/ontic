@@ -1,3 +1,0 @@
-// Metrics: population statistics over one F64 list.
-// Semi-complex on purpose: each gen nests let/fold/map/index, and the
-// opaque evidence forces the general form rather than memorized outputs.
