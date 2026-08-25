@@ -19,6 +19,7 @@ pub mod ous;
 pub mod overfit;
 pub mod pipeline;
 pub mod probes;
+pub mod probes_solver;
 pub mod program;
 pub mod recipe;
 pub mod rng;

@@ -2,6 +2,36 @@
 
 ## Changes Made on 2026-08-25
 
+### 2026-08-25 (later) — fail-closed guards + linear probe solver
+
+**Leg C (commit bc7480a):** guard shims fail closed. Untranslatable
+input-side invariants refuse the `.guarded.so` build (raw still vaults)
+instead of emitting dead `if(!(true))` checks. `res`-referencing
+postconditions skip cleanly — never checkable pre-call. GUARDS.md updated.
+
+**Leg A-hybrid:** `src/probes_solver.rs` — deterministic integer-linear
+constraint solver for probe skeletons, zero dependencies:
+- Unknowns: scalar Int params, Bool flags, list lengths. Poly IR with
+  constant-scaled terms and univariate squares (`n*n`).
+- Unary interval propagation + DFS enumeration, edge-value-first, node
+  budget 500k; Or expands to alternatives (cap 8); bare/Not'd flags
+  handled truthily.
+- Integration: probes::generate consults the solver when rejection
+  sampling exhausts; skeletons reused with fresh element fills until the
+  row budget is met → PlanQuality::Full instead of EdgesOnly.
+- THE WALL intact: solver only proposes rows; every row passes the
+  interpreter oracle (`first_violation`) before joining a plan.
+
+Verified end-to-end: QR-style (`len == n*n`) 259 rows Full (was ≤9),
+cholesky-style 256 rows Full, kmeans-lite 3-constraint 256 rows Full.
+Unsupported (e.g. sum()) and unsatisfiable systems degrade honestly as
+before. Suite: 163/163.
+
+Capability-boundary report Gap 4 annotated as partially resolved
+(hybrid option taken; z3 deferred).
+
+
+
 ### 2026-08-25 — F32/List<F32> types end-to-end + wrapping tier removed
 
 **F32 (commit d8834cc):**

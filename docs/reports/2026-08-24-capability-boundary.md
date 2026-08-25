@@ -131,6 +131,13 @@ Probe quality: **Full** = honest domain coverage (260+ rows); **EdgesOnly** = re
 
 ### Gap 4: SMT probe widening (effort: **M**)
 
+> **2026-08-25 UPDATE:** Partially resolved by `src/probes_solver.rs`
+> (hand-rolled integer-linear solver, zero dependencies — the "hybrid"
+> option below). QR/cholesky/matmul-style `len == n*n` relations and
+> kmeans-lite multi-constraint specs now generate Full probe plans.
+> Remaining: nonlinear multivariate and float relations still degrade
+> honestly to EdgesOnly.
+
 **What's blocked**: Any relational invariant degrades probe quality to EdgesOnly (≤9 rows). Seen live on: QR (5 rows), cholesky (2 rows), kmeans (0 rows — anomaly). This means 9/23 algorithm classes get weak verification evidence.
 
 **Minimal fix**: Integrate z3 or hand-rolled constraint solver into `probes::generate`. For each relational invariant, encode as SMT constraint + type domain bounds, enumerate satisfying assignments with varied edge cases.

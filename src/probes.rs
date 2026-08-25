@@ -126,6 +126,45 @@ fn sample(ty: &Ty, rng: &mut Rng) -> Value {
     }
 }
 
+/// Materialize a full probe row from a solved integer skeleton: scalars and
+/// lengths come from the solution; float scalars and list bodies are sampled
+/// as usual. The row is accepted only when the interpreter oracle finds no
+/// violated invariant — the solver proposes, the oracle disposes.
+fn materialize(
+    gen: &Gen,
+    sol: &crate::probes_solver::Solution,
+    rng: &mut Rng,
+    ctx: &Ctx,
+) -> Option<Vec<Value>> {
+    let scalar = |n: &str| sol.scalars.iter().find(|(s, _)| s == n).map(|(_, v)| *v);
+    let length = |n: &str| sol.lengths.iter().find(|(s, _)| s == n).map(|(_, v)| *v);
+    let mut row: Vec<Value> = Vec::new();
+    for (n, t) in &gen.params {
+        match t {
+            Ty::Int => row.push(Value::Int(scalar(n)?)),
+            Ty::Bool => row.push(Value::Bool(scalar(n)? != 0)),
+            Ty::F64 | Ty::F32 => row.push(sample(t, rng)),
+            Ty::ListInt => {
+                let len = length(n)?;
+                let items = (0..len).map(|_| rng.range_i64(ELEM_LO, ELEM_HI)).collect();
+                row.push(Value::List(items));
+            }
+            Ty::ListF64 | Ty::ListF32 => {
+                let len = length(n)?;
+                let items = (0..len)
+                    .map(|_| rng.range_i64(ELEM_LO * 8, ELEM_HI * 8) as f64 / 8.0)
+                    .collect();
+                row.push(Value::FloatList(items));
+            }
+        }
+    }
+    if first_violation(gen, &row, ctx).is_some() {
+        None
+    } else {
+        Some(row)
+    }
+}
+
 /// Generate a deterministic probe plan: up to `edge_budget` edge combinations
 /// followed by `count` random rows. Every row satisfies the gen's input-side
 /// invariants (Golden Rule 4: probe domain = type domains ∩ invariants).
@@ -181,6 +220,7 @@ pub fn generate(
     let mut quality = PlanQuality::Full;
     let mut attempts = 0usize;
     let mut reject_counts: HashMap<usize, usize> = HashMap::new();
+    let edge_rows = rows.len();
     'random: for _ in 0..count {
         for _ in 0..SAMPLE_ATTEMPTS {
             attempts += 1;
@@ -199,8 +239,33 @@ pub fn generate(
                 }
             }
         }
-        // Budget exhausted without a satisfying row. Degrade honestly.
-        quality = PlanQuality::EdgesOnly;
+        // Budget exhausted without a satisfying row. Consult the constraint
+        // solver for a satisfying integer skeleton before degrading.
+        // Skeletons may be reused with fresh element fills: rows stay
+        // distinct where the type domain allows variation.
+        let have = rows.len() - edge_rows;
+        let want = count - have;
+        match crate::probes_solver::solve(gen, want.max(4)) {
+            crate::probes_solver::Outcome::Solved(sols) if !sols.is_empty() => {
+                let mut added = 0usize;
+                let mut tries = 0usize;
+                while added < want && tries < want.saturating_mul(SAMPLE_ATTEMPTS) {
+                    let s = &sols[tries % sols.len()];
+                    tries += 1;
+                    attempts += 1;
+                    if let Some(row) = materialize(gen, s, &mut rng, ctx) {
+                        rows.push(row);
+                        added += 1;
+                    }
+                }
+                if added >= want {
+                    // Full coverage recovered through solving.
+                    break;
+                }
+                quality = PlanQuality::EdgesOnly;
+            }
+            _ => quality = PlanQuality::EdgesOnly,
+        }
         break;
     }
     if rows.is_empty() {
@@ -301,16 +366,33 @@ mod tests {
 
     
 #[test]
-    fn test_relational_contract_degrades_to_edges_only() {
+    fn test_relational_contract_recovered_by_solver() {
         // matmul-style shape relation: independent random sampling is a
-        // lottery; plan must degrade to edge rows rather than error.
+        // lottery; the constraint solver recovers full coverage instead of
+        // degrading to edge rows.
         let w = gen::parse(
             "fn mm(%a: List<F64>, %b: List<F64>, %n: Int) -> F64\n  | %n > 0\n  | len(%a) == %n * %n\n  | len(%b) == %n * %n\n  => [1.0], [2.0], 1 -> 2.0\n",
         )
         .unwrap();
         let ctx = interp::Ctx::checked();
         let plan = generate(&w, 32, 7, 64, &ctx).unwrap();
-        assert_eq!(plan.quality, PlanQuality::EdgesOnly);
-        assert!(!plan.rows.is_empty());
+        assert_eq!(plan.quality, PlanQuality::Full, "{:?}", plan.rows);
+        // Every row honours the relational contract.
+        for r in &plan.rows {
+            let n = match &r[2] {
+                Value::Int(v) => *v,
+                other => panic!("bad row {other:?}"),
+            };
+            let la = match &r[0] {
+                Value::FloatList(vs) => vs.len(),
+                other => panic!("bad row {other:?}"),
+            };
+            let lb = match &r[1] {
+                Value::FloatList(vs) => vs.len(),
+                other => panic!("bad row {other:?}"),
+            };
+            assert_eq!(la as i64, n * n);
+            assert_eq!(lb as i64, n * n);
+        }
     }
 }

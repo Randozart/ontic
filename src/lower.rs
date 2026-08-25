@@ -2240,7 +2240,7 @@ pub fn emit_header(
 
 
 /// Flatten a conjunction tree into its atomic conjuncts.
-fn conjuncts(e: &crate::sketch::Expr) -> Vec<&crate::sketch::Expr> {
+pub(crate) fn conjuncts(e: &crate::sketch::Expr) -> Vec<&crate::sketch::Expr> {
     match e {
         crate::sketch::Expr::BinOp(crate::sketch::BinOp::And, l, r) => {
             let mut out = conjuncts(l);
@@ -2586,7 +2586,7 @@ fn flat_memref_c_args(name: &str) -> String {
 /// True when the expression references the postcondition variable `res`.
 /// Such conjuncts constrain the OUTPUT, so they are not preconditions and
 /// cannot be checked by a pre-call guard shim.
-fn expr_refs_res(e: &crate::sketch::Expr) -> bool {
+pub(crate) fn expr_refs_res(e: &crate::sketch::Expr) -> bool {
     match e {
         crate::sketch::Expr::Var(n) => n == "res",
         crate::sketch::Expr::BinOp(_, l, r) => expr_refs_res(l) || expr_refs_res(r),
