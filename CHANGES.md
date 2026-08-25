@@ -613,3 +613,15 @@ own hint text via S3 (2482 vs 58).
   vaulted b169c40d, verified from Python.
 - Prompt/langref updated so both spec-authors and candidate-samplers know
   the construct; corpus captures until-kernels automatically.
+
+### 2026-08-24 — Contracted headers (.hpp membrane)
+- lower::emit_header_hpp: C++ declarations carrying sieve-proven invariants
+  as native C++26 pre(...) under ONTIC_CONTRACTS + __cplusplus>=202601L;
+  portable `// ontic requires:` fallback otherwise; metadata block always.
+- Translation subset v1: scalar params, len() -> <list>_s size field,
+  arithmetic/comparisons/literals. Conjunctions split so one untranslatable
+  conjunct never discards provable siblings; leftovers listed honestly as
+  `// untranslated:` (res-postconditions await return-value naming).
+- Wired into emit_and_store: every solve now deposits .hpp beside .h,
+  manifest records header_hpp. clang-18 smoke: C++17 fallback compiles;
+  C++26 auto-guard degrades gracefully pre-contract compilers.

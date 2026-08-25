@@ -818,6 +818,29 @@ fn emit_and_store(
                                 "lib".to_string(),
                                 serde_json::Value::String(lib_name.clone()),
                             );
+                            // Contracted C++ twin: sieve-proven invariants as
+                            // native pre() under ONTIC_CONTRACTS.
+                            let hpp_name = format!("{}-{}.hpp", survivor.candidate.name, key8);
+                            let hpp_path = std::path::Path::new(&vault_dir).join(&hpp_name);
+                            match lower::emit_header_hpp(
+                                &survivor.candidate.name,
+                                &survivor.candidate.params,
+                                &survivor.candidate.ret,
+                                &key8,
+                                &w.invariants,
+                            ) {
+                                Ok(hh) => match std::fs::write(&hpp_path, hh) {
+                                    Ok(_) => {
+                                        println!("HPP     : {}", hpp_path.display());
+                                        artifacts.insert(
+                                            "header_hpp".to_string(),
+                                            serde_json::Value::String(hpp_name),
+                                        );
+                                    }
+                                    Err(e) => eprintln!("hpp write failed: {}", e),
+                                },
+                                Err(e) => eprintln!("hpp generation failed: {}", e),
+                            }
                         }
                         Err(e) => eprintln!("header write failed: {}", e),
                     },

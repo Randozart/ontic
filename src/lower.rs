@@ -1777,6 +1777,195 @@ pub fn emit_header(
     Ok(body)
 }
 
+
+/// Flatten a conjunction tree into its atomic conjuncts.
+fn conjuncts(e: &crate::sketch::Expr) -> Vec<&crate::sketch::Expr> {
+    match e {
+        crate::sketch::Expr::BinOp(crate::sketch::BinOp::And, l, r) => {
+            let mut out = conjuncts(l);
+            out.extend(conjuncts(r));
+            out
+        }
+        other => vec![other],
+    }
+}
+
+
+/// C++26-contracted twin of emit_header. Contracts are machine-translated
+/// from sieve-proven invariants over a conservative subset (scalar params,
+/// len() of lists, arithmetic/comparisons). Native `pre(...)` under
+/// ONTIC_CONTRACTS; portable `// ontic requires:` otherwise; metadata block
+/// always present so tooling can read provenance without a compiler.
+pub fn emit_header_hpp(
+    name: &str,
+    params: &[(String, Ty)],
+    ret: &Ty,
+    key8: &str,
+    invariants: &[crate::sketch::Expr],
+) -> Result<String, String> {
+    let rt = c_ret_ty(ret)?;
+    let mut parts: Vec<String> = Vec::new();
+    for (n, t) in params {
+        match t {
+            Ty::ListInt | Ty::ListF64 => parts.push(format!(
+                "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st"
+            )),
+            Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
+            Ty::F64 => parts.push(format!("double {n}")),
+        }
+    }
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+            .collect()
+    };
+    let gk = sanitize(key8);
+    let gn = sanitize(name);
+    let args = if parts.is_empty() { "void".to_string() } else { parts.join(", ") };
+
+    // Translate invariants; keep the ones inside the subset, list the rest.
+    let mut contracts: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for inv in invariants {
+        // Conjunctions split: one untranslatable conjunct must not discard
+        // the provable ones beside it.
+        for part in conjuncts(inv) {
+            match contract_text(part, params) {
+                Some(t) => contracts.push(t),
+                None => skipped.push(crate::lower::expr_display(part)),
+            }
+        }
+    }
+
+    let mut meta = String::from("// ontic contracts (machine-derived from sieve-proven invariants):\n");
+    if contracts.is_empty() && skipped.is_empty() {
+        meta.push_str("//   (none)\n");
+    }
+    for c in &contracts {
+        meta.push_str(&format!("//   pre: {c}\n"));
+    }
+    for s in &skipped {
+        meta.push_str(&format!("//   untranslated: {s}\n"));
+    }
+
+
+/// Remove one balanced outer paren pair when present (cosmetic).
+fn strip_outer(s: &str) -> String {
+    if s.starts_with('(') && s.ends_with(')') {
+        let mut depth = 0i32;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && i != s.len() - 1 {
+                        return s.to_string(); // closes before end: keep
+                    }
+                }
+                _ => {}
+            }
+        }
+        return s[1..s.len() - 1].to_string();
+    }
+    s.to_string()
+}
+
+    let decl_native = if contracts.is_empty() {
+        format!("{rt} {name}({args});")
+    } else {
+        format!(
+            "{rt} {name}({args})\n  pre({});",
+            contracts
+                .iter()
+                .map(|c| strip_outer(c))
+                .collect::<Vec<_>>()
+                .join(")\n  pre(")
+        )
+    };
+    let req_line = if contracts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " // ontic requires: {}",
+            contracts
+                .iter()
+                .map(|c| strip_outer(c))
+                .collect::<Vec<_>>()
+                .join(" && ")
+        )
+    };
+    let decl_plain = format!("{rt} {name}({args});{req_line}");
+
+    Ok(format!(
+        "// Ontic kernel (verified; do not edit - re-solve instead)\n\
+         // ABI v1: Flat-MemRef; List<T> param -> (allocated*, aligned*, offset, size, stride)\n\
+         #ifndef ONTIC_{gk}_{gn}_HPP\n#define ONTIC_{gk}_{gn}_HPP\n\n\
+         #include <cstddef>\n\n{meta}\n\
+         #if defined(ONTIC_CONTRACTS) && defined(__cplusplus) && __cplusplus >= 202601L\n\
+         #ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n{decl_native}\n\n\
+         #ifdef __cplusplus\n}}\n#endif\n\
+         #else /* portable */\n\
+         #ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n{decl_plain}\n\n\
+         #ifdef __cplusplus\n}}\n#endif\n#endif /* ONTIC_CONTRACTS */\n\n\
+         #endif /* ONTIC_{gk}_{gn}_HPP */\n"
+    ))
+}
+
+/// Translate one invariant into contract text over flat-MemRef parameters.
+/// Conservative subset: scalar vars, len(var), arithmetic, comparisons,
+/// literals. Anything else returns None (listed as untranslated).
+fn contract_text(
+    e: &crate::sketch::Expr,
+    params: &[(String, Ty)],
+) -> Option<String> {
+    use crate::sketch::{BinOp, Expr};
+    let scalar = |n: &str| -> bool {
+        params
+            .iter()
+            .any(|(p, t)| p == n && matches!(t, Ty::Int | Ty::Bool | Ty::F64))
+    };
+    let listp = |n: &str| -> bool {
+        params
+            .iter()
+            .any(|(p, t)| p == n && matches!(t, Ty::ListInt | Ty::ListF64))
+    };
+    match e {
+        Expr::Var(n) if scalar(n) => Some(n.clone()),
+        Expr::IntLit(v) => Some(v.to_string()),
+        Expr::FloatLit(v) => Some(format!("{}", v)),
+        Expr::BoolLit(b) => Some(b.to_string()),
+        Expr::Builtin(crate::sketch::Builtin::Len, inner) => match inner.as_ref() {
+            Expr::Var(n) if listp(n) => Some(format!("{n}_s")),
+            _ => None,
+        },
+        Expr::BinOp(op, l, r) => {
+            let op_s = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::Lt => "<",
+                BinOp::Le => "<=",
+                BinOp::Gt => ">",
+                BinOp::Ge => ">=",
+                BinOp::Eq => "==",
+                BinOp::Ne => "!=",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                _ => return None,
+            };
+            Some(format!(
+                "({} {} {})",
+                contract_text(l, params)?,
+                op_s,
+                contract_text(r, params)?
+            ))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod header_tests {
     use super::*;
@@ -1816,5 +2005,84 @@ mod header_tests {
         let a = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa").unwrap();
         let b = emit_header("g", &[("x".to_string(), Ty::Int)], &Ty::Int, "aa").unwrap();
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod hpp_tests {
+    use super::*;
+    use crate::sketch::{self, Ty};
+
+    fn matvec_gen() -> Vec<crate::sketch::Expr> {
+        let g = crate::gen::parse(
+            "wrapping\nuse Linalg.matvec\nfn T.m(%m: List<F64>, %v: List<F64>) -> List<F64>\n  | len(%v) > 0\n  | len(%m) == len(%v) * len(%v)\n  => [1.0], [2.0] -> [2.0]\n",
+        )
+        .unwrap();
+        g.invariants
+    }
+
+    #[test]
+    fn test_hpp_native_contracts_from_len_relations() {
+        let invs = matvec_gen();
+        let h = emit_header_hpp(
+            "mv",
+            &[
+                ("m".to_string(), Ty::ListF64),
+                ("v".to_string(), Ty::ListF64),
+            ],
+            &Ty::ListF64,
+            "cafe1234",
+            &invs,
+        )
+        .unwrap();
+        assert!(h.contains("pre(v_s > 0)"), "hpp:\n{}", h);
+        assert!(h.contains("pre(m_s == (v_s * v_s))"), "hpp:\n{}", h);
+        assert!(h.contains("__cplusplus >= 202601L"), "auto-guard present");
+        assert!(h.contains("ONTIC_CONTRACTS"));
+        assert!(h.contains("// ontic requires:"));
+        // Guard token distinct from the .h guard.
+        assert!(h.contains("ONTIC_CAFE1234_MV_HPP"));
+    }
+
+    #[test]
+    fn test_hpp_scalar_bounds_and_fallback() {
+        let g = sketch::parse(
+            "fn @g(%x: F64, %sigma: F64) -> F64 { %x }",
+        )
+        .unwrap();
+        // Attach an invariant manually via gen parse instead:
+        let gg = crate::gen::parse(
+            "wrapping\nfn G.w(%x: F64, %sigma: F64) -> F64\n  | %sigma > 0.0\n  => 1.0, 1.0 -> 1.0\n",
+        )
+        .unwrap();
+        let _ = g;
+        let h = emit_header_hpp(
+            "w",
+            &[("x".to_string(), Ty::F64), ("sigma".to_string(), Ty::F64)],
+            &Ty::F64,
+            "f00d",
+            &gg.invariants,
+        )
+        .unwrap();
+        assert!(h.contains("pre(sigma > 0)"), "hpp:\n{}", h);
+    }
+
+    #[test]
+    fn test_hpp_untranslated_listed() {
+        // res-referencing postconditions are outside the v1 subset.
+        let gg = crate::gen::parse(
+            "wrapping\nfn G.p(%a: List<F64>) -> F64\n  | len(%a) > 0 && res >= 0.0\n  => [1.0] -> 1.0\n",
+        )
+        .unwrap();
+        let h = emit_header_hpp(
+            "p",
+            &[("a".to_string(), Ty::ListF64)],
+            &Ty::F64,
+            "beef",
+            &gg.invariants,
+        )
+        .unwrap();
+        assert!(h.contains("untranslated:"), "hpp:\n{}", h);
+        assert!(h.contains("pre(a_s > 0)"), "hpp:\n{}", h);
     }
 }
