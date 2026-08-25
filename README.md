@@ -214,6 +214,17 @@ counts), so every paper deposits reusable math for the next one. See
 `docs/reports/2026-08-23-research-report-p3.md` for a full run against the
 3D Gaussian Splatting paper.
 
+Export/import whole slices of the vault as `.nous` packages
+(*Native Ontic Unified Store* — νοῦς, the intellect):
+
+```bash
+ontic vault export Stats.mean --out mean.nous   # dep chain included
+ontic vault import mean.nous --verify           # re-runs the sieve locally
+```
+
+Imports land `attested`; `--verify` promotes only what the local
+deterministic sieve re-proves. See docs/NOUS.md.
+
 ## License
 
 [Apache 2.0 WITH LLVM-exception](LICENSE)

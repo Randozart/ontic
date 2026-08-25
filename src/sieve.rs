@@ -111,6 +111,8 @@ pub struct Survivor {
     pub candidate: Candidate,
     pub source_text: String,
     pub ns_per_call: u64,
+    /// Probe-plan quality achieved at S5: "full" | "edges_only".
+    pub probe_quality: String,
 }
 
 /// Outcome of sieving a candidate batch.
@@ -215,6 +217,8 @@ fn run_one(
     cfg: &SiegeConfig,
     deps: &interp::DepMap,
 ) -> Result<Survivor, Rejection> {
+    // Quality is decided at S5; carried on the survivor for vault metadata.
+
     let ictx = interp::Ctx {
         deps: std::sync::Arc::new(deps.clone()),
     };
@@ -254,7 +258,7 @@ fn run_one(
     })?;
 
     // S5 probes
-    run_probes(gen, &cand, cfg, &ictx)?;
+    let probe_quality = run_probes(gen, &cand, cfg, &ictx)?;
 
     // S6 shape scan
     if let OverfitVerdict::Suspicious(m) =
@@ -269,6 +273,7 @@ fn run_one(
         candidate: cand,
         source_text: text.to_string(),
         ns_per_call: ns,
+        probe_quality: probe_quality.to_string(),
     })
 }
 
@@ -309,7 +314,7 @@ fn run_probes(
     cand: &Candidate,
     cfg: &SiegeConfig,
     ctx: &interp::Ctx,
-) -> Result<(), Rejection> {
+) -> Result<&'static str, Rejection> {
     let plan = probes::generate(gen, cfg.probe_count, cfg.seed, cfg.edge_budget, ctx).map_err(
         |_| {
             let invs: Vec<String> = gen
@@ -345,7 +350,10 @@ fn run_probes(
             return Err(reject(Stage::Probe, KillKind::InvariantViolation, reason));
         }
     }
-    Ok(())
+    Ok(match plan.quality {
+        crate::probes::PlanQuality::Full => "full",
+        crate::probes::PlanQuality::EdgesOnly => "edges_only",
+    })
 }
 
 /// Evaluate every invariant under env(params → inputs, "res" → result).

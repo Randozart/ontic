@@ -24,10 +24,10 @@ use Ridge.penalty
 fn Ridge.residual(%a: List<F64>, %y: List<F64>, %w: F64, %lam: F64) -> F64
   | len(%a) == len(%y)
   | %res >= 0.0
-  hint "residual sum-of-squares plus ridge penalty: let r = fold p in range(len(%a)), acc from 0.0 { let r_i = index(%y, p) - index(%a, p) * %w; acc + r_i * r_i }; r + %lam * Ridge.penalty([%w])"
+  hint "residual sum-of-squares plus ridge penalty. Two passes: first fold p in range(len(%a)), acc from 0.0 { let r_i = index(%y, p) - index(%a, p) * %w; acc + r_i * r_i } to get the raw residual; then add %lam * %w * %w (the ridge term). Never use to_int or list_append."
   => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 0.0 -> 0.0 ± 1e-9
   => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 1.0, 0.0 -> 30.0 ± 1e-9
-  => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 1.0 -> 5.0 ± 1e-9
+  => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 1.0 -> 4.0 ± 1e-9
   ?? [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 0.5 -> 2.5 ± 1e-9
 
 use Ridge.residual

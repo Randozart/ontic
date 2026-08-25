@@ -2,6 +2,28 @@
 
 ## Changes Made on 2026-08-25
 
+### 2026-08-25 (latest) — .nous vault export packages
+
+Plan: docs/plans/2026-08-25-nous-package.md (commit e3caf6b).
+
+- `src/nous.rs`: NOUS1 container — TOC JSON + verbatim .ous blobs +
+  extras (full manifest, guarded twins, hpp). Strict unpack: magic,
+  section bounds, TOC/key agreement, trailing-byte rejection. 6 tests.
+- Gen retains raw `source`; solve persists `gen_text` + `quality` in
+  manifests — old manifests degrade to attest-only exports honestly.
+- Trust ledger `<vault>/trust.json` (verified|attested), local-only;
+  `vault` list shows status.
+- CLI: `vault export [names|--all] --out p.nous` with dep-closure from
+  `use` lines (topo order, prefers re-verifiable manifests);
+  `vault import pkg [--verify] [--dry-run] [--force]`.
+- Verify-on-import: canonical-key drift check + full S1–S7 sieve rerun
+  with local dep resolution; deterministic verdicts cross-machine.
+- Live e2e: export Stats.mean → clean-vault import verified → collision
+  skip → trust badge; structural tamper rejected by framing; same-length
+  spec tamper rejected by key drift; vault untouched on rejection.
+
+
+
 ### 2026-08-25 (later) — fail-closed guards + linear probe solver
 
 **Leg C (commit bc7480a):** guard shims fail closed. Untranslatable

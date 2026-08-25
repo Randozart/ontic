@@ -25,6 +25,9 @@ const MAGIC: &[u8] = b"NOUS1\n";
 pub struct NousEntry {
     /// Vault entry (manifest facts + sketch + mlir + gen_text).
     pub entry: vault::Entry,
+    /// Raw manifest JSON exactly as packed — imports restore it verbatim
+    /// so provenance survives the round trip.
+    pub manifest: serde_json::Value,
     /// Compiled LLVM object bytes (arch-specific; importer may re-lower).
     pub obj: Vec<u8>,
     /// C header text.
@@ -175,6 +178,7 @@ pub fn unpack(data: &[u8]) -> Result<NousPackage, String> {
             extras.push((kind, bytes));
         }
         entries.push(NousEntry {
+            manifest: un.manifest.clone(),
             entry: vault::Entry {
                 key: un.manifest["key"]
                     .as_str()
@@ -229,6 +233,7 @@ mod tests {
 
     fn sample_entry(key: &str, name: &str, verifiable: bool) -> NousEntry {
         NousEntry {
+            manifest: serde_json::json!({"key": key, "name": name}),
             entry: vault::Entry {
                 key: key.to_string(),
                 name: name.to_string(),

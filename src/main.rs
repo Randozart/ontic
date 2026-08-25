@@ -38,8 +38,7 @@ fn dispatch(args: &[String]) -> i32 {
         Some("eval") => cmd_eval(args),
         Some("sweep") => cmd_sweep(args),
         Some("bench") => cmd_bench(args),
-        Some("vault") => cmd_vault(args),
-        Some("lib") => cmd_lib(args),
+        Some("vault") => cmd_vault(args),        Some("lib") => cmd_lib(args),
         Some("ablate") => cmd_ablate(args),
         Some("pack") => cmd_pack(args),
         Some("unpack") => cmd_unpack(args),
@@ -910,7 +909,8 @@ fn emit_and_store(
             "seed_base": fcfg.seed,
             "prompt_sha256": ontic::sha256::sha256_hex(first_prompt.as_bytes()),
             "prompt": first_prompt,
-        }
+        },
+        "quality": survivor.probe_quality,
     });
     if !artifacts.is_empty() {
         meta_val["artifacts"] = serde_json::Value::Object(artifacts);
@@ -930,6 +930,13 @@ fn emit_and_store(
 }
 
 fn cmd_vault(args: &[String]) -> i32 {
+    // Subcommands: `vault export …` / `vault import …`; bare `vault` lists.
+    // args = [prog, vault, SUB, …]
+    match args.get(2).map(|s| s.as_str()) {
+        Some("export") => return cmd_vault_export(&args[3..]),
+        Some("import") => return cmd_vault_import(&args[3..]),
+        _ => {}
+    }
     let dir = match args.iter().position(|a| a == "--dir") {
         Some(i) => match args.get(i + 1) {
             Some(d) => d.clone(),
@@ -962,10 +969,11 @@ fn cmd_vault(args: &[String]) -> i32 {
                 let badge = if promoted.iter().any(|p| *p == path) { " [LIB]" } else { "" };
                 let hits = reuse.get(&e.key).copied().unwrap_or(0);
                 println!(
-                    "{}  {}{}  [reuse {}]  {}",
+                    "{}  {}{}  [{}]  [reuse {}]  {}",
                     &e.key[..12.min(e.key.len())],
                     e.name,
                     badge,
+                    v.trust_of(&e.key),
                     hits,
                     e.signature
                 );
@@ -977,6 +985,444 @@ fn cmd_vault(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// Flag lookup for vault subcommands: `--dir`, `--out`, boolean flags.
+struct VaultSubOpts {
+    dir: String,
+    out: String,
+    names: Vec<String>,
+    all: bool,
+    verify: bool,
+    dry_run: bool,
+    force: bool,
+}
+
+fn parse_vault_sub(args: &[String]) -> Result<VaultSubOpts, String> {
+    let mut o = VaultSubOpts {
+        dir: std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
+        out: "vault.nous".to_string(),
+        names: Vec::new(),
+        all: false,
+        verify: false,
+        dry_run: false,
+        force: false,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dir" => {
+                o.dir = args
+                    .get(i + 1)
+                    .ok_or("--dir needs a path")?
+                    .clone();
+                i += 2;
+            }
+            "--out" => {
+                o.out = args.get(i + 1).ok_or("--out needs a path")?.clone();
+                i += 2;
+            }
+            "--all" => {
+                o.all = true;
+                i += 1;
+            }
+            "--verify" => {
+                o.verify = true;
+                i += 1;
+            }
+            "--dry-run" => {
+                o.dry_run = true;
+                i += 1;
+            }
+            "--force" => {
+                o.force = true;
+                i += 1;
+            }
+            other => {
+                o.names.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    Ok(o)
+}
+
+/// Extract the gen path from a signature (`fn A.b(…) -> T` → `A.b`).
+fn sig_path_of(entry: &VaultEntry) -> String {
+    let inner = entry.signature.strip_prefix("fn ").unwrap_or(&entry.signature);
+    match inner.find('(') {
+        Some(i) => inner[..i].trim().to_string(),
+        None => inner.trim().to_string(),
+    }
+}
+
+use ontic::vault::Entry as VaultEntry;
+
+/// Depth-first dep closure in topological order (deps before dependents).
+fn export_closure(
+    v: &Vault,
+    wanted: &[String],
+) -> Result<Vec<VaultEntry>, String> {
+    let mut ordered: Vec<VaultEntry> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut missing: Vec<String> = Vec::new();
+
+    fn visit(
+        v: &Vault,
+        path: &str,
+        ordered: &mut Vec<VaultEntry>,
+        seen: &mut std::collections::HashSet<String>,
+        missing: &mut Vec<String>,
+    ) {
+        if seen.contains(path) || !missing.is_empty() {
+            return;
+        }
+        // All versions of this path; prefer a re-verifiable manifest
+        // (gen_text present), then the greatest key (latest content).
+        let mut candidates: Vec<VaultEntry> = match v.list() {
+            Ok(es) => es
+                .into_iter()
+                .filter(|e| sig_path_of(&e) == path)
+                .collect(),
+            Err(e) => {
+                missing.push(format!("{path} ({e})"));
+                return;
+            }
+        };
+        candidates.sort_by_key(|e| (e.gen_text.is_some() as i32, e.key.clone()));
+        let entry = match candidates.pop() {
+            Some(e) => e,
+            None => {
+                missing.push(path.to_string());
+                return;
+            }
+        };
+        // Deps come from the spec's `use` lines; entries without gen_text
+        // have unknown deps — shipped with a warning by the caller.
+        let deps: Vec<String> = entry
+            .gen_text
+            .as_deref()
+            .and_then(|t| crate::gen::parse(t).ok())
+            .map(|g| g.deps)
+            .unwrap_or_default();
+        seen.insert(path.to_string());
+        for d in deps {
+            visit(v, &d, ordered, seen, missing);
+            if !missing.is_empty() {
+                return;
+            }
+        }
+        // Dedup by key: same kernel reachable via several paths.
+        if !ordered.iter().any(|e| e.key == entry.key) {
+            ordered.push(entry);
+        }
+    }
+
+    for name in wanted {
+        visit(v, name, &mut ordered, &mut seen, &mut missing);
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "missing vault dependencies: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(ordered)
+}
+
+/// Gather everything an export needs for one entry from the vault dir.
+/// The .ous blob is the only carrier of compiled object bytes, so it is
+/// required; guarded twins / hpp are optional extras when present.
+fn gather_nous_entry(vault_dir: &str, entry: VaultEntry) -> Result<ontic::nous::NousEntry, String> {
+    let k8 = entry.key[..8.min(entry.key.len())].to_string();
+    let dirp = std::path::Path::new(vault_dir);
+    let ous_path = dirp.join(format!("{}-{}.ous", entry.name, k8));
+    if !ous_path.exists() {
+        return Err(format!(
+            "{}-{}.ous not found in {} (re-solve to regenerate)",
+            entry.name, k8, vault_dir
+        ));
+    }
+    let raw = std::fs::read(&ous_path).map_err(|e| format!("read {}: {}", ous_path.display(), e))?;
+    let un = ontic::ous::unpack(&raw)?;
+    if un.manifest["key"].as_str() != Some(entry.key.as_str()) {
+        return Err(format!("key mismatch inside {} ", ous_path.display()));
+    }
+
+    let mut quality = "unknown".to_string();
+    let mut manifest_raw = "{}".to_string();
+    if let Ok(mraw) = std::fs::read_to_string(dirp.join(format!("{}.json", entry.key))) {
+        if let Ok(m) = serde_json::from_str::<serde_json::Value>(&mraw) {
+            if let Some(q) = m["quality"].as_str() {
+                quality = q.to_string();
+            }
+        }
+        manifest_raw = mraw;
+    }
+    let manifest_val: serde_json::Value =
+        serde_json::from_str(&manifest_raw).unwrap_or_else(|_| serde_json::json!({}));
+
+    // The full vault manifest ships as an extra so imports restore
+    // provenance verbatim (.ous carries only a 4-field summary).
+    let mut extras: Vec<(String, Vec<u8>)> =
+        vec![("manifest".to_string(), manifest_raw.into_bytes())];
+    for (kind, file) in [
+        ("guarded_so", format!("lib{}-{}.guarded.so", entry.name, k8)),
+        ("guarded_c", format!("{}-{}.guarded.c", entry.name, k8)),
+        ("hpp", format!("{}-{}.hpp", entry.name, k8)),
+    ] {
+        let p = dirp.join(&file);
+        if p.exists() {
+            let bytes =
+                std::fs::read(&p).map_err(|e| format!("read {}: {}", p.display(), e))?;
+            extras.push((kind.to_string(), bytes));
+        }
+    }
+
+    Ok(ontic::nous::NousEntry {
+        manifest: manifest_val,
+        entry,
+        obj: un.obj_bytes,
+        header: un.header_text,
+        quality,
+        extras,
+    })
+}
+
+/// `ontic vault export [names…|--all] [--out pkg.nous] [--dir d]`
+fn cmd_vault_export(args: &[String]) -> i32 {
+    let opts = match parse_vault_sub(args) {
+        Ok(o) => o,
+        Err(e) => return usage(&e),
+    };
+    if !opts.all && opts.names.is_empty() {
+        return usage("export needs kernel names or --all");
+    }
+    let v = match Vault::open(&opts.dir) {
+        Ok(v) => v,
+        Err(e) => return die(&e),
+    };
+    let wanted: Vec<String> = if opts.all {
+        match v.list() {
+            Ok(es) => es.iter().map(sig_path_of).collect(),
+            Err(e) => return die(&e),
+        }
+    } else {
+        opts.names.clone()
+    };
+    let chain = match export_closure(&v, &wanted) {
+        Ok(c) => c,
+        Err(e) => return die(&e),
+    };
+
+    let mut nous_entries = Vec::new();
+    let mut warned_unverifiable = false;
+    for entry in chain {
+        if entry.gen_text.is_none() && !warned_unverifiable {
+            eprintln!("warning: some manifests lack gen_text; those kernels export attest-only");
+            warned_unverifiable = true;
+        }
+        match gather_nous_entry(&opts.dir, entry) {
+            Ok(ne) => nous_entries.push(ne),
+            Err(e) => return die(&e),
+        }
+    }
+
+    let packed = match ontic::nous::pack(&nous_entries) {
+        Ok(p) => p,
+        Err(e) => return die(&e),
+    };
+    let out_path = std::path::Path::new(&opts.out);
+    if let Err(e) = ontic::nous::write_to(out_path, &packed) {
+        return die(&e);
+    }
+    println!(
+        "PACKED   : {} ({} kernels, {} bytes)",
+        opts.out,
+        nous_entries.len(),
+        packed.len()
+    );
+    for ne in &nous_entries {
+        println!(
+            "  {}  {}  [{}]  {}",
+            &ne.entry.key[..12.min(ne.entry.key.len())],
+            ne.entry.name,
+            ne.quality,
+            ne.entry.signature
+        );
+    }
+    0
+}
+
+/// Land one unpacked entry into the local vault (files + trust status).
+fn land_entry(
+    v: &Vault,
+    dir: &str,
+    ne: &ontic::nous::NousEntry,
+    status: &str,
+) -> Result<(), String> {
+    let k8 = ne.entry.key[..8.min(ne.entry.key.len())].to_string();
+    let dirp = std::path::Path::new(dir);
+    std::fs::write(
+        dirp.join(format!("{}.mlir", ne.entry.key)),
+        &ne.entry.mlir,
+    )
+    .map_err(|e| format!("mlir write failed: {}", e))?;
+    // Full manifest ships as a "manifest" extra; fall back to a minimal
+    // reconstruction for foreign packages that lack it.
+    let manifest_json = match ne.extras.iter().find(|(k, _)| k == "manifest") {
+        Some((_, bytes)) => bytes.clone(),
+        None => serde_json::to_string_pretty(&serde_json::json!({
+            "name": ne.entry.name,
+            "signature": ne.entry.signature,
+            "key": ne.entry.key,
+            "sketch": ne.entry.sketch_text,
+            "gen_text": ne.entry.gen_text,
+        }))
+        .map_err(|e| e.to_string())?
+        .into_bytes(),
+    };
+    std::fs::write(dirp.join(format!("{}.json", ne.entry.key)), manifest_json)
+        .map_err(|e| format!("manifest write failed: {}", e))?;
+    // Header + object-derived artifacts.
+    std::fs::write(dirp.join(format!("{}-{}.h", ne.entry.name, k8)), &ne.header)
+        .map_err(|e| format!("header write failed: {}", e))?;
+    let obj_name = dirp.join(format!("{}-{}.o", ne.entry.name, k8));
+    std::fs::write(&obj_name, &ne.obj).map_err(|e| format!("obj write failed: {}", e))?;
+    for (kind, bytes) in &ne.extras {
+        let name = match kind.as_str() {
+            "manifest" => continue, // already landed as {key}.json
+            "guarded_so" => format!("lib{}-{}.guarded.so", ne.entry.name, k8),
+            "guarded_c" => format!("{}-{}.guarded.c", ne.entry.name, k8),
+            "hpp" => format!("{}-{}.hpp", ne.entry.name, k8),
+            other => return Err(format!("unknown extra kind `{other}`")),
+        };
+        std::fs::write(dirp.join(name), bytes).map_err(|e| format!("extra write failed: {}", e))?;
+    }
+    v.set_trust(&ne.entry.key, status)
+}
+
+/// Re-run the sieve over a shipped gen+candidate. Deterministic verdicts:
+/// the winner must reproduce the package's content-addressed key.
+fn verify_entry(ne: &ontic::nous::NousEntry, v: &Vault) -> Result<(), String> {
+    let gen_text = ne
+        .entry
+        .gen_text
+        .as_ref()
+        .ok_or("manifest lacks gen_text; cannot verify")?;
+    let w = crate::gen::parse(gen_text).map_err(|e| format!("gen reparse failed: {e}"))?;
+    let expected = Vault::key_for(&w);
+    if expected != ne.entry.key {
+        return Err(format!(
+            "canonical key drift: package claims {}, spec hashes to {}",
+            ne.entry.key, expected
+        ));
+    }
+    // Resolve declared deps against the LOCAL vault so chained gens verify.
+    let mut deps: interp::DepMap = std::collections::HashMap::new();
+    for d in &w.deps {
+        if let Some(e) = v.find_by_path(d) {
+            if let Ok(cand) = crate::sketch::parse(&e.sketch_text) {
+                deps.insert(d.clone(), interp::DepFn { cand });
+            }
+        } else {
+            return Err(format!("dependency `{d}` not present locally"));
+        }
+    }
+    let texts = vec![(ne.entry.name.clone(), ne.entry.sketch_text.clone())];
+    let report = sieve::run(&w, &texts, &sieve::SiegeConfig::default(), &deps)
+        .map_err(|e| format!("gen invalid on this machine: {e:?}"))?;
+    if report.survivors.is_empty() {
+        let why = report
+            .rejections
+            .first()
+            .map(|(_, r)| format!("{:?} / {:?}", r.stage, r.kind))
+            .unwrap_or_else(|| "no survivors".to_string());
+        return Err(format!("sieve rejected: {why}"));
+    }
+    Ok(())
+}
+
+/// `ontic vault import pkg.nous [--verify] [--dry-run] [--force] [--dir d]`
+fn cmd_vault_import(args: &[String]) -> i32 {
+    let opts = match parse_vault_sub(args) {
+        Ok(o) => o,
+        Err(e) => return usage(&e),
+    };
+    let pkg_path = match opts.names.first() {
+        Some(p) => p.clone(),
+        None => return usage("import needs a .nous package path"),
+    };
+    let raw = match std::fs::read(&pkg_path) {
+        Ok(r) => r,
+        Err(e) => return die(&format!("read {pkg_path}: {e}")),
+    };
+    let pkg = match ontic::nous::unpack(&raw) {
+        Ok(p) => p,
+        Err(e) => return die(&format!("{pkg_path}: {e}")),
+    };
+    println!(
+        "PACKAGE  : {} | generator {} | target {}",
+        pkg_path, pkg.generator, pkg.target
+    );
+    if opts.dry_run {
+        for ne in &pkg.entries {
+            println!(
+                "  {}  {}  [{}]  verifiable={}  guarded={}",
+                &ne.entry.key[..12.min(ne.entry.key.len())],
+                ne.entry.name,
+                ne.quality,
+                ne.entry.gen_text.is_some(),
+                ne.extras.iter().any(|(k, _)| k == "guarded_so"),
+            );
+        }
+        return 0;
+    }
+    let v = match Vault::open(&opts.dir) {
+        Ok(v) => v,
+        Err(e) => return die(&e),
+    };
+    // Topo order is preserved from export; deps land before dependents so
+    // --verify can resolve chains locally.
+    let mut landed = 0usize;
+    let mut verified = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    for ne in &pkg.entries {
+        if v.get(&ne.entry.key).is_some() && !opts.force {
+            println!("SKIP     : {} (key already present)", ne.entry.name);
+            skipped += 1;
+            continue;
+        }
+        if opts.verify {
+            if let Err(e) = verify_entry(ne, &v) {
+                eprintln!("REJECTED : {} — {}", ne.entry.name, e);
+                failed += 1;
+                continue;
+            }
+        }
+        let status = if opts.verify { "verified" } else { "attested" };
+        if let Err(e) = land_entry(&v, &opts.dir, ne, status) {
+            eprintln!("FAILED   : {} — {}", ne.entry.name, e);
+            failed += 1;
+            continue;
+        }
+        landed += 1;
+        if opts.verify {
+            verified += 1;
+        }
+        println!("IMPORTED : {} [{status}]", ne.entry.name);
+    }
+    println!(
+        "SUMMARY  : {landed} imported ({verified} verified), {skipped} skipped, {failed} rejected"
+    );
+    if failed > 0 { 1 } else { 0 }
+}
+
+/// Print error to stderr and return failure exit code.
+fn die(msg: &str) -> i32 {
+    eprintln!("{msg}");
+    1
 }
 
 /// `ontic run <file.ont>` — execute a recipe over vault-verified functions.
