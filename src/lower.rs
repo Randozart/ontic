@@ -219,8 +219,10 @@ fn mlir_param_type(ty: &Ty) -> &'static str {
     match ty {
         Ty::Int | Ty::Bool => "i64",
         Ty::F64 => "f64",
+        Ty::F32 => "f32",
         Ty::ListInt => "memref<?xi64>",
         Ty::ListF64 => "memref<?xf64>",
+        Ty::ListF32 => "memref<?xf32>",
     }
 }
 
@@ -228,8 +230,10 @@ fn mlir_ret_type(ty: &Ty) -> Result<&'static str, String> {
     match ty {
         Ty::Int | Ty::Bool => Ok("i64"),
         Ty::F64 => Ok("f64"),
+        Ty::F32 => Ok("f32"),
         Ty::ListInt => Ok("memref<?xi64>"),
         Ty::ListF64 => Ok("memref<?xf64>"),
+        Ty::ListF32 => Ok("memref<?xf32>"),
     }
 }
 
@@ -308,10 +312,16 @@ fn emit_expr(
         Expr::IntLit(v) => Ok(em.const_i64(*v)),
         Expr::FloatLit(v) => {
             let c = em.fresh("cf");
+            let mlir_ty = if matches!(expr_ty(e, tyenv), Ty::F32) {
+                "f32"
+            } else {
+                "f64"
+            };
             em.line(&format!(
-                "{} = arith.constant {} : f64",
+                "{} = arith.constant {} : {}",
                 c,
-                mlir_float(*v)
+                mlir_float(*v),
+                mlir_ty
             ));
             Ok(c)
         }
@@ -348,18 +358,19 @@ fn emit_expr(
             let rv = emit_expr(rr, env, tyenv, em)?;
             let lt = expr_ty(lr, tyenv);
             let rt = expr_ty(rr, tyenv);
-            let any_float = matches!(lt, Ty::F64) || matches!(rt, Ty::F64);
+            let any_float = matches!(lt, Ty::F64 | Ty::F32) || matches!(rt, Ty::F64 | Ty::F32);
+            let float_ty = if matches!(lt, Ty::F32) || matches!(rt, Ty::F32) { "f32" } else { "f64" };
             let (lv_s, rv_s) = if any_float {
                 let lw = if matches!(lt, Ty::Int) {
                     let w = em.fresh("widen");
-                    em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, lv));
+                    em.line(&format!("{} = arith.sitofp {} : i64 to {}", w, lv, float_ty));
                     w
                 } else {
                     lv
                 };
                 let rw = if matches!(rt, Ty::Int) {
                     let w = em.fresh("widen");
-                    em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, rv));
+                    em.line(&format!("{} = arith.sitofp {} : i64 to {}", w, rv, float_ty));
                     w
                 } else {
                     rv
@@ -378,8 +389,8 @@ fn emit_expr(
             let cmp = em.fresh("c");
             if any_float {
                 em.line(&format!(
-                    "{} = arith.cmpf {}, {}, {} : f64",
-                    cmp, pred, lv_s, rv_s
+                    "{} = arith.cmpf {}, {}, {} : {}",
+                    cmp, pred, lv_s, rv_s, float_ty
                 ));
             } else {
                 em.line(&format!(
@@ -410,24 +421,31 @@ fn emit_expr(
             // Element type mirrors the checker: F64 if ANY element is F64,
             // else Int. Literal-presence heuristics miss computed floats
             // (e.g. `[c/det, -b/det, ...]`) and mis-alloc i64 memrefs.
-            let elem_f = elems.iter().any(|e| expr_ty(e, tyenv) == Ty::F64)
+            let elem_f64 = elems.iter().any(|e| matches!(expr_ty(e, tyenv), Ty::F64))
                 || matches!(
                     expr_ty(&Expr::ListCons(elems.clone()), tyenv),
                     Ty::ListF64
                 );
-            let mty = if elem_f { "memref<?xf64>" } else { "memref<?xi64>" };
-            let _ety = if elem_f { "f64" } else { "i64" };
+            let elem_f32 = elems.iter().any(|e| matches!(expr_ty(e, tyenv), Ty::F32))
+                || matches!(
+                    expr_ty(&Expr::ListCons(elems.clone()), tyenv),
+                    Ty::ListF32
+                );
+            let elem_f = elem_f64 || elem_f32;
+            let mty = if elem_f32 { "memref<?xf32>" } else if elem_f64 { "memref<?xf64>" } else { "memref<?xi64>" };
+            let _ety = if elem_f32 { "f32" } else if elem_f64 { "f64" } else { "i64" };
             let count = em.const_index(elems.len());
             let alloc = em.fresh("lc");
             em.line(&format!("{} = memref.alloc({}) : {}", alloc, count, mty));
             for (i, e) in elems.iter().enumerate() {
                 let v = emit_expr(e, env, tyenv, em)?;
-                let v2 = if elem_f && expr_ty(e, tyenv) != Ty::F64 {
-                    // Widen int-typed sub-expressions to f64.
+                let v2 = if elem_f && !matches!(expr_ty(e, tyenv), Ty::F64 | Ty::F32) {
+                    // Widen int-typed sub-expressions to the list's float type.
                     let w = em.fresh("widen");
+                    let sitofp_ty = if elem_f32 { "f32" } else { "f64" };
                     em.line(&format!(
-                        "{} = arith.sitofp {} : i64 to f64",
-                        w, v
+                        "{} = arith.sitofp {} : i64 to {}",
+                        w, v, sitofp_ty
                     ));
                     w
                 } else {
@@ -444,7 +462,7 @@ fn emit_expr(
         Expr::UnOp(crate::sketch::UnOp::Neg, inner) => {
             let x = emit_expr(inner, env, tyenv, em)?;
             let r = em.fresh("neg");
-            if expr_ty(inner, tyenv) == Ty::F64 {
+            if matches!(expr_ty(inner, tyenv), Ty::F64 | Ty::F32) {
                 em.line(&format!("{} = arith.negf {} : f64", r, x));
             } else {
                 let z = em.const_i64(0);
@@ -655,11 +673,12 @@ fn emit_builtin(
         }
         Builtin::Sqrt | Builtin::Exp | Builtin::Log | Builtin::Abs => {
             let x = emit_expr(inner, env, tyenv, em)?;
-            let xf = if expr_ty(inner, tyenv) == Ty::F64 {
+            let xf = if matches!(expr_ty(inner, tyenv), Ty::F64 | Ty::F32) {
                 x
             } else {
                 let w = em.fresh("widen");
-                em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, x));
+                let sitofp_ty = if matches!(expr_ty(inner, tyenv), Ty::F32) { "f32" } else { "f64" };
+                em.line(&format!("{} = arith.sitofp {} : i64 to {}", w, x, sitofp_ty));
                 w
             };
             let out = em.fresh("math");
@@ -703,9 +722,10 @@ fn emit_call(
     for (a, pt) in args.iter().zip(target.params.iter()) {
         let ssa = emit_expr(a, env, tyenv, em)?;
         let at = expr_ty(a, tyenv);
-        let widened = if matches!(pt, Ty::F64) && matches!(at, Ty::Int) {
+        let widened = if matches!(pt, Ty::F64 | Ty::F32) && matches!(at, Ty::Int) {
             let w = em.fresh("widen");
-            em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, ssa));
+            let sitofp_ty = if matches!(pt, Ty::F32) { "f32" } else { "f64" };
+            em.line(&format!("{} = arith.sitofp {} : i64 to {}", w, ssa, sitofp_ty));
             w
         } else {
             ssa
@@ -718,14 +738,16 @@ fn emit_call(
         .iter()
         .map(|(_, pt)| match pt {
             Ty::ListF64 => "memref<?xf64>",
+        Ty::ListF32 => "memref<?xf32>",
             Ty::ListInt => "memref<?xi64>",
-            Ty::F64 => "f64",
+            Ty::F64 | Ty::F32 => "f64",
             _ => "i64",
         })
         .collect();
     let ret_ty = match target.ret {
-        Ty::F64 => "f64",
+        Ty::F64 | Ty::F32 => "f64",
         Ty::ListF64 => "memref<?xf64>",
+        Ty::ListF32 => "memref<?xf32>",
         Ty::ListInt => "memref<?xi64>",
         other => {
             return Err(format!(
@@ -918,9 +940,9 @@ fn emit_map(
     em: &mut Emitter,
 ) -> Result<String, String> {
     let m = emit_expr(list, env, tyenv, em)?;
-    let elem_is_f64 = matches!(list, Expr::Var(n) if matches!(tyenv.get(n), Some(Ty::ListF64)))
-        || matches!(expr_ty(list, tyenv), Ty::ListF64);
-    let mty_in_str = if elem_is_f64 { "memref<?xf64>" } else { "memref<?xi64>" };
+    let elem_is_float = matches!(list, Expr::Var(n) if matches!(tyenv.get(n), Some(Ty::ListF64)))
+        || matches!(expr_ty(list, tyenv), Ty::ListF64 | Ty::ListF32);
+    let mty_in_str = if elem_is_float { "memref<?xf64>" } else { "memref<?xi64>" };
 
     let idx0 = em.const_index(0);
     let step = em.const_index(1);
@@ -934,8 +956,8 @@ fn emit_map(
     // bodies like `v * v` reference the var, which is unbound until the loop
     // header. Pre-binding bug stored f64 products into memref<?xi64>.
     let mut probe = tyenv.clone();
-    let var_is_f64 = if elem_is_f64 { Ty::F64 } else { Ty::Int };
-    probe.insert(var.to_string(), var_is_f64);
+    let var_is_float = if elem_is_float { Ty::F64 } else { Ty::Int };
+    probe.insert(var.to_string(), var_is_float);
     let out_ty = if matches!(expr_ty(body, &probe), Ty::F64) { "f64" } else { "i64" };
     let out_mty = if out_ty == "f64" { "memref<?xf64>" } else { "memref<?xi64>" };
 
@@ -959,7 +981,7 @@ fn emit_map(
         elem, m, iv, mty_in_str
     ));
     env.push(Binding { name: var.to_string(), ssa: elem });
-    tyenv.insert(var.to_string(), if elem_is_f64 { Ty::F64 } else { Ty::Int });
+    tyenv.insert(var.to_string(), if elem_is_float { Ty::F64 } else { Ty::Int });
 
     let body_v = emit_expr(body, env, tyenv, em)?;
     em.line(&format!(
@@ -989,8 +1011,9 @@ fn emit_if(
     ));
     let t_ty = expr_ty(t, tyenv);
     let ty_str = match t_ty {
-        Ty::F64 => "f64",
+        Ty::F64 | Ty::F32 => "f64",
         Ty::ListF64 => "memref<?xf64>",
+        Ty::ListF32 => "memref<?xf32>",
         Ty::ListInt => "memref<?xi64>",
         _ => "i64",
     };
@@ -1049,7 +1072,7 @@ fn emit_fold(
 
     let iv = em.fresh("i");
     let acc_ssa = em.fresh("acc");
-    let ty_str = if expr_ty(init, tyenv) == Ty::F64 { "f64" } else { "i64" };
+    let ty_str = if matches!(expr_ty(init, tyenv), Ty::F64 | Ty::F32) { "f64" } else { "i64" };
     em.line(&format!(
         "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> ({}) {{",
         acc_ssa, iv, idx0, dim, step, acc_ssa, init_v, ty_str
@@ -1067,7 +1090,7 @@ fn emit_fold(
         em.line(&format!("{} = memref.load {}[{}] : {}", elem, m, iv, mty));
     }
 
-    tyenv.insert(var.to_string(), if matches!(expr_ty(list, tyenv), Ty::ListF64) { Ty::F64 } else { Ty::Int });
+    tyenv.insert(var.to_string(), if matches!(expr_ty(list, tyenv), Ty::ListF64 | Ty::ListF32) { Ty::F64 } else { Ty::Int });
     tyenv.insert(acc.to_string(), if ty_str == "f64" { Ty::F64 } else { Ty::Int });
     env.push(Binding {
         name: var.to_string(),
@@ -1134,7 +1157,7 @@ fn emit_fold_multi(
     let _ = &carried;
 
     let elem_ty = fold_elem_ty(list, tyenv);
-    let list_mty = if matches!(elem_ty, Ty::F64) {
+    let list_mty = if matches!(elem_ty, Ty::F64 | Ty::F32) {
         "memref<?xf64>"
     } else {
         "memref<?xi64>"
@@ -1404,7 +1427,7 @@ fn emit_fold_until(
     let step = em.const_index(1);
     let dim = em.fresh("dim");
     let elem_ty = fold_elem_ty(list, tyenv);
-    let (list_mty, _ety) = if matches!(elem_ty, Ty::F64) {
+    let (list_mty, _ety) = if matches!(elem_ty, Ty::F64 | Ty::F32) {
         ("memref<?xf64>", "f64")
     } else {
         ("memref<?xi64>", "i64")
@@ -1484,26 +1507,28 @@ fn emit_binop(
     let lt = expr_ty(l, tyenv);
     let rt = expr_ty(r, tyenv);
     let mixed_float = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-        && ((matches!(lt, Ty::F64) && matches!(rt, Ty::Int))
+        && ((matches!(lt, Ty::F64 | Ty::F32) && matches!(rt, Ty::Int))
             || (matches!(lt, Ty::Int) && matches!(rt, Ty::F64)));
     let mut lv_s = lv;
     let mut rv_s = rv;
-    let mut any_float = matches!(lt, Ty::F64) || matches!(rt, Ty::F64);
+    let mut any_float = matches!(lt, Ty::F64 | Ty::F32) || matches!(rt, Ty::F64 | Ty::F32);
+    let binop_float_ty = if matches!(lt, Ty::F32) || matches!(rt, Ty::F32) { "f32" } else { "f64" };
     if mixed_float {
         if matches!(lt, Ty::Int) {
             let w = em.fresh("widen");
-            em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, lv_s));
+            em.line(&format!("{} = arith.sitofp {} : i64 to {}", w, lv_s, binop_float_ty));
             lv_s = w;
         }
         if matches!(rt, Ty::Int) {
             let w = em.fresh("widen");
-            em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, rv_s));
+            em.line(&format!("{} = arith.sitofp {} : i64 to {}", w, rv_s, binop_float_ty));
             rv_s = w;
         }
         any_float = true;
     }
     if is_comparison(op) {
-        return emit_cmp(op, &lv_s, &rv_s, any_float, em);
+        let float_ty = if any_float { binop_float_ty } else { "" };
+        return emit_cmp(op, &lv_s, &rv_s, float_ty, em);
     }
     // Broadcasting: either operand a list -> elementwise loop over a fresh
     // result memref. Scalar operands are loaded per-iteration.
@@ -1522,12 +1547,25 @@ fn emit_binop(
     }
     if any_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
         let out = em.fresh("opf");
+        let float_ty = binop_float_ty;
+        // When float_ty is f32 but an operand was emitted as f64 (e.g. FloatLit),
+        // insert fptrunc to bring it to f32 before the arith op.
+        let lv_s = if float_ty == "f32" && matches!(lt, Ty::F64) {
+            let c = em.fresh("trunc");
+            em.line(&format!("{} = arith.truncf {} : f64 to f32", c, lv_s));
+            c
+        } else { lv_s };
+        let rv_s = if float_ty == "f32" && matches!(rt, Ty::F64) {
+            let c = em.fresh("trunc");
+            em.line(&format!("{} = arith.truncf {} : f64 to f32", c, rv_s));
+            c
+        } else { rv_s };
         let stmt = match op {
-            BinOp::Add => format!("{} = arith.addf {}, {} : f64", out, lv_s, rv_s),
-            BinOp::Sub => format!("{} = arith.subf {}, {} : f64", out, lv_s, rv_s),
-            BinOp::Mul => format!("{} = arith.mulf {}, {} : f64", out, lv_s, rv_s),
-            BinOp::Div => format!("{} = arith.divf {}, {} : f64", out, lv_s, rv_s),
-            _ => format!("{} = arith.remf {}, {} : f64", out, lv_s, rv_s),
+            BinOp::Add => format!("{} = arith.addf {}, {} : {}", out, lv_s, rv_s, float_ty),
+            BinOp::Sub => format!("{} = arith.subf {}, {} : {}", out, lv_s, rv_s, float_ty),
+            BinOp::Mul => format!("{} = arith.mulf {}, {} : {}", out, lv_s, rv_s, float_ty),
+            BinOp::Div => format!("{} = arith.divf {}, {} : {}", out, lv_s, rv_s, float_ty),
+            _ => format!("{} = arith.remf {}, {} : {}", out, lv_s, rv_s, float_ty),
         };
         em.line(&stmt);
         return Ok(out);
@@ -1740,9 +1778,10 @@ fn emit_cmp(
     op: BinOp,
     lv: &str,
     rv: &str,
-    is_float: bool,
+    float_ty: &str,
     em: &mut Emitter,
 ) -> Result<String, String> {
+    let is_float = !float_ty.is_empty();
     // cmpf uses ordered-float predicate names; cmpi uses signed-int names.
     let pred = match (op, is_float) {
         (BinOp::Eq, false) => "eq",
@@ -1760,7 +1799,7 @@ fn emit_cmp(
     };
     let bit = em.fresh("cmp");
     if is_float {
-        em.line(&format!("{} = arith.cmpf {}, {}, {} : f64", bit, pred, lv, rv));
+        em.line(&format!("{} = arith.cmpf {}, {}, {} : {}", bit, pred, lv, rv, float_ty));
     } else {
         em.line(&format!("{} = arith.cmpi {}, {}, {} : i64", bit, pred, lv, rv));
     }
@@ -1989,30 +2028,34 @@ fn emit_broadcast(
         rv_ssa.to_string()
     };
 
-    // Elementwise op (widen ints into f64 results).
-    let (a, b) = if matches!(out_ty, Ty::ListF64) {
-        let a = elem_to_f64(l_elem, &lt_scalar_kind(lt), em);
-        let b = elem_to_f64(r_elem, &lt_scalar_kind(rt), em);
+    // Elementwise op (widen ints into float results).
+    let (a, b) = if matches!(out_ty, Ty::ListF64 | Ty::ListF32) {
+        let fty = if matches!(out_ty, Ty::ListF32) { "f32" } else { "f64" };
+        let a = elem_to_float(l_elem, &lt_scalar_kind(lt), fty, em);
+        let b = elem_to_float(r_elem, &lt_scalar_kind(rt), fty, em);
         (a, b)
     } else {
         (l_elem, r_elem)
     };
 
     let val = em.fresh("bv");
-    let stmt = match (matches!(out_ty, Ty::ListF64), op) {
-        (_, BinOp::Add) if matches!(out_ty, Ty::ListF64) => {
-            format!("{} = arith.addf {}, {} : f64", val, a, b)
+    let list_float = matches!(out_ty, Ty::ListF64 | Ty::ListF32);
+    let list_f32 = matches!(out_ty, Ty::ListF32);
+    let fty = if list_f32 { "f32" } else { "f64" };
+    let stmt = match (list_float, op) {
+        (_, BinOp::Add) if list_float => {
+            format!("{} = arith.addf {}, {} : {}", val, a, b, fty)
         }
-        (_, BinOp::Sub) if matches!(out_ty, Ty::ListF64) => {
-            format!("{} = arith.subf {}, {} : f64", val, a, b)
+        (_, BinOp::Sub) if list_float => {
+            format!("{} = arith.subf {}, {} : {}", val, a, b, fty)
         }
-        (_, BinOp::Mul) if matches!(out_ty, Ty::ListF64) => {
-            format!("{} = arith.mulf {}, {} : f64", val, a, b)
+        (_, BinOp::Mul) if list_float => {
+            format!("{} = arith.mulf {}, {} : {}", val, a, b, fty)
         }
-        (_, BinOp::Div) if matches!(out_ty, Ty::ListF64) => {
-            format!("{} = arith.divf {}, {} : f64", val, a, b)
+        (_, BinOp::Div) if list_float => {
+            format!("{} = arith.divf {}, {} : {}", val, a, b, fty)
         }
-        (true, _) => format!("{} = arith.remf {}, {} : f64", val, a, b),
+        (true, _) => format!("{} = arith.remf {}, {} : {}", val, a, b, fty),
         (_, BinOp::Add) => format!("{} = arith.addi {}, {} : i64", val, a, b),
         (_, BinOp::Sub) => format!("{} = arith.subi {}, {} : i64", val, a, b),
         (_, BinOp::Mul) => format!("{} = arith.muli {}, {} : i64", val, a, b),
@@ -2040,12 +2083,12 @@ fn lt_scalar_kind(t: &Ty) -> Ty {
     }
 }
 
-/// Widen an int-typed element value to f64 in place.
-fn elem_to_f64(x: String, t: &Ty, em: &mut Emitter) -> String {
+/// Widen an int-typed element value to a float type in place.
+fn elem_to_float(x: String, t: &Ty, float_ty: &str, em: &mut Emitter) -> String {
     match t {
         Ty::Int => {
             let w = em.fresh("widen");
-            em.line(&format!("{} = arith.sitofp {} : i64 to f64", w, x));
+            em.line(&format!("{} = arith.sitofp {} : i64 to {}", w, x, float_ty));
             w
         }
         _ => x,
@@ -2125,8 +2168,9 @@ fn c_ret_ty(ty: &Ty) -> Result<&'static str, String> {
     match ty {
         Ty::Int | Ty::Bool => Ok("long"),
         Ty::F64 => Ok("double"),
+        Ty::F32 => Ok("float"),
         // Flat-MemRef return: 5-field struct, caller reads aligned+size.
-        Ty::ListInt | Ty::ListF64 => Ok("void*"),
+        Ty::ListInt | Ty::ListF64 | Ty::ListF32 => Ok("void*"),
     }
 }
 
@@ -2144,11 +2188,12 @@ pub fn emit_header(
     let mut parts: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
-            Ty::ListInt | Ty::ListF64 => parts.push(format!(
+            Ty::ListInt | Ty::ListF64 | Ty::ListF32 => parts.push(format!(
                 "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st"
             )),
             Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
             Ty::F64 => parts.push(format!("double {n}")),
+            Ty::F32 => parts.push(format!("float {n}")),
         }
     }
     // Deterministic sanitized guard tokens from key8 + kernel name.
@@ -2232,11 +2277,12 @@ pub fn emit_header_hpp(
     let mut parts: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
-            Ty::ListInt | Ty::ListF64 => parts.push(format!(
+            Ty::ListInt | Ty::ListF64 | Ty::ListF32 => parts.push(format!(
                 "void* {n}_a, void* {n}_b, long {n}_o, long {n}_s, long {n}_st"
             )),
             Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
             Ty::F64 => parts.push(format!("double {n}")),
+            Ty::F32 => parts.push(format!("float {n}")),
         }
     }
     let sanitize = |s: &str| -> String {
@@ -2347,12 +2393,12 @@ fn contract_text(
     let scalar = |n: &str| -> bool {
         params
             .iter()
-            .any(|(p, t)| p == n && matches!(t, Ty::Int | Ty::Bool | Ty::F64))
+            .any(|(p, t)| p == n && matches!(t, Ty::Int | Ty::Bool | Ty::F64 | Ty::F32))
     };
     let listp = |n: &str| -> bool {
         params
             .iter()
-            .any(|(p, t)| p == n && matches!(t, Ty::ListInt | Ty::ListF64))
+            .any(|(p, t)| p == n && matches!(t, Ty::ListInt | Ty::ListF64 | Ty::ListF32))
     };
     match e {
         Expr::Var(n) if scalar(n) => Some(n.clone()),
@@ -2521,16 +2567,16 @@ mod hpp_tests {
 /// Sentinel value returned by guarded kernels on TRAP policy violation.
 pub fn c_guard_sentinel(ty: &Ty) -> &'static str {
     match ty {
-        Ty::F64 => "NAN",
-        Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 => "LONG_MIN",
+        Ty::F64 | Ty::F32 => "NAN",
+        Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 | Ty::ListF32 => "LONG_MIN",
     }
 }
 
 /// C printf format specifier for a parameter value at runtime.
 fn c_guard_printf_spec(ty: &Ty) -> &'static str {
     match ty {
-        Ty::F64 => "%.17g",
-        Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 => "%ld",
+        Ty::F64 | Ty::F32 => "%.17g",
+        Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 | Ty::ListF32 => "%ld",
     }
 }
 
@@ -2572,9 +2618,10 @@ pub fn emit_shim_c(
     let mut c_params: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
-            Ty::ListInt | Ty::ListF64 => c_params.push(flat_memref_c_args(n)),
+            Ty::ListInt | Ty::ListF64 | Ty::ListF32 => c_params.push(flat_memref_c_args(n)),
             Ty::Int | Ty::Bool => c_params.push(format!("long {n}")),
             Ty::F64 => c_params.push(format!("double {n}")),
+            Ty::F32 => c_params.push(format!("float {n}")),
         }
     }
     let c_args_str = if c_params.is_empty() {
@@ -2601,7 +2648,7 @@ pub fn emit_shim_c(
     let mut val_parts: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
-            Ty::ListInt | Ty::ListF64 => {
+            Ty::ListInt | Ty::ListF64 | Ty::ListF32 => {
                 // For lists, print the size field so the user can see what
                 // length was passed.
                 fmt_parts.push(format!("long {n}=%ld"));
@@ -2653,7 +2700,8 @@ pub fn emit_shim_c(
          #include <string.h>\n\
          #include <stdio.h>\n\
          #include <stdlib.h>\n\
-         #include <stdint.h>\n\n\
+         #include <stdint.h>\n\
+         #include <stdbool.h>\n\n\
          /* ---- policy constants ---- */\n\
          #define ONTIC_POLICY_ABORT 0\n\
          #define ONTIC_POLICY_TRAP  1\n\n\

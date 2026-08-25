@@ -84,9 +84,10 @@ impl LlvmEmitter {
 /// List<T> → 5 params; scalars → 1 param each.
 fn llvm_param_types(ty: &Ty) -> Vec<&'static str> {
     match ty {
-        Ty::ListInt | Ty::ListF64 => vec!["ptr", "ptr", "i64", "i64", "i64"],
+        Ty::ListInt | Ty::ListF64 | Ty::ListF32 => vec!["ptr", "ptr", "i64", "i64", "i64"],
         Ty::Int | Ty::Bool => vec!["i64"],
         Ty::F64 => vec!["double"],
+        Ty::F32 => vec!["float"],
     }
 }
 

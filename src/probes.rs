@@ -82,7 +82,7 @@ pub const ELEM_HI: i64 = 100;
 fn edges(ty: &Ty) -> Vec<Value> {
     match ty {
         Ty::Int => vec![Value::Int(0), Value::Int(1), Value::Int(-1)],
-        Ty::F64 => vec![
+        Ty::F64 | Ty::F32 => vec![
             Value::Float(0.0),
             Value::Float(1.5),
             Value::Float(-2.5),
@@ -95,7 +95,7 @@ fn edges(ty: &Ty) -> Vec<Value> {
             Value::List(vec![1]),
             Value::List(vec![-1]),
         ],
-        Ty::ListF64 => vec![
+        Ty::ListF64 | Ty::ListF32 => vec![
             Value::FloatList(vec![]),
             Value::FloatList(vec![1.5]),
             Value::FloatList(vec![-2.5]),
@@ -107,8 +107,8 @@ fn sample(ty: &Ty, rng: &mut Rng) -> Value {
     match ty {
         Ty::Int => Value::Int(rng.range_i64(INT_LO, INT_HI)),
         // Deterministic float sampling: integer grid scaled, no denormals.
-        Ty::F64 => Value::Float(rng.range_i64(INT_LO * 8, INT_HI * 8) as f64 / 8.0),
-        Ty::ListF64 => {
+        Ty::F64 | Ty::F32 => Value::Float(rng.range_i64(INT_LO * 8, INT_HI * 8) as f64 / 8.0),
+        Ty::ListF64 | Ty::ListF32 => {
             let len = rng.below(LIST_LEN_MAX);
             let items = (0..len)
                 .map(|_| rng.range_i64(ELEM_LO * 8, ELEM_HI * 8) as f64 / 8.0)

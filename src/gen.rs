@@ -338,11 +338,13 @@ fn parse_type(s: &str) -> Result<Ty, String> {
     match s {
         "Int" => Ok(Ty::Int),
         "F64" => Ok(Ty::F64),
+        "F32" => Ok(Ty::F32),
         "Bool" => Ok(Ty::Bool),
         "List<Int>" => Ok(Ty::ListInt),
         "List<F64>" => Ok(Ty::ListF64),
+        "List<F32>" => Ok(Ty::ListF32),
         other => Err(format!(
-            "unsupported type `{}` (v1: Int, F64, Bool, List<Int>)",
+            "unsupported type `{}` (v1: Int, F64, F32, Bool, List<Int>, List<F64>, List<F32>)",
             other
         )),
     }
@@ -429,7 +431,13 @@ fn check_set(gen: &Gen, set: &[Example], label: &str) -> Result<(), String> {
             // element type of the parameter they feed.
             let polymorphic_empty =
                 matches!(v, Value::List(vs) if vs.is_empty()) && matches!(t, Ty::ListF64);
-            if v.ty() != *t && !polymorphic_empty {
+            // F32/F64 are interchangeable at the gen level (interp uses f64 internally).
+            let float_compat = matches!(
+                (v.ty(), t),
+                (Ty::F64, Ty::F32) | (Ty::F32, Ty::F64)
+                    | (Ty::ListF64, Ty::ListF32) | (Ty::ListF32, Ty::ListF64)
+            );
+            if v.ty() != *t && !polymorphic_empty && !float_compat {
                 return Err(format!(
                     "gen `{}`: {} example param #{} is {}, expected {}",
                     gen.path,
@@ -441,13 +449,21 @@ fn check_set(gen: &Gen, set: &[Example], label: &str) -> Result<(), String> {
             }
         }
         if ex.output.ty() != gen.ret {
-            return Err(format!(
-                "gen `{}`: {} example output is {}, expected {}",
-                gen.path,
-                label,
-                ex.output.ty().name(),
-                gen.ret.name()
-            ));
+            // F32/F64 are interchangeable at the gen level.
+            let float_ret = matches!(
+                (ex.output.ty(), &gen.ret),
+                (Ty::F64, Ty::F32) | (Ty::F32, Ty::F64)
+                    | (Ty::ListF64, Ty::ListF32) | (Ty::ListF32, Ty::ListF64)
+            );
+            if !float_ret {
+                return Err(format!(
+                    "gen `{}`: {} example output is {}, expected {}",
+                    gen.path,
+                    label,
+                    ex.output.ty().name(),
+                    gen.ret.name()
+                ));
+            }
         }
     }
     Ok(())

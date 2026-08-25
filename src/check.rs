@@ -16,7 +16,7 @@ fn unreachable_index() -> ! {
 fn builtin_ty(b: Builtin, t: Ty) -> Result<Ty, String> {
     match b {
         Builtin::Len => match t {
-            Ty::ListInt | Ty::ListF64 => Ok(Ty::Int),
+            Ty::ListInt | Ty::ListF64 | Ty::ListF32 => Ok(Ty::Int),
             other => Err(format!("len of {}", other.name())),
         },
         Builtin::Index => unreachable_index(),
@@ -31,11 +31,12 @@ fn builtin_ty(b: Builtin, t: Ty) -> Result<Ty, String> {
         Builtin::Sum | Builtin::Max | Builtin::Min => match t {
             Ty::ListInt => Ok(Ty::Int),
             Ty::ListF64 => Ok(Ty::F64),
+            Ty::ListF32 => Ok(Ty::F32),
             other => Err(format!("{:?} of {}", b, other.name())),
         },
-        // Numeric transforms are F64-only; Int arguments promote implicitly.
+        // Numeric transforms are F64/F32; Int arguments promote implicitly.
         Builtin::Sqrt | Builtin::Exp | Builtin::Log | Builtin::Abs => match t {
-            Ty::Int | Ty::F64 => Ok(Ty::F64),
+            Ty::Int | Ty::F64 | Ty::F32 => Ok(t),
             other => Err(format!("numeric builtin on {}", other.name())),
         },
     }
@@ -58,11 +59,18 @@ pub fn check(cand: &Candidate) -> Result<(), String> {
     }
     let body_ty = infer(&cand.body, &env)?;
     if body_ty != cand.ret {
-        return Err(format!(
-            "body has type {}, signature demands {}",
-            body_ty.name(),
-            cand.ret.name()
-        ));
+        // F32/F64 promotion: float expressions satisfy either float type.
+        let float_promote = matches!(
+            (&body_ty, &cand.ret),
+            (Ty::F64, Ty::F32) | (Ty::F32, Ty::F64)
+        );
+        if !float_promote {
+            return Err(format!(
+                "body has type {}, signature demands {}",
+                body_ty.name(),
+                cand.ret.name()
+            ));
+        }
     }
     Ok(())
 }
@@ -83,11 +91,17 @@ pub fn check_with(cand: &Candidate, deps: &DepSigs) -> Result<(), String> {
     // Body inference with dep-aware Call typing.
     let body_ty = infer_dep(&cand.body, &env, deps)?;
     if body_ty != cand.ret {
-        return Err(format!(
-            "body has type {}, signature demands {}",
-            body_ty.name(),
-            cand.ret.name()
-        ));
+        let float_promote = matches!(
+            (&body_ty, &cand.ret),
+            (Ty::F64, Ty::F32) | (Ty::F32, Ty::F64)
+        );
+        if !float_promote {
+            return Err(format!(
+                "body has type {}, signature demands {}",
+                body_ty.name(),
+                cand.ret.name()
+            ));
+        }
     }
     Ok(())
 }
@@ -246,9 +260,9 @@ fn typecheck_call(
         let got = infer_dep(a, env, deps)?;
         let numeric_pair = matches!(
             (got, *w),
-            (Ty::Int | Ty::F64, Ty::Int | Ty::F64)
+            (Ty::Int | Ty::F64 | Ty::F32, Ty::Int | Ty::F64 | Ty::F32)
         );
-        let ok = got == *w || (numeric_pair && matches!(w, Ty::F64));
+        let ok = got == *w || (numeric_pair && matches!(w, Ty::F64 | Ty::F32));
         if !ok {
             return Err(format!(
                 "`{}` arg #{} wants {}, got {}",
@@ -290,12 +304,17 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             let elem = match list_ty {
                 Ty::ListInt => Ty::Int,
                 Ty::ListF64 => Ty::F64,
+                Ty::ListF32 => Ty::F32,
                 other => return Err(format!("map over {}", other.name())),
             };
             let mut scoped = env.clone();
             scoped.insert(var.clone(), elem);
             let body_ty = infer(body, &scoped)?;
-            Ok(if matches!(body_ty, Ty::F64) { Ty::ListF64 } else { Ty::ListInt })
+            Ok(match body_ty {
+                Ty::F64 => Ty::ListF64,
+                Ty::F32 => Ty::ListF32,
+                _ => Ty::ListInt,
+            })
         }
         Expr::Builtin2(b, l, r) => infer_builtin2(*b, l, r, env),
         Expr::ListCons(elems) => {
@@ -423,10 +442,14 @@ fn expect_ty(e: &Expr, env: &HashMap<String, Ty>, want: &Ty) -> Result<Ty, Strin
 
 fn expect_ty_in(e: &Expr, env: &HashMap<String, Ty>, want: &Ty) -> Result<Ty, String> {
     let got = infer(e, env)?;
-    if got != *want {
-        return Err(format!("expected {}, got {}", want.name(), got.name()));
+    if got == *want {
+        return Ok(got);
     }
-    Ok(got)
+    // F32/F64 promotion: float expressions satisfy either float type.
+    if matches!((&got, want), (Ty::F64, Ty::F32) | (Ty::F32, Ty::F64)) {
+        return Ok(want.clone());
+    }
+    Err(format!("expected {}, got {}", want.name(), got.name()))
 }
 
 /// Typecheck binary builtins.
@@ -493,12 +516,22 @@ fn infer_binop(
             match (&lt, &rt) {
                 (Ty::Int, Ty::Int) => Ok(Ty::Int),
                 (Ty::F64, Ty::Int) | (Ty::Int, Ty::F64) | (Ty::F64, Ty::F64) => Ok(Ty::F64),
+                (Ty::F32, Ty::Int) | (Ty::Int, Ty::F32) | (Ty::F32, Ty::F32) => Ok(Ty::F32),
+                (Ty::F32, Ty::F64) | (Ty::F64, Ty::F32) => Ok(Ty::F64),
                 (Ty::ListInt, Ty::ListInt) => Ok(Ty::ListInt),
                 (Ty::ListInt, Ty::Int) | (Ty::Int, Ty::ListInt) => Ok(Ty::ListInt),
                 (Ty::ListF64, Ty::F64) | (Ty::F64, Ty::ListF64)
                 | (Ty::ListF64, Ty::Int) | (Ty::Int, Ty::ListF64)
                 | (Ty::ListF64, Ty::ListF64) => Ok(Ty::ListF64),
+                (Ty::ListF32, Ty::F32) | (Ty::F32, Ty::ListF32)
+                | (Ty::ListF32, Ty::Int) | (Ty::Int, Ty::ListF32)
+                | (Ty::ListF32, Ty::ListF32) => Ok(Ty::ListF32),
+                (Ty::ListF32, Ty::F64) | (Ty::F64, Ty::ListF32) => Ok(Ty::ListF64),
+                (Ty::ListF64, Ty::F32) | (Ty::F32, Ty::ListF64) => Ok(Ty::ListF64),
+                (Ty::ListF32, Ty::F64) | (Ty::F64, Ty::ListF32) => Ok(Ty::ListF64),
+                (Ty::ListF64, Ty::F32) | (Ty::F32, Ty::ListF64) => Ok(Ty::ListF64),
                 (Ty::ListInt, Ty::F64) | (Ty::F64, Ty::ListInt) => Ok(Ty::ListF64),
+                (Ty::ListInt, Ty::F32) | (Ty::F32, Ty::ListInt) => Ok(Ty::ListF32),
                 _ => Err(format!("arith on {} vs {}", lt.name(), rt.name())),
             }
         }
@@ -506,7 +539,7 @@ fn infer_binop(
             let lt = infer_dep(l, env, deps)?;
             let rt = infer_dep(r, env, deps)?;
             match (&lt, &rt) {
-                (Ty::Int | Ty::F64, Ty::Int | Ty::F64) => Ok(Ty::Bool),
+                (Ty::Int | Ty::F64 | Ty::F32, Ty::Int | Ty::F64 | Ty::F32) => Ok(Ty::Bool),
                 _ => Err(format!("compare {} vs {}", lt.name(), rt.name())),
             }
         }

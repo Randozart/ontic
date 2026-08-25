@@ -7,9 +7,11 @@
 pub enum Ty {
     Int,
     F64,
+    F32,
     Bool,
     ListInt,
     ListF64,
+    ListF32,
 }
 
 impl Ty {
@@ -18,9 +20,11 @@ impl Ty {
         match self {
             Ty::Int => "Int",
             Ty::F64 => "F64",
+            Ty::F32 => "F32",
             Ty::Bool => "Bool",
             Ty::ListInt => "List<Int>",
             Ty::ListF64 => "List<F64>",
+            Ty::ListF32 => "List<F32>",
         }
     }
 }
@@ -257,7 +261,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 &src[start..j],
                 "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log"
                     | "abs" | "map" | "fold" | "let" | "if" | "else" | "true"
-                    | "false" | "in" | "from" | "Int" | "F64" | "Bool"
+                    | "false" | "in" | "from" | "Int" | "F64" | "F32" | "Bool"
                     | "List" | "fn" | "index" | "range" | "until"
                     | "min_el" | "max_el"
             );
@@ -328,6 +332,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "from" => Some("from"),
                 "Int" => Some("Int"),
                 "F64" => Some("F64"),
+                "F32" => Some("F32"),
                 "Bool" => Some("Bool"),
                 "List" => Some("List"),
                 _ => None,
@@ -484,6 +489,10 @@ impl Parser {
                 self.pos += 1;
                 Ok(Ty::F64)
             }
+            Some(Tok::Word("F32")) => {
+                self.pos += 1;
+                Ok(Ty::F32)
+            }
             Some(Tok::Word("Bool")) => {
                 self.pos += 1;
                 Ok(Ty::Bool)
@@ -502,10 +511,15 @@ impl Parser {
                         self.eat_sym(">")?;
                         Ok(Ty::ListF64)
                     }
-                    _ => Err(err(self.offset(), "List element must be Int or F64")),
+                    Some(Tok::Word("F32")) => {
+                        self.pos += 1;
+                        self.eat_sym(">")?;
+                        Ok(Ty::ListF32)
+                    }
+                    _ => Err(err(self.offset(), "List element must be Int, F64, or F32")),
                 }
             }
-            _ => Err(err(self.offset(), "expected type (`Int`, `Bool`, `List<Int>`)")),
+            _ => Err(err(self.offset(), "expected type (`Int`, `Bool`, `F32`, `List<Int>`)")),
         }
     }
 
@@ -913,7 +927,7 @@ root        ::= name ws "(" ws params ws ")" ws "->" ws type ws "{" ws e ws "}" 
 name        ::= [a-z_] [a-zA-Z0-9_]*
 params      ::= param (ws "," ws param)*
 param       ::= pid ws ":" ws type
-type        ::= "Int" | "F64" | "Bool" | "List" "<" ("Int"| "F64") ">"
+type        ::= "Int" | "F64" | "F32" | "Bool" | "List" "<" ("Int"| "F64" | "F32") ">"
 e           ::= letx | ifx | orx
 letx        ::= "let" ws pid ws "=" ws e ws ";" ws e
 ifx         ::= "if" ws e ws "{" ws e ws "}" ws "else" ws "{" ws e ws "}"
