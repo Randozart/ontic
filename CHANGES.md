@@ -1,6 +1,44 @@
 # CHANGES
 
+## Changes Made on 2026-08-26 (overnight)
+
+### Overnight slate — all five legs landed
+
+Plan: docs/plans/2026-08-26-overnight-slate.md
+
+**Leg 1 (`d6ed27c`)** — `vault --json` machine-readable listing with
+trust/reuse fields; `vault status <name>` per-version artifact inventory.
+
+**Leg 2 (`3abc433`)** — imported kernels are callable: raw `.so` linked
+from shipped object, guarded twin rebuilt from shim + __raw-renamed
+re-lowered MLIR; `link_shared_so` precompiles C sources PIC-first.
+E2E: ctypes mean([2,4,6]) = 4.0 from a clean import.
+
+**Leg 3 (`8a7357c`)** — capability scorecard re-run: **21/23 classes at
+Full probe coverage** (was 13/23). QR/cholesky/CG/matmul/jacobi/movavg
+EdgesOnly → Full; kmeans anomaly (0 rows) → Full 256 rows. Remaining
+gaps structural only. Specs archived under docs/reports/assets/.
+
+**Leg 4 (`36196b2`)** — hygiene: zero warnings; dead code removed;
+find_by_path prefers verifiable manifests then latest key (+regression
+test covering both key-order cases).
+
+**Leg 5 (`ba37174`)** — tuple types end-to-end (stretch goal MET):
+gen-level tuple rets + example outputs `(a, b)`; interp Value::Tuple;
+recursive tolerance evidence; multi-result MLIR; by-value C struct ABI
+(`ontic_tup2_dd`) across header/hpp/shim incl. all-sentinel TRAP
+literals; bench drivers extended; CK::F32/ListF32 fix pre-existing F32
+mis-benching. E2E: Tup.minmax PASS → vault, ctypes reads the struct,
+guarded twin enforces.
+
+Suite: 170/170. Known follow-ups: dep-call destructuring
+(`let (a,b) = f()`) not yet wired — tuple producers can vault but
+callers cannot consume components in-body yet; F32 differential driver
+arms honest-reject.
+
 ## Changes Made on 2026-08-25
+
+
 
 ### 2026-08-25 (latest) — .nous vault export packages
 
