@@ -1382,6 +1382,60 @@ fn land_entry(
     v.set_trust(&ne.entry.key, status)
 }
 
+/// Build callable binaries for a landed entry: raw `.so` from the shipped
+/// object, guarded twin from the shim source + a `__raw`-renamed re-lower
+/// of the shipped MLIR (mirrors solve-time guarded builds; the shim owns
+/// the public symbol, so the raw object must expose `name__raw`).
+/// Warnings never fail the landing.
+fn build_import_binaries(ne: &ontic::nous::NousEntry, dirp: &std::path::Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let no_cc = pipeline::find_tool("clang").is_none() && pipeline::find_tool("cc").is_none();
+    if no_cc {
+        return vec!["no C compiler; shared libraries not built".to_string()];
+    }
+    let k8 = ne.entry.key[..8.min(ne.entry.key.len())].to_string();
+    let obj = dirp.join(format!("{}-{}.o", ne.entry.name, k8));
+    let so = dirp.join(format!("lib{}-{}.so", ne.entry.name, k8));
+    if let Err(e) = pipeline::link_shared_so(&obj, &[], &so) {
+        warnings.push(format!(".so build failed: {e}"));
+    }
+    if ne.extras.iter().any(|(k, _)| k == "guarded_c") {
+        let has_chain =
+            pipeline::find_tool("mlir-opt").is_some() && pipeline::find_tool("llc").is_some();
+        if !has_chain {
+            warnings.push("guarded .so skipped: mlir-opt/llc missing for __raw re-lower".to_string());
+            return warnings;
+        }
+        // Rename the kernel to `__raw` exactly like solve-time guard builds.
+        let needle = format!("@{}(", ne.entry.name);
+        let repl = format!("@{}__raw(", ne.entry.name);
+        let renamed = ne.entry.mlir.replacen(&needle, &repl, 1);
+        let dir = pipeline::scratch_dir_pub("import_guarded");
+        if std::fs::create_dir_all(&dir).is_err() {
+            warnings.push("guarded .so skipped: temp dir unavailable".to_string());
+            return warnings;
+        }
+        let mlir_p = dir.join("raw.mlir");
+        let ll_p = dir.join("raw_llvm.mlir");
+        let o_p = dir.join("raw.o");
+        if std::fs::write(&mlir_p, &renamed).is_err() {
+            warnings.push("guarded .so skipped: temp write failed".to_string());
+            return warnings;
+        }
+        match pipeline::mlir_to_llvmir(&mlir_p, &ll_p).and_then(|_| pipeline::object_from_ll(&ll_p, &o_p)) {
+            Ok(_) => {
+                let shim = dirp.join(format!("{}-{}.guarded.c", ne.entry.name, k8));
+                let gso = dirp.join(format!("lib{}-{}.guarded.so", ne.entry.name, k8));
+                if let Err(e) = pipeline::link_shared_so(&o_p, &[&shim], &gso) {
+                    warnings.push(format!("guarded .so build failed: {e}"));
+                }
+            }
+            Err(e) => warnings.push(format!("guarded .so skipped: re-lower failed: {e}")),
+        }
+    }
+    warnings
+}
+
 /// Re-run the sieve over a shipped gen+candidate. Deterministic verdicts:
 /// the winner must reproduce the package's content-addressed key.
 fn verify_entry(ne: &ontic::nous::NousEntry, v: &Vault) -> Result<(), String> {
@@ -1486,6 +1540,10 @@ fn cmd_vault_import(args: &[String]) -> i32 {
             eprintln!("FAILED   : {} — {}", ne.entry.name, e);
             failed += 1;
             continue;
+        }
+        let dirp = std::path::Path::new(&opts.dir);
+        for w in build_import_binaries(ne, dirp) {
+            eprintln!("warning: {}: {}", ne.entry.name, w);
         }
         landed += 1;
         if opts.verify {

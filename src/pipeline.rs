@@ -17,6 +17,11 @@ fn scratch_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ontic-{}-{}-{}", tag, std::process::id(), n))
 }
 
+/// Public scratch-dir accessor for import-side builds in main.rs.
+pub fn scratch_dir_pub(tag: &str) -> PathBuf {
+    scratch_dir(tag)
+}
+
 /// What a differential driver prints about the return value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RetSpec {
@@ -780,6 +785,63 @@ pub fn build_shared_so(composite_mlir: &str, out_so: &Path) -> Result<(), String
         ],
         "shared link",
     )
+}
+
+/// Link a compiled object plus optional C sources into a shared library.
+/// C sources are precompiled `-fPIC` first (TLS state in shims requires
+/// it). Shared by solve-time builds and package imports; the trap stub
+/// provides `ontic_trap` / `ontic_trapf` definitions.
+pub fn link_shared_so(obj: &Path, c_sources: &[&Path], out_so: &Path) -> Result<(), String> {
+    let dir = scratch_dir("so_link");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let cc = find_tool("clang")
+        .or_else(|| find_tool("cc"))
+        .ok_or("no C compiler found (clang/cc)")?;
+    let mut objs: Vec<PathBuf> = vec![obj.to_path_buf()];
+    for (i, src) in c_sources.iter().enumerate() {
+        let o = dir.join(format!("src_{i}.o"));
+        run(
+            &cc,
+            &[
+                "-c",
+                "-fPIC",
+                "-O2",
+                src.to_str().ok_or("bad c source path")?,
+                "-o",
+                o.to_str().ok_or("bad temp obj")?,
+            ],
+            "pic compile",
+        )?;
+        objs.push(o);
+    }
+    let trap_c = dir.join("trap.c");
+    std::fs::write(
+        &trap_c,
+        "#include <stdlib.h>\nlong ontic_trap(void) { abort(); }\ndouble ontic_trapf(void) { abort(); }\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let trap_o = dir.join("trap.o");
+    run(
+        &cc,
+        &[
+            "-c",
+            "-fPIC",
+            "-O2",
+            trap_c.to_str().ok_or("bad trap")?,
+            "-o",
+            trap_o.to_str().ok_or("bad trap obj")?,
+        ],
+        "trap compile",
+    )?;
+    objs.push(trap_o);
+    let args: Vec<String> = std::iter::once("-shared".to_string())
+        .chain(std::iter::once("-O2".to_string()))
+        .chain(objs.iter().map(|p| p.to_string_lossy().into_owned()))
+        .chain(std::iter::once("-o".to_string()))
+        .chain(std::iter::once(out_so.to_string_lossy().into_owned()))
+        .collect();
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run(&cc, &arg_refs, "shared link")
 }
 
 /// Build a guarded shared library: rename the MLIR kernel to `__raw`, compile
