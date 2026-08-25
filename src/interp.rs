@@ -489,7 +489,8 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
             list,
             init,
             body,
-        } => eval_fold(var, acc, list, init, body, env, ctx),
+            ref until,
+        } => eval_fold(var, acc, list, init, body, until.as_deref(), env, ctx),
         Expr::BinOp(op, l, r) => eval_binop(*op, l, r, env, ctx),
     }
 }
@@ -502,6 +503,7 @@ fn eval_fold(
     list: &Expr,
     init: &Expr,
     body: &Expr,
+    until: Option<&Expr>,
     env: &Env,
     ctx: &Ctx,
 ) -> Result<Value, EvalError> {
@@ -512,15 +514,41 @@ fn eval_fold(
         scoped.insert(acc.to_string(), running);
         eval_ctx(body, &scoped, ctx)
     };
+    // Pre-test early exit: `until` is evaluated on the current iteration
+    // variable and accumulator BEFORE the step. Zero iterations when the
+    // initial state already satisfies it; full budget otherwise.
+    let done = |k: Value, a: &Value| -> Result<bool, EvalError> {
+        match until {
+            None => Ok(false),
+            Some(u) => {
+                let mut scoped = env.clone();
+                scoped.insert(var.to_string(), k);
+                scoped.insert(acc.to_string(), a.clone());
+                match eval_ctx(u, &scoped, ctx)? {
+                    Value::Bool(b) => Ok(b),
+                    other => Err(EvalError::TypeError(format!(
+                        "until must be Bool, got {}",
+                        other
+                    ))),
+                }
+            }
+        }
+    };
     match eval_ctx(list, env, ctx)? {
         Value::List(vs) => {
-            for item in vs {
-                running = step(env, Value::Int(item), running)?;
+            for (idx, item) in vs.iter().enumerate() {
+                if done(Value::Int(idx as i64), &running)? {
+                    break;
+                }
+                running = step(env, Value::Int(*item), running)?;
             }
         }
         Value::FloatList(vs) => {
-            for item in vs {
-                running = step(env, Value::Float(item), running)?;
+            for (idx, item) in vs.iter().enumerate() {
+                if done(Value::Int(idx as i64), &running)? {
+                    break;
+                }
+                running = step(env, Value::Float(*item), running)?;
             }
         }
         other => return Err(EvalError::TypeError(format!("fold over {}", other))),
@@ -905,5 +933,46 @@ mod pr0_tests {
         )
         .unwrap();
         assert_eq!(v, Value::Float(11.0));
+    }
+}
+
+#[cfg(test)]
+mod until_semantics_tests {
+    use super::*;
+    use crate::sketch;
+
+    #[test]
+    fn test_zero_iterations_when_init_satisfies_until() {
+        // acc starts at 100; until acc > 10 fires immediately -> 100.
+        let c = sketch::parse(
+            "fn @f() -> Int { fold %k in range(5), %a from 100 { %a + 1 } until %a > 10 }",
+        )
+        .unwrap();
+        let ctx = Ctx::checked();
+        let v = eval_candidate(&c, &[], &ctx).unwrap();
+        assert_eq!(v, Value::Int(100));
+    }
+
+    #[test]
+    fn test_full_budget_when_never_done() {
+        let c = sketch::parse(
+            "fn @f() -> Int { fold %k in range(5), %a from 0 { %a + 1 } until %a > 1000 }",
+        )
+        .unwrap();
+        let ctx = Ctx::checked();
+        let v = eval_candidate(&c, &[], &ctx).unwrap();
+        assert_eq!(v, Value::Int(5));
+    }
+
+    #[test]
+    fn test_early_exit_midway() {
+        // Doubles 1 -> 64 in 6 steps; budget 40; stops when >= 50 => 64.
+        let c = sketch::parse(
+            "fn @f() -> Int { fold %k in range(40), %a from 1 { %a * 2 } until %a >= 50 }",
+        )
+        .unwrap();
+        let ctx = Ctx::checked();
+        let v = eval_candidate(&c, &[], &ctx).unwrap();
+        assert_eq!(v, Value::Int(64));
     }
 }

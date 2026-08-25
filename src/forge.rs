@@ -163,6 +163,7 @@ pub fn build_prompt(gen: &Gen, feedback: &[String], deps_block: &str) -> String 
     p.push_str("fn @sq_over_sum(%ns: List<Int>) -> Int { let %total = fold %v in %ns, %a from 0 { %a + %v }; let %sq = fold %v in %ns, %b from 0 { %b + %v * %v }; %sq / %total }\n");
     p.push_str("The | , => , ?? , +- tolerance marks above are SPECIFICATION notation. Do not emit them.\n");
     p.push_str("Iterate only via fold: fold %v in <list>, %acc from <init> { <body> }.\n");
+    p.push_str("Early exit: append `until <cond>` to a fold — checked on (%v index, %acc) BEFORE each step; stops when true. Example: fold %k in range(64), %g from %x { (%g + %x / %g) * 0.5 } until abs(%g * %g - %x) < 1e-9\n");
     p.push_str("The body must have exactly the signature's return type.\n");
     p.push_str("== / != compare same-typed scalars only; never lists.\n");
     p.push_str("F64 arithmetic is IEEE: division by zero yields inf/NaN, never an error.\n");

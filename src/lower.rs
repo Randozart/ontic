@@ -94,13 +94,18 @@ pub fn expr_display(e: &Expr) -> String {
             list,
             init,
             body,
+            until,
         } => format!(
-            "(fold %{} in {}, %{} from {} {{ {} }})",
+            "(fold %{} in {}, %{} from {} {{ {} }}{})",
             var,
             expr_display(list),
             acc,
             expr_display(init),
-            expr_display(body)
+            expr_display(body),
+            match until {
+                Some(u) => format!(" until {}", expr_display(u)),
+                None => String::new(),
+            }
         ),
         Expr::BinOp(op, l, r) => format!(
             "({} {} {})",
@@ -398,7 +403,8 @@ fn emit_expr(
             list,
             init,
             body,
-        } => emit_fold(var, acc, list, init, body, env, tyenv, em),
+            ref until,
+        } => emit_fold(var, acc, list, init, body, until.as_deref(), env, tyenv, em),
         Expr::BinOp(op, l, r) => emit_binop(*op, l, r, env, tyenv, em),
     }
 }
@@ -547,6 +553,7 @@ fn emit_builtin(
                 inner,
                 &Box::new(init),
                 &Box::new(body),
+                None,
                 env,
                 tyenv,
                 em,
@@ -917,12 +924,17 @@ fn emit_fold(
     list: &Expr,
     init: &Expr,
     body: &Expr,
+    until: Option<&Expr>,
     env: &mut Vec<Binding>,
     tyenv: &mut HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
     let init_v = emit_expr(init, env, tyenv, em)?;
     let m = emit_expr(list, env, tyenv, em)?;
+    if let Some(u) = until {
+        let init_ty_v = expr_ty(init, tyenv);
+        return emit_fold_until(var, acc, list, m, init_ty_v, init_v, body, u, env, tyenv, em);
+    }
     let idx0 = em.const_index(0);
     let step = em.const_index(1);
     let dim = em.fresh("dim");
@@ -968,6 +980,105 @@ fn emit_fold(
     em.indent -= 1;
     em.line("}");
     Ok(acc_ssa)
+}
+
+/// Element type of the folded list under tyenv (param lookup / range).
+fn fold_elem_ty(list: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
+    match list {
+        Expr::Var(n) => match tyenv.get(n) {
+            Some(Ty::ListF64) => Ty::F64,
+            _ => Ty::Int,
+        },
+        Expr::Call(p, _) if p.ends_with("range") => Ty::Int,
+        _ => Ty::Int,
+    }
+}
+
+/// Fold with `until` lowers to `scf.while` (pre-test): condition checks
+/// `iv < dim && !until(var=iv, acc)` before each step. Zero iterations when
+/// the initial state satisfies DONE; result is the surviving accumulator -
+/// matching interp::eval_fold exactly (Golden Rule 6).
+#[allow(clippy::too_many_arguments)]
+fn emit_fold_until(
+    var: &str,
+    acc_name: &str,
+    list: &Expr,
+    m: String,
+    init_ty: Ty,
+    init_v: String,
+    body: &Expr,
+    until: &Expr,
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let idx0 = em.const_index(0);
+    let step = em.const_index(1);
+    let dim = em.fresh("dim");
+    let elem_ty = fold_elem_ty(list, tyenv);
+    let (list_mty, _ety) = if matches!(elem_ty, Ty::F64) {
+        ("memref<?xf64>", "f64")
+    } else {
+        ("memref<?xi64>", "i64")
+    };
+    let acc_ty_s = if matches!(init_ty, Ty::F64) { "f64" } else { "i64" };
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim, m, idx0, list_mty
+    ));
+
+    let wname = em.fresh("wh").trim_start_matches('%').to_string();
+    em.line(&format!(
+        "%{w}:2 = scf.while (%wa = {init}, %wi = {i0}) : ({acc_t}, index) -> ({acc_t}, index) {{",
+        w = wname, init = init_v, i0 = idx0, acc_t = acc_ty_s
+    ));
+    em.indent += 1;
+    let inb = em.fresh("inb");
+    em.line(&format!("{} = arith.cmpi slt, %wi, {} : index", inb, dim));
+    env.push(Binding { name: var.to_string(), ssa: "%wi".to_string() });
+    env.push(Binding { name: acc_name.to_string(), ssa: "%wa".to_string() });
+    tyenv.insert(var.to_string(), Ty::Int);
+    tyenv.insert(acc_name.to_string(), init_ty.clone());
+    let done_raw = emit_expr(until, env, tyenv, em)?;
+    let done_b = em.fresh("db");
+    em.line(&format!("{} = arith.trunci {} : i64 to i1", done_b, done_raw));
+    let ctrue = em.fresh("ct");
+    em.line(&format!("{} = arith.constant true", ctrue));
+    let nd = em.fresh("nd");
+    em.line(&format!("{} = arith.xori {}, {} : i1", nd, done_b, ctrue));
+    let cont = em.fresh("cont");
+    em.line(&format!("{} = arith.andi {}, {} : i1", cont, inb, nd));
+    em.line(&format!(
+        "scf.condition({}) %wa, %wi : {}, index",
+        cont, acc_ty_s
+    ));
+    env.pop();
+    env.pop();
+    em.indent -= 1;
+    em.line("} do {");
+    em.indent += 1;
+    em.line(&format!("^bb0(%wa2: {}, %wi2: index):", acc_ty_s));
+    let elem = em.fresh("fe");
+    em.line(&format!(
+        "{} = memref.load {}[%wi2] : {}",
+        elem, m, list_mty
+    ));
+    env.push(Binding { name: var.to_string(), ssa: elem.clone() });
+    env.push(Binding { name: acc_name.to_string(), ssa: "%wa2".to_string() });
+    tyenv.insert(var.to_string(), elem_ty.clone());
+    tyenv.insert(acc_name.to_string(), init_ty.clone());
+    let nv = emit_expr(body, env, tyenv, em)?;
+    let ni = em.fresh("ni");
+    em.line(&format!("{} = arith.addi %wi2, {} : index", ni, step));
+    em.line(&format!(
+        "scf.yield {}, {} : {}, index",
+        nv, ni, acc_ty_s
+    ));
+    env.pop();
+    env.pop();
+    em.indent -= 1;
+    em.line("}");
+    Ok(format!("%{}#0", wname))
 }
 
 fn emit_binop(

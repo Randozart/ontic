@@ -183,9 +183,17 @@ pub fn render(e: &Expr) -> String {
             render(c), render(t), render(f)
         ),
         Let(n, v, b) => format!("let %{} = {}; {}", n, render(v), render(b)),
-        Fold { var, acc, list, init, body } => format!(
-            "fold %{} in {}, %{} from {} {{ {} }}",
-            var, render(list), acc, render(init), render(body)
+        Fold { var, acc, list, init, body, until } => format!(
+            "fold %{} in {}, %{} from {} {{ {} }}{}",
+            var,
+            render(list),
+            acc,
+            render(init),
+            render(body),
+            match until {
+                Some(u) => format!(" until {}", render(u)),
+                None => String::new(),
+            }
         ),
         ListCons(elems) => {
             let inner: Vec<String> = elems.iter().map(render).collect();

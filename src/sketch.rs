@@ -105,6 +105,10 @@ pub enum Expr {
         list: Box<Expr>,
         init: Box<Expr>,
         body: Box<Expr>,
+        /// Pre-test early exit: evaluated on (var, acc) before each
+        /// iteration; loop stops when it yields Bool(true). Budget is the
+        /// list/range length — termination stays decidable.
+        until: Option<Box<Expr>>,
     },
 }
 
@@ -246,7 +250,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log"
                     | "abs" | "map" | "fold" | "let" | "if" | "else" | "true"
                     | "false" | "in" | "from" | "Int" | "F64" | "Bool"
-                    | "List" | "fn" | "index" | "range"
+                    | "List" | "fn" | "index" | "range" | "until"
             );
             if !is_keyword {
                 // Speculative dotted-path scan: ident ('.' ident)* then ws+'('
@@ -308,6 +312,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "log" => Some("log"),
                 "abs" => Some("abs"),
                 "fold" => Some("fold"),
+                "until" => Some("until"),
                 "in" => Some("in"),
                 "from" => Some("from"),
                 "Int" => Some("Int"),
@@ -413,6 +418,17 @@ impl Parser {
                 Ok(())
             }
             _ => Err(err(self.offset(), format!("expected `{}`", s))),
+        }
+    }
+
+    /// Consume a keyword when present; report whether it was there.
+    fn try_eat_word(&mut self, w: &str) -> bool {
+        match self.peek() {
+            Some(Tok::Word(x)) if *x == w => {
+                self.pos += 1;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -787,12 +803,18 @@ impl Parser {
         self.eat_sym("{")?;
         let body = self.parse_expr()?;
         self.eat_sym("}")?;
+        let until = if self.try_eat_word("until") {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
         Ok(Expr::Fold {
             var,
             acc,
             list: Box::new(list),
             init: Box::new(init),
             body: Box::new(body),
+            until,
         })
     }
 }
@@ -954,4 +976,36 @@ mod tests {
 /// a sign character next in the numeric scanner.
 fn exponent_sign(scanned: &str) -> bool {
     matches!(scanned.as_bytes().last(), Some(b'e') | Some(b'E'))
+}
+
+#[cfg(test)]
+mod until_tests {
+    use super::*;
+
+
+    #[test]
+    fn test_until_parses_and_roundtrips() {
+        let src = "fn @n(%x: F64) -> F64 { fold %k in range(64), %g from %x { (%g + %x / %g) * 0.5 } until abs(%g * %g - %x) < 0.001 }";
+        let c = parse(src).expect("parses");
+        match &c.body {
+            Expr::Fold { until: Some(u), .. } => {
+                let d = crate::lower::expr_display(u);
+                assert!(d.contains("abs"), "display: {}", d);
+            }
+            other => panic!("expected until fold, got {:?}", other),
+        }
+        // Display roundtrip re-parses.
+        let d = crate::lower::expr_display(&c.body);
+        let c2 = parse(&format!("fn @n2(%x: F64) -> F64 {{ {} }}", d)).expect("re-parses");
+        assert_eq!(crate::lower::expr_display(&c2.body), d);
+    }
+
+    #[test]
+    fn test_plain_fold_has_no_until() {
+        let c = parse("fn @t(%xs: List<Int>) -> Int { fold %x in %xs, %a from 0 { %a + %x } }").unwrap();
+        match &c.body {
+            Expr::Fold { until, .. } => assert!(until.is_none()),
+            _ => panic!(),
+        }
+    }
 }

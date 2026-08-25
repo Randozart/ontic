@@ -30,6 +30,8 @@ A .ont file contains one function per top-level block:
 
 - map(v in LIST_EXPR) { BODY }            -> list, same length
 - fold v in LIST_EXPR, acc from INIT { BODY }  -> scalar
+- fold ... { BODY } until COND   -> early-exit fold: COND checked on (v=iteration index, acc) BEFORE each step; stops when true. Iterative solvers MUST use this (never fake iteration with literal lists): e.g.
+  fold k in range(64), g from guess { (g + x / g) * 0.5 } until abs(g * g - x) < 1e-9
 - let x = EXPR;                           inside any body
 - if COND { A } else { B }
 - index(xs, i), len(xs), range(n)

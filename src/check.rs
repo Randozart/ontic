@@ -109,6 +109,7 @@ fn infer_dep(
             list,
             init,
             body,
+            ref until,
         } => {
             let list_ty = infer_dep(list, env, deps)?;
             let elem = match list_ty {
@@ -120,7 +121,11 @@ fn infer_dep(
             let mut scoped = env.clone();
             scoped.insert(var.clone(), elem);
             scoped.insert(acc.clone(), init_ty.clone());
-            expect_dep(body, &scoped, &init_ty, deps)
+            expect_dep(body, &scoped, &init_ty, deps)?;
+            if let Some(u) = until {
+                expect_dep(u, &scoped, &Ty::Bool, deps)?;
+            }
+            Ok(init_ty)
         }
         Expr::Map { var, list, body } => {
             let list_ty = infer_dep(list, env, deps)?;
@@ -307,6 +312,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             list,
             init,
             body,
+            ref until,
         } => {
             let list_ty = infer(list, env)?;
             let elem_ty = match list_ty {
@@ -323,7 +329,11 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
             let mut scoped = env.clone();
             scoped.insert(var.clone(), elem_ty);
             scoped.insert(acc.clone(), init_ty.clone());
-            expect_ty_in(body, &scoped, &init_ty)
+            expect_ty_in(body, &scoped, &init_ty)?;
+            if let Some(u) = until {
+                expect_ty_in(u, &scoped, &Ty::Bool)?;
+            }
+            Ok(init_ty)
         }
         Expr::BinOp(op, l, r) => {
             let no_deps = DepSigs::new();

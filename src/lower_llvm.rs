@@ -237,7 +237,15 @@ fn emit_expr(e: &Expr, em: &mut LlvmEmitter) -> Result<String, String> {
             list,
             init,
             body,
-        } => emit_fold(var, acc, list, init, body, em),
+            ref until,
+        } => {
+            if until.is_some() {
+                return Err(
+                    "direct LLVM: until-folds require the MLIR pipeline".to_string(),
+                );
+            }
+            emit_fold(var, acc, list, init, body, em)
+        }
         Expr::Map { .. } => Err(
             "direct LLVM: map construct requires list-return support".to_string(),
         ),

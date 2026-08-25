@@ -597,3 +597,19 @@ own hint text via S3 (2482 vs 58).
   statement position, not inside arithmetic. Real pipelines compose in
   expressions; now the checker does too.
 - Short-name dep citation tolerated via dotted-suffix match in vault.
+
+### 2026-08-24 — Bounded loops: `until` clause on fold (L1–L8)
+- Grammar: optional `until COND` after fold body; `until` keyword added.
+- Semantics (interp oracle): pre-test on (k=index, acc) before each step;
+  zero iterations when init satisfies; result = surviving acc.
+- Checker: until must infer Bool under {k:Int, acc:init_ty}.
+- MLIR: fold-with-until lowers to scf.while (compound condition); first
+  emission validated by mlir-opt and shipped as native code.
+- Direct LLVM: rejects until-folds explicitly (honest scope cut).
+- Display roundtrip fixed (until INSIDE fold parens); plain folds unchanged.
+- Forge proof: Newt.sqrt spec solved by gemini — model-authored
+  `until abs(g*g - x) < 1e-7` copied from hint; early-exit survivor ran
+  2.9µs vs 18.7–21µs full-budget competitors (~6× measured speedup);
+  vaulted b169c40d, verified from Python.
+- Prompt/langref updated so both spec-authors and candidate-samplers know
+  the construct; corpus captures until-kernels automatically.
