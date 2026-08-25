@@ -6,7 +6,7 @@
 //
 // Chain semantics:
 //   w* = argmin_w  sum_i (y_i - a_i * w)^2 + lam * w^2
-//   ∇w = -2 * sum_i a_i * (y_i - a_i * w) + 2 * lam * w
+//   grad = -2 * sum_i a_i * (y_i - a_i * w) + 2 * lam * w
 //   w_{t+1} = w_t - eta * grad      (eta = 0.05, 200 steps)
 //
 // Dataset A = [1, 2, 3, 4], Y = [2.1, 4.05, 5.95, 8.1] (noisy y = 2x).
@@ -24,7 +24,7 @@ use Ridge.penalty
 fn Ridge.residual(%a: List<F64>, %y: List<F64>, %w: F64, %lam: F64) -> F64
   | len(%a) == len(%y)
   | %res >= 0.0
-  hint "residual sum-of-squares plus ridge penalty. Two passes: first fold p in range(len(%a)), acc from 0.0 { let r_i = index(%y, p) - index(%a, p) * %w; acc + r_i * r_i } to get the raw residual; then add %lam * %w * %w (the ridge term). Never use to_int or list_append."
+  hint "residual sum-of-squares plus ridge penalty. First fold p in range(len(%a)), acc from 0.0 { let r_i = index(%y, p) - index(%a, p) * %w; acc + r_i * r_i } to get the raw residual; then add %lam * %w * %w (the ridge term). Never use to_int or list_append."
   => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 0.0 -> 0.0 ± 1e-9
   => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 1.0, 0.0 -> 30.0 ± 1e-9
   => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 1.0 -> 4.0 ± 1e-9

@@ -1360,15 +1360,6 @@ fn format_args_named(names: &[String], inits: &[String]) -> String {
         .join(", ")
 }
 
-fn format_args_types(carried: &[(String, String, crate::sketch::Ty)], extra: &str) -> String {
-    let mut v: Vec<String> = carried
-        .iter()
-        .map(|(_, _, t)| if matches!(t, crate::sketch::Ty::F64) { "f64".to_string() } else { "i64".to_string() })
-        .collect();
-    v.push(extra.to_string());
-    v.join(", ")
-}
-
 fn format_args_typed(names: &[String], carried: &[(String, String, crate::sketch::Ty)]) -> String {
     names
         .iter()
@@ -1386,9 +1377,6 @@ fn format_args_typed(names: &[String], carried: &[(String, String, crate::sketch
 
 /// Element type of the folded list under tyenv (param lookup / range).
 
-fn n_of(s: &str) -> String {
-    s.trim_start_matches('%').to_string()
-}
 fn fold_elem_ty(list: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
     match list {
         Expr::Var(n) => match tyenv.get(n) {

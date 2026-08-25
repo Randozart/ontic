@@ -554,7 +554,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
 /// When the LLVM toolchain is present, re-time every survivor on real
 /// compiled objects and re-rank by that. Interpreter timing remains the
 /// fallback ordering; the native table is the honest one.
-fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<sieve::Survivor>) {
+fn native_rerank(_w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<sieve::Survivor>) {
     let dep_mlirs: Vec<String> = resolved.mlirs.clone();
     if pipeline::find_tool("mlir-opt").is_none() || pipeline::find_tool("llc").is_none() {
         println!("native bench: toolchain missing, interpreter ranking stands");
@@ -3142,7 +3142,7 @@ fn cmd_sweep(args: &[String]) -> i32 {
             std::fs::write(&path, &spec.text).ok();
             // Spec-kind record for the authored contract.
             if ontic::corpus::enabled() {
-                let mut rec = ontic::corpus::Record::new(
+                let rec = ontic::corpus::Record::new(
                     ontic::corpus::Kind::Spec,
                     format!("{}-{}", &key[..12.min(key.len())], idx),
                     spec_backend_label(&src),

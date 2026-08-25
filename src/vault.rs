@@ -66,7 +66,7 @@ impl Vault {
             .map(|(n, t)| format!("%{}: {}", n, t.name()))
             .collect();
         let canonical = gen.canonical();
-        let mut manifest = json!({
+        let manifest = json!({
             "name": gen.name,
             "path": gen.path,
             "signature": format!("fn {}({}) -> {}", gen.path, params.join(", "), gen.ret.name()),
@@ -92,23 +92,22 @@ impl Vault {
     /// Find a solved entry by gen path (latest match wins).
     /// Dependencies are resolved by path because their full canonical text
     /// lives only in the manifest — stored at solve time.
+    /// Preference order among same-path versions: re-verifiable manifests
+    /// (gen_text present) first, then the greatest content address.
     pub fn find_by_path(&self, path: &str) -> Option<Entry> {
-        let mut best: Option<(String, Entry)> = None;
-        let entries = self.list().ok()?;
-        for e in entries {
-            // Signature starts with "fn <path>(" — match exactly.
-            // Exact first; then unique dotted-suffix match so specs may
-            // cite `gaussian_3d` for `Splat.gaussian_3d`.
-            let sig_path = signature_path(&e.signature);
-            let matched =
+        let mut matches: Vec<Entry> = self
+            .list()
+            .ok()?
+            .into_iter()
+            .filter(|e| {
+                let sig_path = signature_path(&e.signature);
                 sig_path == path
                     || sig_path.ends_with(&format!(".{}", path))
-                    || path.ends_with(&format!(".{}", sig_path));
-            if matched {
-                best = Some((e.key.clone(), e));
-            }
-        }
-        best.map(|(_, e)| e)
+                    || path.ends_with(&format!(".{}", sig_path))
+            })
+            .collect();
+        matches.sort_by_key(|e| (e.gen_text.is_some() as i32, e.key.clone()));
+        matches.pop()
     }
 
     /// Shallow-merge b over a (b wins).
@@ -231,6 +230,38 @@ mod tests {
         assert_eq!(e.name, "f");
         assert_eq!(e.signature, "fn f(%a: Int) -> Int");
         assert!(e.mlir.contains("module"));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_find_by_path_prefers_verifiable_manifest() {
+        // Two same-path versions: a legacy manifest without gen_text whose
+        // key sorts HIGH, and a fresh one with gen_text sorting LOW. The
+        // verifiable manifest must win regardless of key order.
+        let tmp = std::env::temp_dir().join(format!("ontic-vault-fbp-{}", std::process::id()));
+        let v = Vault::open(&tmp).expect("opens");
+        let fresh = gen::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
+        let fresh_key = v.put(&fresh, "s_fresh", "m_fresh").unwrap();
+        // Legacy manifest: same signature, no gen_text, key sorting strictly
+        // on the OPPOSITE side of fresh so the test covers this run's order.
+        let legacy_key = if fresh_key < "8".repeat(64) {
+            "f".repeat(64)
+        } else {
+            "0".repeat(64)
+        };
+        assert_ne!(legacy_key, fresh_key);
+        // Legacy manifest: same signature, high-sorting key, no gen_text.
+        let legacy_key = "f".repeat(64);
+        let legacy_man = serde_json::json!({
+            "name": "f",
+            "signature": "fn f(%a: Int) -> Int",
+            "sketch": "s_legacy",
+        });
+        std::fs::write(tmp.join(format!("{legacy_key}.json")), legacy_man.to_string()).unwrap();
+        std::fs::write(tmp.join(format!("{legacy_key}.mlir")), "m_legacy").unwrap();
+
+        let got = v.find_by_path("f").expect("entry found");
+        assert_eq!(got.key, fresh_key, "verifiable manifest must be preferred");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
