@@ -576,19 +576,22 @@ fn native_rerank(_w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<sie
                 parts.push(cand_mlir);
                 let mlir =
                     lower::compose_modules(&parts).expect("composite compose");
-                let kinds: Vec<pipeline::CK> = s
-                    .candidate
-                    .params
-                    .iter()
-                    .map(|(_, t)| match t {
-                        sketch::Ty::ListInt => pipeline::CK::List,
-                        sketch::Ty::ListF64 => pipeline::CK::ListF64,
-                        sketch::Ty::F64 => pipeline::CK::F64,
-                        _ => pipeline::CK::I64,
-                    })
-                    .collect();
+                let kind_of = |t: &sketch::Ty| match t {
+                    sketch::Ty::ListInt => pipeline::CK::List,
+                    sketch::Ty::ListF64 => pipeline::CK::ListF64,
+                    sketch::Ty::ListF32 => pipeline::CK::ListF32,
+                    sketch::Ty::F64 => pipeline::CK::F64,
+                    sketch::Ty::F32 => pipeline::CK::F32,
+                    sketch::Ty::Bool | sketch::Ty::Tuple(_) | sketch::Ty::Int => pipeline::CK::I64,
+                };
+                let kinds: Vec<pipeline::CK> =
+                    s.candidate.params.iter().map(|(_, t)| kind_of(t)).collect();
+                let ret_kinds: Vec<pipeline::CK> = match &s.candidate.ret {
+                    sketch::Ty::Tuple(cs) => cs.iter().map(kind_of).collect(),
+                    one => vec![kind_of(one)],
+                };
                 // S7 input sizing: fixed 1024-element probe buffer, 2000 iters.
-                match pipeline::bench_native(&mlir, &s.candidate.name, &kinds, 2_000, &[]) {
+                match pipeline::bench_native(&mlir, &s.candidate.name, &kinds, 2_000, &[], &ret_kinds) {
                     Ok(ns) => measured.push((s.clone(), ns)),
                     Err(e) => eprintln!(
                         "native bench failed for {}: {} (interpreter ranking stands for this candidate)",

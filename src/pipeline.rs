@@ -22,13 +22,50 @@ pub fn scratch_dir_pub(tag: &str) -> PathBuf {
     scratch_dir(tag)
 }
 
+/// C scalar type for a component kind.
+fn kind_ctype(k: &CK) -> &'static str {
+    match k {
+        CK::I64 => "long",
+        CK::F64 => "double",
+        CK::F32 => "float",
+        _ => "void*",
+    }
+}
+
+fn kind_letter(k: &CK) -> char {
+    match k {
+        CK::I64 => 'l',
+        CK::F64 => 'd',
+        CK::F32 => 'f',
+        _ => 'p',
+    }
+}
+
+/// Deterministic C struct tag for a tuple return: ontic_tup<arity>_<letters>.
+pub fn tuple_tag(kinds: &[CK]) -> String {
+    let letters: String = kinds.iter().map(kind_letter).collect();
+    format!("ontic_tup{}_{letters}", kinds.len())
+}
+
+/// C typedef for a tuple return: `typedef struct { T0 _0; ... } tag;`.
+pub fn tuple_typedef(kinds: &[CK]) -> String {
+    let fields: Vec<String> = kinds
+        .iter()
+        .enumerate()
+        .map(|(i, k)| format!("{} _{};", kind_ctype(k), i))
+        .collect();
+    format!("typedef struct {{ {} }} {};", fields.join(" "), tuple_tag(kinds))
+}
+
 /// What a differential driver prints about the return value.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RetSpec {
     I64,
     F64,
     /// memref<?xf64> descriptor returned by value; print first 4 elements.
     ListF64,
+    /// Multi-value struct return; components printed space-separated.
+    Tuple(Vec<CK>),
 }
 
 /// Harness-level ABI kind per function parameter / return.
@@ -38,18 +75,23 @@ pub enum CK {
     List,
     /// memref<?xf64> expanded flat (5 args)
     ListF64,
+    /// memref<?xf32> expanded flat (5 args)
+    ListF32,
     /// i64 scalar
     I64,
     /// f64 scalar
     F64,
+    /// f32 scalar
+    F32,
 }
 
 impl CK {
     fn proto(&self) -> &'static str {
         match self {
-            CK::List | CK::ListF64 => "void*, void*, long, long, long",
+            CK::List | CK::ListF64 | CK::ListF32 => "void*, void*, long, long, long",
             CK::I64 => "long",
             CK::F64 => "double",
+            CK::F32 => "float",
         }
     }
 }
@@ -193,7 +235,22 @@ pub fn validate_mlir(mlir_path: &std::path::Path) -> Result<(), String> {
 /// params pass as plain longs. The loop accumulates results into `acc`
 /// (printed, so it survives dead-code elimination); the binary times itself
 /// with CLOCK_MONOTONIC and prints `<total_ns> <acc>`.
-pub fn bench_c_source(fn_name: &str, kinds: &[CK], iters: usize) -> String {
+pub fn bench_c_source(fn_name: &str, kinds: &[CK], iters: usize, ret_kinds: &[CK]) -> String {
+    let tup_tag = if ret_kinds.is_empty() {
+        String::new()
+    } else {
+        tuple_tag(ret_kinds)
+    };
+    let tup_typedef_text = if ret_kinds.is_empty() {
+        String::new()
+    } else {
+        tuple_typedef(ret_kinds)
+    };
+    let ret_decl = if ret_kinds.is_empty() {
+        "long".to_string()
+    } else {
+        tup_tag.clone()
+    };
     let mut proto = String::new();
     let mut decls = String::new();
     let mut init = String::new();
@@ -221,14 +278,33 @@ pub fn bench_c_source(fn_name: &str, kinds: &[CK], iters: usize) -> String {
                 decls.push_str(&format!("  double s{} = 3.0;\n", i));
                 call_args.push_str(&format!("s{}, ", i));
             }
+            CK::F32 => {
+                decls.push_str(&format!("  float s{} = 3.0f;\n", i));
+                call_args.push_str(&format!("s{}, ", i));
+            }
+            CK::ListF32 => {
+                decls.push_str(&format!("  float b{0}[] = {{0.f}};\n", i));
+                init.push_str("    b0[0] = 0.f;\n");
+                call_args.push_str(&format!("b{0}, b{0}, 0, N, 1, ", i));
+            }
         }
     }
+    let tail = call_args.trim_end_matches(", ");
+    let acc_stmt = if ret_kinds.is_empty() {
+        format!("acc += {fn_name}({tail});")
+    } else {
+        let acc_t = kind_ctype(&ret_kinds[0]);
+        format!(
+            "{{ {tup_tag} r = {fn_name}({tail}); acc += ({acc_t})r._0; }}"
+        )
+    };
     format!(
         r#"#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
-extern long {fname}({proto});
+{tup_typedef_text}
+extern {ret_decl} {fname}({proto});
 
 long ontic_trap(void) {{
   extern void abort(void);
@@ -244,7 +320,7 @@ int main(void) {{
   long acc = 0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   for (long k = 0; k < ITERS; k++) {{
-    acc += {fname}({call_args_tail});
+    {acc_stmt}
   }}
   clock_gettime(CLOCK_MONOTONIC, &t1);
   long ns = (t1.tv_sec - t0.tv_sec) * 1000000000L + (t1.tv_nsec - t0.tv_nsec);
@@ -254,10 +330,12 @@ int main(void) {{
 "#,
         fname = fn_name,
         proto = proto,
+        ret_decl = ret_decl,
+        acc_stmt = acc_stmt,
+        tup_typedef_text = tup_typedef_text,
         iters = iters,
         decls = decls,
         init = init,
-        call_args_tail = call_args.trim_end_matches(", "),
     )
 }
 
@@ -272,7 +350,7 @@ pub fn eval_c_source(
     scalars_i64: &[i64],
     scalars_f64: &[f64],
     ret: RetSpec,
-) -> String {
+) -> Result<String, String> {
     let mut proto = String::new();
     let mut decls = String::new();
     let mut call_args = String::new();
@@ -321,24 +399,54 @@ pub fn eval_c_source(
                 call_args.push_str(&format!("f{}, ", sf));
                 sf += 1;
             }
+            CK::F32 | CK::ListF32 => {
+                return Err("F32 drivers not wired into differential eval yet".to_string())
+            }
         }
     }
     let call_args_tail = call_args.trim_end_matches(", ");
+    let tuple_kinds: Vec<CK> = match &ret {
+        RetSpec::Tuple(ks) => ks.clone(),
+        _ => Vec::new(),
+    };
     let (ret_t, fmt) = match ret {
-        RetSpec::I64 => ("long", "%ld"),
-        RetSpec::F64 => ("double", "%.17g"),
-        RetSpec::ListF64 => (
-            "MR",
-            "",
-        ),
+        RetSpec::I64 => ("long".to_string(), "%ld".to_string()),
+        RetSpec::F64 => ("double".to_string(), "%.17g".to_string()),
+        RetSpec::ListF64 => ("MR".to_string(), String::new()),
+        RetSpec::Tuple(_) => (tuple_tag(&tuple_kinds), String::new()),
     };
     let mr_def = "typedef struct { void* base; void* data; long off; long size; long stride; } MR;";
+    let tup_def = if matches!(ret, RetSpec::Tuple(_)) {
+        tuple_typedef(&tuple_kinds)
+    } else {
+        String::new()
+    };
     let body = match ret {
         RetSpec::ListF64 => format!(
             "  MR r = {fname}({args});\n  long n = r.size < 4 ? r.size : 4;\n  printf(\"%ld\", n);\n  double* p = (double*)r.data;\n  for (long i = 0; i < n; i++) printf(\" %.17g\", p[i]);\n  printf(\"\\n\");",
             fname = fn_name,
             args = call_args_tail
         ),
+        RetSpec::Tuple(_) => {
+            let prints: Vec<String> = (0..tuple_kinds.len())
+                .map(|i| {
+                    let f = match tuple_kinds[i] {
+                        CK::I64 => "%ld",
+                        CK::F32 => "%.9g",
+                        _ => "%.17g",
+                    };
+                    format!("  printf(\" {f}\", r._{i});")
+                })
+                .collect();
+            format!(
+                "  {tag} r = {fname}({args});\n  printf(\"{arity}\");\n{prints}\n  printf(\"\\n\");",
+                tag = ret_t,
+                fname = fn_name,
+                args = call_args_tail,
+                arity = tuple_kinds.len(),
+                prints = prints.join("\n"),
+            )
+        }
         _ => format!(
             "  {ret_t} v = {fname}({args});\n  printf(\"{fmt}\\n\", v);",
             ret_t = ret_t,
@@ -347,11 +455,12 @@ pub fn eval_c_source(
             args = call_args_tail
         ),
     };
-    format!(
+    Ok(format!(
         r#"#include <stdio.h>
 #include <stdlib.h>
 
 {mr_def}
+{tup_def}
 
 extern {ret_t} {fname}({proto});
 
@@ -367,12 +476,13 @@ int main(void) {{
 }}
 "#,
         mr_def = mr_def,
+        tup_def = tup_def,
         ret_t = ret_t,
         fname = fn_name,
         proto = proto,
         decls = decls,
         body = body,
-    )
+    ))
 }
 
 /// Run the function once natively; returns the parsed numeric result
@@ -409,19 +519,16 @@ pub fn eval_native(
         object_from_ll(&ep_ll, &ep_o)?;
         objects.push(ep_o);
     }
-    std::fs::write(
-        &c_p,
-        eval_c_source(
-            fn_name,
-            kinds,
-            list_vals,
-            list_f64_vals,
-            scalars_i64,
-            scalars_f64,
-            ret,
-        ),
-    )
-    .map_err(|e| e.to_string())?;
+    let c_text = eval_c_source(
+        fn_name,
+        kinds,
+        list_vals,
+        list_f64_vals,
+        scalars_i64,
+        scalars_f64,
+        ret,
+    )?;
+    std::fs::write(&c_p, c_text).map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
     let mut link_args: Vec<&str> =
         vec!["-O2", c_p.to_str().ok_or("bad c path")?];
@@ -456,6 +563,7 @@ pub fn bench_native(
     kinds: &[CK],
     iters: usize,
     extra_mls: &[String],
+    ret_kinds: &[CK],
 ) -> Result<u64, String> {
     let dir = scratch_dir("bench");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -468,7 +576,7 @@ pub fn bench_native(
     std::fs::write(&mlir_p, mlir_text).map_err(|e| e.to_string())?;
     mlir_to_llvmir(&mlir_p, &ll_mlir)?;
     object_from_ll(&ll_mlir, &o_p)?;
-    std::fs::write(&c_p, bench_c_source(fn_name, kinds, iters))
+    std::fs::write(&c_p, bench_c_source(fn_name, kinds, iters, ret_kinds))
         .map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
     // Extra dependency modules compiled alongside the candidate.
@@ -560,10 +668,10 @@ mod tests {
 
     #[test]
     fn test_bench_harness_source_shape() {
-        let c = bench_c_source("f", &[CK::List, CK::I64], 10);
+        let c = bench_c_source("f", &[CK::List, CK::I64], 10, &[]);
         assert!(c.contains("extern long f(void*, void*, long, long, long, long);"));
         assert!(c.contains("b0, b0, 0, N, 1, s1"));
-        let c_scalar_only = bench_c_source("g", &[CK::I64], 5);
+        let c_scalar_only = bench_c_source("g", &[CK::I64], 5, &[]);
         assert!(c_scalar_only.contains("extern long g(long);"));
     }
 }

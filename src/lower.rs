@@ -248,7 +248,21 @@ pub fn emit_fn(
     body: &Expr,
     calls: &CallMap,
 ) -> Result<String, String> {
-    let out_ty = mlir_ret_type(ret)?;
+    // Tuple return: multi-result MLIR function. The body must be a tuple
+    // literal whose components lower independently; the C ABI bridges the
+    // results via a returned struct (see emit_header).
+    let components: Vec<Ty> = match ret.tuple_components() {
+        Some(cs) => cs.to_vec(),
+        None => Vec::new(),
+    };
+    let multi = !components.is_empty();
+    let out_ty = if multi {
+        let tys: Result<Vec<&'static str>, String> =
+            components.iter().map(mlir_ret_type).collect();
+        format!("({})", tys?.join(", "))
+    } else {
+        mlir_ret_type(ret)?.to_string()
+    };
     let mut em = Emitter::new();
     em.calls = calls.clone();
 
@@ -286,8 +300,32 @@ pub fn emit_fn(
         tyenv0.insert(p.clone(), t.ret.clone());
     }
 
-    let result = emit_expr(body, &mut env, &mut tyenv0, &mut em)?;
-    em.line(&format!("return {} : {}", result, out_ty));
+    if multi {
+        let items = match body {
+            Expr::Tuple(items) => items,
+            _ => {
+                return Err(
+                    "tuple-return body must be a tuple literal of components".to_string()
+                )
+            }
+        };
+        if items.len() != components.len() {
+            return Err(format!(
+                "tuple arity mismatch: signature has {}, body yields {}",
+                components.len(),
+                items.len()
+            ));
+        }
+        let mut ssas = Vec::new();
+        for item in items {
+            ssas.push(emit_expr(item, &mut env, &mut tyenv0, &mut em)?);
+        }
+        let tys: Vec<String> = components.iter().map(|t| mlir_ret_type(t).unwrap().to_string()).collect();
+        em.line(&format!("return {} : {}", ssas.join(", "), tys.join(", ")));
+    } else {
+        let result = emit_expr(body, &mut env, &mut tyenv0, &mut em)?;
+        em.line(&format!("return {} : {}", result, out_ty));
+    }
     em.indent -= 1;
     em.line("}");
     em.indent -= 1;
@@ -2156,9 +2194,57 @@ fn c_ret_ty(ty: &Ty) -> Result<&'static str, String> {
         Ty::F32 => Ok("float"),
         // Flat-MemRef return: 5-field struct, caller reads aligned+size.
         Ty::ListInt | Ty::ListF64 | Ty::ListF32 => Ok("void*"),
-        // Tuple returns lower via pointer out-params (see emit_fn).
-        Ty::Tuple(_) => Err("tuple return uses out-param ABI, not c_ret_ty".to_string()),
+        // Tuple returns use a by-value C struct (see c_tuple_tag).
+        Ty::Tuple(_) => Err("tuple return uses struct ABI, not c_ret_ty".to_string()),
     }
+}
+
+/// Component C types of a tuple return, in declaration order.
+fn c_tuple_components(ty: &Ty) -> Result<Vec<&'static str>, String> {
+    match ty.tuple_components() {
+        Some(cs) => cs
+            .iter()
+            .map(|t| match t {
+                Ty::Int | Ty::Bool => Ok("long"),
+                Ty::F64 => Ok("double"),
+                Ty::F32 => Ok("float"),
+                other => Err(format!(
+                    "tuple component {} unsupported in C ABI",
+                    other.name()
+                )),
+            })
+            .collect(),
+        None => Err("not a tuple type".to_string()),
+    }
+}
+
+/// Deterministic struct tag: ontic_tup<arity>_<kind letters>.
+fn c_tuple_tag(ty: &Ty) -> Result<String, String> {
+    let comps = c_tuple_components(ty)?;
+    let letters: String = comps
+        .iter()
+        .map(|c| match *c {
+            "long" => 'l',
+            "double" => 'd',
+            _ => 'f',
+        })
+        .collect();
+    Ok(format!("ontic_tup{}_{letters}", comps.len()))
+}
+
+/// `typedef struct { T0 _0; ... } tag;` for a tuple return type.
+fn c_tuple_typedef(ty: &Ty) -> Result<String, String> {
+    let comps = c_tuple_components(ty)?;
+    let fields: Vec<String> = comps
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{c} _{i};"))
+        .collect();
+    Ok(format!(
+        "typedef struct {{ {} }} {};",
+        fields.join(" "),
+        c_tuple_tag(ty)?
+    ))
 }
 
 /// Generate the C header declaration for one candidate using the flat
@@ -2171,7 +2257,14 @@ pub fn emit_header(
     key8: &str,
     guarded: bool,
 ) -> Result<String, String> {
-    let rt = c_ret_ty(ret)?;
+    // Tuple return: by-value C struct. LLVM lowers {T0, T1, ...} exactly
+    // like the matching C struct on SysV ABIs, so ctypes/pybind see a
+    // plain struct.
+    let (typedef, rt) = if let Some(_cs) = ret.tuple_components() {
+        (c_tuple_typedef(ret)? + "\n", c_tuple_tag(ret)?)
+    } else {
+        (String::new(), c_ret_ty(ret)?.to_string())
+    };
     let mut parts: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
@@ -2225,12 +2318,14 @@ pub fn emit_header(
          #ifdef __cplusplus\n\
          extern \"C\" {{\n\
          #endif\n\n\
+         {typedef}
          {rt} {name}({args});\n\
          {guarded_section}\n\
          #ifdef __cplusplus\n\
          }}\n\
          #endif\n\n\
-         #endif /* ONTIC_{gk}_{gn}_H */\n"
+         #endif /* ONTIC_{gk}_{gn}_H */\n",
+        typedef = typedef,
     );
     Ok(body)
 }
@@ -2261,7 +2356,11 @@ pub fn emit_header_hpp(
     key8: &str,
     invariants: &[crate::sketch::Expr],
 ) -> Result<String, String> {
-    let rt = c_ret_ty(ret)?;
+    let (typedef, rt) = if let Some(_cs) = ret.tuple_components() {
+        (c_tuple_typedef(ret)? + "\n", c_tuple_tag(ret)?)
+    } else {
+        (String::new(), c_ret_ty(ret)?.to_string())
+    };
     let mut parts: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
@@ -2360,14 +2459,15 @@ fn strip_outer(s: &str) -> String {
         "// Ontic kernel (verified; do not edit - re-solve instead)\n\
          // ABI v1: Flat-MemRef; List<T> param -> (allocated*, aligned*, offset, size, stride)\n\
          #ifndef ONTIC_{gk}_{gn}_HPP\n#define ONTIC_{gk}_{gn}_HPP\n\n\
-         #include <cstddef>\n\n{meta}\n\
+         #include <cstddef>\n\n{typedef}{meta}\n\
          #if defined(ONTIC_CONTRACTS) && defined(__cplusplus) && __cplusplus >= 202601L\n\
          #ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n{decl_native}\n\n\
          #ifdef __cplusplus\n}}\n#endif\n\
          #else /* portable */\n\
          #ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n{decl_plain}\n\n\
          #ifdef __cplusplus\n}}\n#endif\n#endif /* ONTIC_CONTRACTS */\n\n\
-         #endif /* ONTIC_{gk}_{gn}_HPP */\n"
+         #endif /* ONTIC_{gk}_{gn}_HPP */\n",
+        typedef = typedef,
     ))
 }
 
@@ -2610,7 +2710,25 @@ pub fn emit_shim_c(
     key8: &str,
     invariants: &[crate::sketch::Expr],
 ) -> Result<String, String> {
-    let rt = c_ret_ty(ret)?;
+    // Tuple return: shim returns the same by-value C struct; a violation
+    // under TRAP policy yields an all-sentinel struct.
+    let (tup_typedef, rt) = if let Some(_cs) = ret.tuple_components() {
+        (c_tuple_typedef(ret)? + "\n", c_tuple_tag(ret)?)
+    } else {
+        (String::new(), c_ret_ty(ret)?.to_string())
+    };
+    let sentinel_expr = if let Some(cs) = ret.tuple_components() {
+        let comps: Result<Vec<String>, String> = cs
+            .iter()
+            .map(|t| match t.tuple_components() {
+                Some(_) => Err("nested tuple component".to_string()),
+                None => Ok(c_guard_sentinel(t).to_string()),
+            })
+            .collect();
+        format!("({}) {{ {} }}", rt, comps?.join(", "))
+    } else {
+        c_guard_sentinel(ret).to_string()
+    };
     let sanitize = |s: &str| -> String {
         s.chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -2704,14 +2822,14 @@ pub fn emit_shim_c(
              \x20           fprintf(stderr, \"%s\\n\", tl_error);\n\
              \x20           abort();\n\
              \x20       }}\n\
-             \x20       return {sentinel};\n\
+             \x20       return {sentinel_expr};\n\
              \x20   }}\n",
             pred = pred,
             fmt_str = fmt_str,
             safe_name = safe_name,
             readable = readable,
             val_args = val_parts.join(", "),
-            sentinel = c_guard_sentinel(ret),
+            sentinel_expr = sentinel_expr,
         ));
     }
 
@@ -2738,6 +2856,8 @@ pub fn emit_shim_c(
          void ontic_last_error_clear(void) {{ tl_error[0] = '\\0'; }}\n\
          void ontic_set_violation_policy(int p) {{ tl_policy = p; }}\n\
          int  ontic_violation_policy(void) {{ return tl_policy; }}\n\n\
+         /* ---- tuple ABI ---- */\n\
+         {tup_typedef}\n\n\
          /* ---- raw kernel ---- */\n\
          extern {rt} {name}__raw({c_args});\n\n\
          /* ---- guarded public symbol ---- */\n\
@@ -2748,6 +2868,7 @@ pub fn emit_shim_c(
         safe_name = safe_name,
         key8 = key8,
         rt = rt,
+        tup_typedef = tup_typedef,
         name = name,
         c_args = c_args_str,
         guard_body = guard_body,
