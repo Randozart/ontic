@@ -930,13 +930,15 @@ fn emit_and_store(
 }
 
 fn cmd_vault(args: &[String]) -> i32 {
-    // Subcommands: `vault export …` / `vault import …`; bare `vault` lists.
+    // Subcommands: `vault export/import/status`; bare `vault` lists.
     // args = [prog, vault, SUB, …]
     match args.get(2).map(|s| s.as_str()) {
         Some("export") => return cmd_vault_export(&args[3..]),
         Some("import") => return cmd_vault_import(&args[3..]),
+        Some("status") => return cmd_vault_status(&args[3..]),
         _ => {}
     }
+    let json = args.iter().any(|a| a == "--json");
     let dir = match args.iter().position(|a| a == "--dir") {
         Some(i) => match args.get(i + 1) {
             Some(d) => d.clone(),
@@ -958,6 +960,26 @@ fn cmd_vault(args: &[String]) -> i32 {
             }
             let promoted = read_lib_manifest();
             let reuse = ontic::vault::reuse_counts(&dir);
+            if json {
+                let mut arr = Vec::new();
+                for e in &entries {
+                    let path = sig_path_of(e);
+                    arr.push(serde_json::json!({
+                        "key": e.key,
+                        "name": e.name,
+                        "path": path,
+                        "signature": e.signature,
+                        "trust": v.trust_of(&e.key),
+                        "reuse": reuse.get(&e.key).copied().unwrap_or(0),
+                    }));
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::Value::Array(arr))
+                        .unwrap_or_else(|_| "[]".to_string())
+                );
+                return 0;
+            }
             for e in entries {
                 let path = {
                     let inner = e.signature.strip_prefix("fn ").unwrap_or(&e.signature);
@@ -985,6 +1007,64 @@ fn cmd_vault(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `ontic vault status <name>` — all versions of one path with trust and
+/// on-disk artifact inventory.
+fn cmd_vault_status(args: &[String]) -> i32 {
+    let name = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(n) => n.clone(),
+        None => return usage("status needs a kernel name"),
+    };
+    let dir = match args.iter().position(|a| a == "--dir") {
+        Some(i) => match args.get(i + 1) {
+            Some(d) => d.clone(),
+            None => return usage("--dir needs a path"),
+        },
+        None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
+    };
+    let v = match Vault::open(&dir) {
+        Ok(v) => v,
+        Err(e) => return die(&e),
+    };
+    let entries: Vec<VaultEntry> = match v.list() {
+        Ok(es) => es.into_iter().filter(|e| sig_path_of(e) == name).collect(),
+        Err(e) => return die(&e),
+    };
+    if entries.is_empty() {
+        return die(&format!("no vault entry for `{name}`"));
+    }
+    let dirp = std::path::Path::new(&dir);
+    for e in &entries {
+        let k8 = e.key[..8.min(e.key.len())].to_string();
+        println!(
+            "{}  {}  [{}]",
+            &e.key[..12.min(e.key.len())],
+            e.signature,
+            v.trust_of(&e.key)
+        );
+        let mut artifacts = Vec::new();
+        for (label, file) in [
+            ("so", format!("lib{}-{}.so", e.name, k8)),
+            ("guarded_so", format!("lib{}-{}.guarded.so", e.name, k8)),
+            ("h", format!("{}-{}.h", e.name, k8)),
+            ("hpp", format!("{}-{}.hpp", e.name, k8)),
+            ("guarded_c", format!("{}-{}.guarded.c", e.name, k8)),
+            ("ous", format!("{}-{}.ous", e.name, k8)),
+            ("obj", format!("{}-{}.o", e.name, k8)),
+        ] {
+            if dirp.join(&file).exists() {
+                artifacts.push(label);
+            }
+        }
+        let artifacts_s = if artifacts.is_empty() {
+            "(none)".to_string()
+        } else {
+            artifacts.join(" ")
+        };
+        println!("  artifacts: {artifacts_s}");
+    }
+    0
 }
 
 /// Flag lookup for vault subcommands: `--dir`, `--out`, boolean flags.
