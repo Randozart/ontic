@@ -17,6 +17,9 @@ pub struct Entry {
     pub signature: String,
     pub sketch_text: String,
     pub mlir: String,
+    /// Raw gen spec text (incl. opaque examples) when the manifest carries
+    /// it; enables verify-on-import. None for pre-`gen_text` manifests.
+    pub gen_text: Option<String>,
 }
 
 /// Filesystem-backed vault rooted at a directory (default `.ontic/vault`).
@@ -63,12 +66,13 @@ impl Vault {
             .map(|(n, t)| format!("%{}: {}", n, t.name()))
             .collect();
         let canonical = gen.canonical();
-        let manifest = json!({
+        let mut manifest = json!({
             "name": gen.name,
             "path": gen.path,
             "signature": format!("fn {}({}) -> {}", gen.path, params.join(", "), gen.ret.name()),
             "canonical": canonical,
             "sketch": sketch_text,
+            "gen_text": gen.source,
             "ns_per_call_note": "see solve output; timing is machine-specific",
         });
         let merged = Self::merge_json(&manifest, extra_meta);
@@ -132,6 +136,7 @@ impl Vault {
             name: man.get("name")?.as_str()?.to_string(),
             signature: man.get("signature")?.as_str()?.to_string(),
             sketch_text: man.get("sketch")?.as_str()?.to_string(),
+            gen_text: man.get("gen_text").and_then(|v| v.as_str()).map(String::from),
             mlir,
         })
     }
@@ -145,9 +150,58 @@ impl Vault {
                 let name = e.file_name().to_string_lossy().into_owned();
                 name.strip_suffix(".json").map(|k| k.to_string())
             })
+            // Content-addressed keys are 64 hex chars; skip sidecars
+            // (trust.json) that share the directory.
+            .filter(|k| k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()))
             .collect();
         keys.sort();
         Ok(keys.iter().filter_map(|k| self.get(k)).collect())
+    }
+
+    // ---- trust ledger (local-only; never shipped inside packages) ----
+
+    fn trust_path(&self) -> PathBuf {
+        self.dir.join("trust.json")
+    }
+
+    /// Read the whole trust map; missing file = empty map.
+    pub fn trust_map(&self) -> std::collections::HashMap<String, String> {
+        fs::read_to_string(self.trust_path())
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    /// Trust status for one key. Unrecorded keys default to attested —
+    /// pre-trust-ledger local solves were verified by definition of the
+    /// sieve, but honest defaults for foreign artifacts lean distrustful.
+    pub fn trust_of(&self, key: &str) -> &'static str {
+        match self.trust_map().get(key).map(|s| s.as_str()) {
+            Some("verified") => "verified",
+            _ => "attested",
+        }
+    }
+
+    /// Record trust status for a key.
+    pub fn set_trust(&self, key: &str, status: &str) -> Result<(), String> {
+        if status != "verified" && status != "attested" {
+            return Err(format!("unknown trust status `{}`", status));
+        }
+        let mut map = self.trust_map();
+        map.insert(key.to_string(), status.to_string());
+        // Deterministic order: sorted keys.
+        let mut entries: Vec<(String, String)> = map.into_iter().collect();
+        entries.sort();
+        let obj: serde_json::Map<String, serde_json::Value> = entries
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+        fs::write(
+            self.trust_path(),
+            serde_json::to_string_pretty(&serde_json::Value::Object(obj))
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("trust write failed: {}", e))
     }
 }
 

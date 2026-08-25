@@ -38,6 +38,7 @@ pub fn pack(entry: &Entry, obj_bytes: &[u8]) -> Vec<u8> {
         "name": entry.name,
         "signature": entry.signature,
         "key": entry.key,
+        "gen_text": entry.gen_text,
     });
     write_section(&mut out, manifest.to_string().as_bytes());
     // SKETCH
@@ -63,6 +64,7 @@ pub fn pack_full(entry: &Entry, obj_bytes: &[u8], header_text: &str) -> Vec<u8> 
         "name": entry.name,
         "signature": entry.signature,
         "key": entry.key,
+        "gen_text": entry.gen_text,
     });
     write_section(&mut out, manifest.to_string().as_bytes());
     write_section(&mut out, entry.sketch_text.as_bytes());
@@ -117,6 +119,7 @@ mod tests {
             key: "abc123".to_string(),
             name: "mean".to_string(),
             signature: "fn Stats.mean(%xs: List<F64>) -> F64".to_string(),
+            gen_text: None,
             sketch_text: "fn @mean(%xs: List<F64>) -> F64 { 0.0 }".to_string(),
             mlir: "module {\n  func.func @mean(%xs: memref<?xf64>) -> f64 {\n    return 0.0 : f64\n  }\n}".to_string(),
         }

@@ -92,6 +92,10 @@ pub struct Gen {
     /// Author guidance for the forge. Advice, never evidence (rule 12):
     /// flows into prompts only, never into canonical text or verdicts.
     pub hints: Vec<String>,
+    /// Raw source chunk this gen was parsed from (spec text incl. opaque
+    /// examples). Ships in vault manifests as `gen_text` so packages can
+    /// re-verify on import. Never part of canonical text.
+    pub source: String,
 }
 
 /// Public wrapper so recipe.rs can reuse the example value grammar for
@@ -312,6 +316,7 @@ pub fn parse(src: &str) -> Result<Gen, String> {
         auto_split: false,
         deps,
         hints,
+        source: src.trim_end().to_string(),
     };
     apply_auto_split(&mut gen);
     validate(&gen)?;

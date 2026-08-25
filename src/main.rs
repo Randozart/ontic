@@ -1062,6 +1062,7 @@ fn emit_ous(
         name: survivor.candidate.name.clone(),
         signature: String::new(),
         sketch_text: survivor.source_text.clone(),
+        gen_text: Some(w.source.clone()),
         mlir: cand_m.clone(),
     };
     let ous_data = ontic::ous::pack_full(&entry, &obj_bytes, &hdr);
