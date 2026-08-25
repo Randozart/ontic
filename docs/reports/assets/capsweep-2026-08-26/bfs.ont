@@ -1,0 +1,5 @@
+fn Bfs.deg(%n: Int, %adj: List<Int>) -> Int
+  | %n >= 1
+  | len(%adj) == %n * %n
+  => 1, [1] -> 1 ± 0
+  ?? 2, [0, 1, 1, 0] -> 2 ± 0

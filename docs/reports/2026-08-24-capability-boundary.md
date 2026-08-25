@@ -61,6 +61,29 @@
 Each representative was tested via `ontic check` on a minimal .ont spec.
 Probe quality: **Full** = honest domain coverage (260+ rows); **EdgesOnly** = relational invariants defeat rejection sampling (≤9 rows); **Anomaly** = unsatisfiable over type domain.
 
+## Addendum — 2026-08-26 scorecard re-run (F32 + linear probe solver)
+
+Re-probed with the integer-linear constraint solver
+(`src/probes_solver.rs`, commit 416da45) and the F32 type. Specs archived
+at `docs/reports/assets/capsweep-2026-08-26/`.
+
+| Class | Before | After | Driver |
+|---|---|---|---|
+| QR step | EdgesOnly (5) | **Full (258)** | probe solver (`len == n*n`) |
+| Cholesky | EdgesOnly (2) | **Full (256)** | probe solver |
+| Conjugate gradient | EdgesOnly (4) | **Full (260)** | probe solver |
+| Matrix multiply | EdgesOnly (9) | **Full (260)** | probe solver |
+| Jacobi relaxation | EdgesOnly (9) | **Full (256)** | probe solver |
+| Moving average | EdgesOnly (4) | **Full (258)** | probe solver (`k <= len`) |
+| K-means step | Anomaly (0) | **Full (256)** | probe solver (multi-constraint) |
+| BFS adjacency probes | EdgesOnly (3) | **Full (259)** | probe solver; traversal still structurally partial |
+| Softmax / conv1d / bsearch / knapsack (spot) | Full | Full | no regression |
+
+**New totals: 21/23 classes at Full probe coverage** (was 13/23).
+Probe-level degradation is eliminated for every expressible class.
+Remaining non-Full are structural, not evidential: Levenshtein 2D
+(needs nested lists, Gap 3) and unbounded graph traversal (Gap 5).
+
 | Algorithm class | Representative | Probe quality | Expressible? | Notes |
 |---|---|---|---|---|
 | **Numeric linear algebra** | QR step | EdgesOnly (5) | Yes (flat) | Matrix as flat list + index math; probe degrades on `len(a)==n*n` |
