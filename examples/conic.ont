@@ -1,4 +1,3 @@
-wrapping
 fn Splat.conic2(%a: F64, %b: F64, %c: F64) -> List<F64>
   hint "inverse of symmetric 2x2 covariance [[a,b],[b,c]] flattened row-major. det = a*c - b*b. Result = map(p in range(4)) { let i = p / 2; let j = p % 2; ... } where entry (i,j) of the result is: (0,0)->c/det, (0,1)->-b/det, (1,0)->-b/det, (1,1)->a/det. Never use to_int."
   => 1.0, 0.0, 1.0 -> [1.0, 0.0, 0.0, 1.0] ± 1e-12

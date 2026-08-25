@@ -87,9 +87,6 @@ pub struct Gen {
     pub transparent: Vec<Example>,
     pub opaque: Vec<Example>,
     pub auto_split: bool,
-    /// Declared wrapping tier: arithmetic wraps mod 2^64 instead of killing
-    /// candidates on overflow. Speed requires declaration (AGENTS rule 11).
-    pub wrapping: bool,
     /// Vault symbols this gen may call: `use Stats.mean` lines.
     pub deps: Vec<String>,
     /// Author guidance for the forge. Advice, never evidence (rule 12):
@@ -225,7 +222,6 @@ pub fn parse(src: &str) -> Result<Gen, String> {
     let mut params: Vec<(String, Ty)> = Vec::new();
     let mut ret = Ty::Int;
     let mut invariants = Vec::new();
-    let mut wrapping = false;
     let mut deps: Vec<String> = Vec::new();
     let mut hints: Vec<String> = Vec::new();
     let mut transparent = Vec::new();
@@ -294,10 +290,6 @@ pub fn parse(src: &str) -> Result<Gen, String> {
             transparent.push(parse_example_line(line, "example").map_err(ctx)?);
             continue;
         }
-        if line == "wrapping" {
-            wrapping = true;
-            continue;
-        }
         if line.starts_with("??") {
             opaque.push(parse_example_line(line, "opaque example").map_err(ctx)?);
             continue;
@@ -318,7 +310,6 @@ pub fn parse(src: &str) -> Result<Gen, String> {
         transparent,
         opaque,
         auto_split: false,
-        wrapping,
         deps,
         hints,
     };
@@ -487,9 +478,6 @@ impl Gen {
         let mut out = String::new();
         for d in &self.deps {
             out.push_str(&format!("use {}\n", d));
-        }
-        if self.wrapping {
-            out.push_str("wrapping\n");
         }
         out.push_str(&format!(
             "fn {}({}) -> {}\n",

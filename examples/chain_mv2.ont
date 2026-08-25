@@ -1,4 +1,3 @@
-wrapping
 use Linalg.matvec
 fn Chain.mv2(%mat: List<F64>, %vec: List<F64>) -> List<F64>
   | len(%vec) > 0

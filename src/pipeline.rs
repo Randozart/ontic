@@ -258,7 +258,7 @@ int main(void) {{
 
 /// Build a C driver that calls the function once on FIXED inputs and prints
 /// the result (%.17g). Used by differential tests: interpreter and native
-/// must agree bit-for-bit under the wrapping tier.
+/// must agree bit-for-bit.
 pub fn eval_c_source(
     fn_name: &str,
     kinds: &[CK],
@@ -529,10 +529,10 @@ mod tests {
         }
         let cand = sketch::parse(SUM_SRC).unwrap();
         check::check(&cand).unwrap();
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true, &lower::CallMap::new()).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new()).unwrap();
 
         let inputs = vec![Value::List(vec![3, 1, 4, 1, 5, 9, 2, 6])];
-        let expect = interp::eval_candidate(&cand, &inputs, &interp::Ctx::wrapping())
+        let expect = interp::eval_candidate(&cand, &inputs, &interp::Ctx::checked())
             .expect("interp evaluates");
         let got = eval_native(
             &mlir,
@@ -579,7 +579,7 @@ mod trap_tests {
         }
         let cand = sketch::parse("fn @f(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { %acc + %x } }").unwrap();
         check::check(&cand).unwrap();
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false, &lower::CallMap::new()).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new()).unwrap();
 
         // Clean inputs: both tiers agree.
         let got =
@@ -619,7 +619,7 @@ mod float_tests {
         let cand = sketch::parse("fn @m(%a: F64, %b: F64) -> F64 { %a * %b + %a }").unwrap();
         crate::check::check(&cand).unwrap();
         // Checked tier must NOT wrap float math in i128 checks.
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, false, &lower::CallMap::new()).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new()).unwrap();
         assert!(!mlir.contains("i128"), "float math entered trap expansion");
         assert!(mlir.contains("arith.mulf"));
 
@@ -667,12 +667,12 @@ mod listf64_tests {
         .unwrap();
         crate::check::check(&cand).unwrap();
         let mlir =
-            lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true, &lower::CallMap::new()).unwrap();
+            lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new()).unwrap();
         assert!(mlir.contains("memref<?xf64>"), "param type not f64");
         assert!(mlir.contains("memref.load") && mlir.contains("arith.addf"));
 
         let inputs = vec![Value::FloatList(vec![1.5, 2.0, -0.5])];
-        let expect = interp::eval_candidate(&cand, &inputs, &interp::Ctx::wrapping()).unwrap();
+        let expect = interp::eval_candidate(&cand, &inputs, &interp::Ctx::checked()).unwrap();
         let got = eval_native(
             &mlir,
             "dot",
@@ -711,7 +711,7 @@ mod broadcast_tests {
         )
         .unwrap();
         crate::check::check(&cand).unwrap();
-        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, true, &lower::CallMap::new())
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new())
             .expect("lowers");
         assert!(mlir.contains("memref.alloc"), "no result alloc");
         assert!(mlir.contains("arith.mulf"), "no elementwise mulf");

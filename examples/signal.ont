@@ -1,7 +1,6 @@
 // Signal processing kernel library — semi-composable Ontic gens.
 // Composition: Signal.mad (primitive) -> Signal.convolve (uses mad) -> Signal.energy (uses convolve)
 
-wrapping
 fn Signal.mad(%a: F64, %b: F64, %c: F64) -> F64
   hint "multiply-accumulate: a * b + c"
   => 2.0, 3.0, 1.0 -> 7.0
@@ -9,7 +8,6 @@ fn Signal.mad(%a: F64, %b: F64, %c: F64) -> F64
   => -1.0, 5.0, 0.0 -> -5.0
   ?? 3.0, 3.0, 3.0 -> 12.0
 
-wrapping
 fn Signal.convolve(%sig: List<F64>, %ker: List<F64>) -> F64
   | len(%sig) > 0
   | len(%ker) > 0
@@ -18,7 +16,6 @@ fn Signal.convolve(%sig: List<F64>, %ker: List<F64>) -> F64
   => [2.0, 4.0], [1.0, 1.0] -> 6.0
   ?? [1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0] -> 4.0
 
-wrapping
 fn Signal.energy(%sig: List<F64>) -> F64
   | len(%sig) > 0
   hint "sum of squares: fold v in %sig, acc from 0.0 { acc + v * v }. Never use list_append."

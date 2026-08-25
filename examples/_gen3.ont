@@ -1,0 +1,8 @@
+wrapping
+fn Metrics.variance(%xs: List<F64>) -> F64
+  | len(%xs) > 0
+  | %res >= 0.0
+  hint "population variance: let %m = fold %v in %xs, %acc from 0.0 { %acc + %v } / len(%xs); fold %v in %xs, %acc from 0.0 { %acc + (%v - %m) * (%v - %m) } / len(%xs)"
+  => [2.0, 4.0] -> 1.0 ± 1e-9
+  => [3.0] -> 0.0 ± 0
+  ?? [1.0, 2.0, 3.0, 4.0, 5.0] -> 2.0 ± 1e-9

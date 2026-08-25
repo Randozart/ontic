@@ -1,4 +1,3 @@
-wrapping
 fn Splat.alpha_at(%ca: F64, %cb: F64, %cc: F64, %dx: F64, %dy: F64, %op: F64) -> F64
   | %op >= 0.0
   | %op <= 1.0

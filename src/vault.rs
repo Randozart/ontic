@@ -15,8 +15,6 @@ pub struct Entry {
     pub key: String,
     pub name: String,
     pub signature: String,
-    /// Declared tier at solve time (pre-manifest entries default checked).
-    pub wrapping: bool,
     pub sketch_text: String,
     pub mlir: String,
 }
@@ -69,7 +67,6 @@ impl Vault {
             "name": gen.name,
             "path": gen.path,
             "signature": format!("fn {}({}) -> {}", gen.path, params.join(", "), gen.ret.name()),
-            "wrapping": gen.wrapping,
             "canonical": canonical,
             "sketch": sketch_text,
             "ns_per_call_note": "see solve output; timing is machine-specific",
@@ -134,7 +131,6 @@ impl Vault {
             key: key.to_string(),
             name: man.get("name")?.as_str()?.to_string(),
             signature: man.get("signature")?.as_str()?.to_string(),
-            wrapping: man.get("wrapping").and_then(|b| b.as_bool()).unwrap_or(false),
             sketch_text: man.get("sketch")?.as_str()?.to_string(),
             mlir,
         })

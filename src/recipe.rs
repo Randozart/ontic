@@ -76,7 +76,7 @@ pub struct OntFile {
 
 /// Split raw `.ont` text into gen chunks and an optional program block.
 /// A line starting with `fn ` begins a new gen chunk; indented continuation
-/// lines (`|`, `=>`, `??`, `wrapping`) join the open chunk.
+/// lines (`|`, `=>`, `??`) join the open chunk.
 fn split_chunks(src: &str) -> Result<(Vec<String>, Vec<String>), String> {
     let mut gens: Vec<String> = Vec::new();
     let mut prog_lines: Vec<String> = Vec::new();
@@ -117,7 +117,7 @@ fn split_chunks(src: &str) -> Result<(Vec<String>, Vec<String>), String> {
             continue;
         }
         if trimmed.starts_with("fn ") {
-            // A pre-`fn` prefix (e.g. `wrapping`) belongs to this gen.
+            // A pre-`fn` prefix (e.g. `use`) belongs to this gen.
             gens.push(pending.take().unwrap_or_default());
             let last = gens.last_mut().expect("chunk exists");
             if !last.is_empty() {
@@ -421,7 +421,6 @@ mod tests {
     const FILE: &str = "\
 fn Ledger.total(%items: List<Int>) -> Int
   | %res >= -1000000000
-  wrapping
   => [1,2,3] -> 6
   => [] -> 0
 
@@ -467,9 +466,7 @@ end
     fn test_gens_remain_individually_valid() {
         let f = parse_ont(FILE).expect("parses");
         assert_eq!(f.gens[0].name, "total");
-        assert!(f.gens[0].wrapping);
         assert_eq!(f.gens[1].name, "Twice");
-        assert!(!f.gens[1].wrapping);
         assert_eq!(f.gens[0].transparent.len(), 2);
     }
 

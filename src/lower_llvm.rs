@@ -16,7 +16,6 @@ pub struct LlvmFnSpec<'a> {
     pub params: &'a [(String, Ty)],
     pub ret: &'a Ty,
     pub body: &'a Expr,
-    pub wrapping: bool,
 }
 
 pub struct LlvmEmitter {
@@ -26,12 +25,10 @@ pub struct LlvmEmitter {
     current_block: String,
     indent: usize,
     vars: HashMap<String, (String, Ty)>,
-    #[allow(dead_code)]
-    wrapping: bool,
 }
 
 impl LlvmEmitter {
-    pub fn new(wrapping: bool) -> Self {
+    pub fn new() -> Self {
         LlvmEmitter {
             out: String::new(),
             reg: 0,
@@ -39,7 +36,6 @@ impl LlvmEmitter {
             current_block: "entry".to_string(),
             indent: 1,
             vars: HashMap::new(),
-            wrapping,
         }
     }
 
@@ -109,7 +105,7 @@ pub fn emit_llvm(spec: &LlvmFnSpec) -> Result<String, String> {
     }
     let ret_ty = llvm_ret_type(spec.ret)?;
 
-    let mut em = LlvmEmitter::new(spec.wrapping);
+    let mut em = LlvmEmitter::new();
 
     // Build signature.
     let mut sig_parts: Vec<String> = Vec::new();
@@ -563,7 +559,6 @@ mod tests {
             params: &cand.params,
             ret: &cand.ret,
             body: &cand.body,
-            wrapping: true,
         };
         let ir = emit_llvm(&spec).unwrap();
         assert!(ir.contains("define i64 @total("));
@@ -579,7 +574,6 @@ mod tests {
             params: &cand.params,
             ret: &cand.ret,
             body: &cand.body,
-            wrapping: true,
         };
         let ir = emit_llvm(&spec).unwrap();
         eprintln!("LLVM IR:\n{}", &ir[..ir.len().min(500)]);

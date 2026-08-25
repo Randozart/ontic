@@ -215,13 +215,7 @@ fn run_one(
     cfg: &SiegeConfig,
     deps: &interp::DepMap,
 ) -> Result<Survivor, Rejection> {
-    let tier = if gen.wrapping {
-        interp::Tier::wrapping()
-    } else {
-        interp::Tier::checked()
-    };
     let ictx = interp::Ctx {
-        tier,
         deps: std::sync::Arc::new(deps.clone()),
     };
     let _ = &ictx;
@@ -622,20 +616,6 @@ fn Ledger.total(%items: List<Int>) -> Int
     }
 
     #[test]
-    fn test_wrapping_tier_survives_overflow_values() {
-        // i64::MAX-scale sums would kill the checked tier; declared wrapping
-        // makes them defined semantics, so the honest fold survives.
-        let w = gen::parse(
-            "fn f(%items: List<Int>) -> Int\n  wrapping\n  => [1] -> 1\n  => [] -> 0\n",
-        )
-        .unwrap();
-        assert!(w.wrapping);
-        let texts = vec![("honest".to_string(), HONEST.to_string())];
-        let r = run(&w, &texts, &SiegeConfig::default(), &interp::DepMap::new()).expect("gen valid");
-        assert_eq!(r.survivors.len(), 1, "{:?}", r.rejections);
-    }
-
-    #[test]
     fn test_checked_tier_still_kills_overflow_reachable() {
         // Passes both visible examples; probe rows with 3+ elements blow
         // past i64 under repeated ×1e9 — checked tier must kill at S5.
@@ -652,10 +632,9 @@ fn Ledger.total(%items: List<Int>) -> Int
     }
 
     #[test]
-    fn test_canonical_includes_wrapping() {
+    fn test_canonical_stable() {
         let plain = gen::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
-        let wrap = gen::parse("fn f(%a: Int) -> Int\n  wrapping\n  => 1 -> 2\n").unwrap();
-        assert_ne!(plain.canonical(), wrap.canonical());
+        assert_eq!(plain.canonical(), plain.canonical());
     }
 }
 
@@ -686,7 +665,6 @@ mod compose_tests {
             "Stats.mean".to_string(),
             interp::DepFn {
                 cand: mean_cand,
-                tier: interp::Tier::wrapping(),
             },
         );
 

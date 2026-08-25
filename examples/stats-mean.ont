@@ -1,5 +1,4 @@
 // Mean of a float list — the first lib-graduation candidate.
-wrapping
 fn Stats.mean(%xs: List<F64>) -> F64
   => [2.0, 4.0] -> 3.0 ± 1e-9
   => [] -> 0.0 ± 0

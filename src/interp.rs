@@ -31,62 +31,26 @@ impl std::fmt::Display for EvalError {
 
 pub type Env = HashMap<String, Value>;
 
-/// Evaluation semantics tier. `wrapping` mirrors a gen's declared wrapping
-/// clause: arithmetic wraps mod 2^64 and only division/modulo-by-zero are
-/// errors. Default (checked) kills candidates on any overflow so probes can
-/// expose unguarded paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Tier {
-    pub wrapping: bool,
-}
-
-impl Tier {
-    pub fn checked() -> Self {
-        Tier { wrapping: false }
-    }
-    pub fn wrapping() -> Self {
-        Tier { wrapping: true }
-    }
-}
-
-/// A resolvable vault dependency: its parsed candidate plus its own tier.
+/// A resolvable vault dependency: its parsed candidate.
 #[derive(Debug, Clone)]
 pub struct DepFn {
     pub cand: crate::sketch::Candidate,
-    pub tier: Tier,
 }
 
 pub type DepMap = std::collections::HashMap<String, DepFn>;
 
-/// Runtime context: semantics tier + resolvable vault dependencies.
+/// Runtime context: resolvable vault dependencies. Arithmetic is checked:
+/// overflow kills the candidate so probes can expose unguarded paths.
 #[derive(Debug, Clone)]
 pub struct Ctx {
-    pub tier: Tier,
     pub deps: std::sync::Arc<DepMap>,
 }
 
 impl Ctx {
     pub fn checked() -> Self {
         Ctx {
-            tier: Tier::checked(),
             deps: std::sync::Arc::new(DepMap::new()),
         }
-    }
-    pub fn wrapping() -> Self {
-        Ctx {
-            tier: Tier::wrapping(),
-            deps: std::sync::Arc::new(DepMap::new()),
-        }
-    }
-    /// Tier-only constructor sharing the empty dep table.
-    pub fn of(tier: Tier) -> Self {
-        Ctx {
-            tier,
-            deps: std::sync::Arc::new(DepMap::new()),
-        }
-    }
-    pub fn is_wrapping(&self) -> bool {
-        self.tier.wrapping
     }
 }
 
@@ -488,11 +452,7 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
                 return Ok(Value::Float(-f));
             }
             let v = int_of(&inner_v)?;
-            if ctx.is_wrapping() {
-                Ok(Value::Int(v.wrapping_neg()))
-            } else {
-                v.checked_neg().map(Value::Int).ok_or(EvalError::Overflow)
-            }
+            v.checked_neg().map(Value::Int).ok_or(EvalError::Overflow)
         }
         Expr::UnOp(UnOp::Not, inner) => match eval_ctx(inner, env, ctx)? {
             Value::Bool(b) => Ok(Value::Bool(!b)),
@@ -742,25 +702,22 @@ fn eval_binop(
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let a = int_of(&lv)?;
             let b = int_of(&rv)?;
-            let out = match (op, ctx.tier.wrapping) {
-                (BinOp::Add, true) => Some(a.wrapping_add(b)),
-                (BinOp::Sub, true) => Some(a.wrapping_sub(b)),
-                (BinOp::Mul, true) => Some(a.wrapping_mul(b)),
-                (BinOp::Add, false) => a.checked_add(b),
-                (BinOp::Sub, false) => a.checked_sub(b),
-                (BinOp::Mul, false) => a.checked_mul(b),
-                (_, _) if matches!(op, BinOp::Div) => {
+            let out = match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                BinOp::Div => {
                     if b == 0 {
                         return Err(EvalError::DivByZero);
                     }
                     a.checked_div(b)
                 }
-                (_, _) => {
+                _ => {
                     if b == 0 {
                         return Err(EvalError::ModByZero);
                     }
-                    // Wrapping remainder is the sign-of-dividend semantics
-                    // matching x86 idiv — same as checked for in-domain values.
+                    // Checked remainder: sign-of-dividend semantics matching
+                    // x86 idiv — same for all in-domain values.
                     a.checked_rem(b)
                 }
             };

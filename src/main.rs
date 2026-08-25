@@ -128,7 +128,6 @@ fn cmd_check(path: &str) -> i32 {
             println!("gen      : {}", w.path);
             println!("params    : {}", w.params.len());
             println!("invariants: {}", w.invariants.len());
-            println!("tier      : {}", if w.wrapping { "wrapping" } else { "checked" });
             if !w.hints.is_empty() {
                 println!("hints     : {} (advisory)", w.hints.len());
                 for h in &w.hints {
@@ -569,7 +568,6 @@ fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<siev
             &s.candidate.params,
             &s.candidate.ret,
             &s.candidate.body,
-            w.wrapping,
             &resolved.calls,
         ) {
             Ok(cand_mlir) => {
@@ -657,11 +655,6 @@ fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
     for path in &w.deps {
         if let Some(entry) = v.find_by_path(path) {
             if let Ok(cand) = ontic::sketch::parse(&entry.sketch_text) {
-                let tier = if entry.wrapping {
-                    interp::Tier::wrapping()
-                } else {
-                    interp::Tier::checked()
-                };
                 // The call symbol is the func name inside the dep's module.
                 let symbol = entry
                     .mlir
@@ -671,7 +664,7 @@ fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
                     .map(|i| entry.mlir[..].split("func.func @").nth(1).unwrap()[..i].trim().to_string());
                 map.insert(
                     path.clone(),
-                    interp::DepFn { cand: cand.clone(), tier },
+                    interp::DepFn { cand: cand.clone() },
                 );
                 ontic::vault::record_reuse(&vault_dir, &entry.key, &w_key);
                 if let Some(sym) = symbol {
@@ -743,7 +736,6 @@ fn emit_and_store(
         &survivor.candidate.params,
         &survivor.candidate.ret,
         &survivor.candidate.body,
-        w.wrapping,
         &resolved.calls,
     ) {
         Ok(m) => m,
@@ -1034,7 +1026,6 @@ fn emit_ous(
         &survivor.candidate.params,
         &survivor.candidate.ret,
         &survivor.candidate.body,
-        w.wrapping,
         &resolved.calls,
     ) {
         Ok(m) => m,
@@ -1066,7 +1057,6 @@ fn emit_ous(
         key: key.to_string(),
         name: survivor.candidate.name.clone(),
         signature: String::new(),
-        wrapping: w.wrapping,
         sketch_text: survivor.source_text.clone(),
         mlir: cand_m.clone(),
     };
@@ -1216,7 +1206,6 @@ fn cmd_lib_build(args: &[String]) -> i32 {
                 &cand.params,
                 &cand.ret,
                 &cand.body,
-                entry.wrapping,
                 &lower::CallMap::new(),
             )
             .unwrap();
@@ -1287,7 +1276,6 @@ fn cmd_lib_build(args: &[String]) -> i32 {
             &cand.params,
             &cand.ret,
             &cand.body,
-            g.wrapping,
             &lower::CallMap::new(),
         )
         .unwrap();

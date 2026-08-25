@@ -8,7 +8,6 @@ contract only — never implementations.
 
 A .ont file contains one function per top-level block:
 
-  wrapping
   use <Full.Path.Of.Dep>
   fn <Namespace>.<name>(%a: T, %b: List<F64>, %n: Int) -> <T>
     | <invariant over params>
@@ -16,8 +15,9 @@ A .ont file contains one function per top-level block:
     => <inputs> -> <output> ± <tol>
     ?? <hidden input> -> <hidden output> ± <tol>
 
-- Types: Int (i64), F64, Bool, List<Int>, List<F64>. Integers WRAP mod 2^64.
-- `wrapping` line declares wrap semantics (required for float kernels).
+- Types: Int (i64), F64, F32, Bool, List<Int>, List<F64>, List<F32>.
+- Integer overflow is a runtime error: keep intermediate values in range
+  (bound them with invariants or use folds with small domains).
 - `use` lines declare dependencies by FULL path exactly as listed in the
   vault inventory below; calls must also use that full path.
 - Invariants constrain inputs AND may reference `res` for postconditions.

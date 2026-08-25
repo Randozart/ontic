@@ -1,5 +1,37 @@
 # CHANGES
 
+## Changes Made on 2026-08-25
+
+### 2026-08-25 — F32/List<F32> types end-to-end + wrapping tier removed
+
+**F32 (commit d8834cc):**
+- `Ty::F32`/`Ty::ListF32` through sketch lexer/parser, checker promotion
+  rules, interp-free probe sampling, MLIR emission (`f32`, `memref<?xf32>`),
+  C headers/shims, gen parser, direct-LLVM param types.
+- Fixed `mlir_param_type` dead-arm bug: `Ty::F64 | Ty::F32 => "f64"`
+  shadowed the F32 arm, so signatures emitted f64 while bodies emitted f32.
+- FloatLit constants emit per-context type; binops/cmpf/sitofp thread
+  `float_ty`; `truncf` inserted when an f64 literal feeds an f32 op.
+- Guard shim: `stdbool.h` include; `contract_text` now translates F32
+  scalar/list invariants (previously fell back to `"true"` = dead guard);
+  ListF32 prints size field in violation evidence.
+- Verified: `F32.scale` PASS → vault (6 artifacts), header
+  `float scale(float x)`, guard fires with evidence on violation.
+
+**wrapping removal (this commit):**
+- Removed declared `wrapping` overflow tier per decision. Arithmetic is
+  checked everywhere: interp kills on overflow at S3–S5; native codegen
+  always emits widen-check-trap expansion.
+- Deleted `Tier` struct; `Ctx { deps }` only. `DepFn` carries candidate
+  only. `Emitter.wrapping` / `LlvmEmitter.wrapping` gone.
+- `Gen.wrapping` field + parse line + canonical term removed → vault keys
+  change on re-solve. Old `.ous` manifests still load (unknown keys ignored).
+- Scrubbed ~20 example files; deleted examples/ledger-wrapping.ont;
+  README overflow-tiers section rewritten; ask_langref updated (F32 listed,
+  wrap semantics replaced by checked-domain guidance).
+- sha256.rs / rng.rs `wrapping_*` internals untouched (unrelated).
+- Verified: build clean, 154/154 tests, matvec re-solve PASS→VAULTED.
+
 ## Changes Made on 2026-08-22
 
 ### 2026-08-22 (session 1) — M0 scaffold + M1 forge live

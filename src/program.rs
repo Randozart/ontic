@@ -419,7 +419,6 @@ mod tests {
         }
         let src = "\
 fn Ledger.total(%items: List<Int>) -> Int
-  wrapping
   => [1,2,3] -> 6
 
 fn Twice(%n: Int) -> Int
@@ -461,7 +460,6 @@ end
                 &cand.params,
                 &cand.ret,
                 &cand.body,
-                w.wrapping,
                 &crate::lower::CallMap::new(),
             )
             .expect("lowers");
@@ -512,7 +510,6 @@ end
             &cand.params,
             &cand.ret,
             &cand.body,
-            w.wrapping,
             &crate::lower::CallMap::new(),
         )
         .unwrap();
@@ -567,7 +564,6 @@ mod ffi_tests {
             &cand.params,
             &cand.ret,
             &cand.body,
-            true,
             &crate::lower::CallMap::new(),
         )
         .unwrap();

@@ -528,8 +528,6 @@ fn infer_binop(
                 | (Ty::ListF32, Ty::ListF32) => Ok(Ty::ListF32),
                 (Ty::ListF32, Ty::F64) | (Ty::F64, Ty::ListF32) => Ok(Ty::ListF64),
                 (Ty::ListF64, Ty::F32) | (Ty::F32, Ty::ListF64) => Ok(Ty::ListF64),
-                (Ty::ListF32, Ty::F64) | (Ty::F64, Ty::ListF32) => Ok(Ty::ListF64),
-                (Ty::ListF64, Ty::F32) | (Ty::F32, Ty::ListF64) => Ok(Ty::ListF64),
                 (Ty::ListInt, Ty::F64) | (Ty::F64, Ty::ListInt) => Ok(Ty::ListF64),
                 (Ty::ListInt, Ty::F32) | (Ty::F32, Ty::ListInt) => Ok(Ty::ListF32),
                 _ => Err(format!("arith on {} vs {}", lt.name(), rt.name())),

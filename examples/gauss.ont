@@ -1,4 +1,3 @@
-wrapping
 fn Gauss.weight(%dx: F64, %dy: F64, %sigma: F64) -> F64
   | %sigma > 0.0
   hint "Gaussian falloff on squared distance: exp(-(dx*dx + dy*dy) / (2 * sigma * sigma)). Never use to_int."

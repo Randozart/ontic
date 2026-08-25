@@ -31,7 +31,6 @@ fn Stats.rms(%xs: List<F64>) -> F64
 
 | Marker | Meaning |
 |--------|---------|
-| `wrapping` | overflow tier: mod 2^64, bit-exact interp↔native |
 | `\|%res >= 0` | invariant: guides forge AND bounds probe oracle |
 | `=> [2,8] -> 5.83 ± tol` | **transparent** evidence: forge sees this |
 | `?? [3] -> 1.73 ± tol` | **opaque** evidence: held out; overfit killer |
@@ -40,7 +39,6 @@ fn Stats.rms(%xs: List<F64>) -> F64
 ### A list transform
 
 ```ont
-wrapping
 fn Transform.translate_scale(%pts: List<F64>, %s: F64, %off: F64) -> List<F64>
   hint "scale then translate: map(%v in %pts) { %v * %s + %off }"
   => [1.0, 2.0], 2.0, 10.0 -> [12.0, 14.0]
@@ -51,7 +49,6 @@ fn Transform.translate_scale(%pts: List<F64>, %s: F64, %off: F64) -> List<F64>
 ### A matrix operation
 
 ```ont
-wrapping
 fn Linalg.matvec(%mat: List<F64>, %vec: List<F64>) -> List<F64>
   hint "row-major NxN; use map over row indices, inner fold per row"
   => [1.0, 0.0, 0.0, 1.0], [3.0, 7.0] -> [3.0, 7.0] ± 1e-12
@@ -114,7 +111,6 @@ rms = po.define(
     name="Stats.rms",
     params={"xs": po.List[po.F64]},
     ret=po.F64,
-    tier="wrapping",
     evidence=[
         ([2.0, 8.0], 5.830951894845301),
         ([1.0, 0.0], 1.0),
@@ -129,7 +125,7 @@ rms([2.0, 8.0])  # → 5.830951894845301 at native speed
 #### Decorator
 
 ```python
-@po.kernel(tier="wrapping", evidence=[([21], 42)])
+@po.kernel(evidence=[([21], 42)])
 def twice(n: int) -> int:
     """Double the input."""
 ```
@@ -144,7 +140,6 @@ rms = po.gen({
     "name": "Stats.rms",
     "params": {"xs": "List<F64>"},
     "ret": "F64",
-    "tier": "wrapping",
     "invariants": ["res >= 0"],
     "evidence": [([2.0, 8.0], 5.831)],
 })
@@ -166,13 +161,12 @@ the vault — solve once, use forever.
 Trust scales with sieve strength, not model strength. Every capability gain
 came from verifier work while the model stayed frozen.
 
-## Overflow tiers
+## Overflow semantics
 
-| Tier | Syntax | Semantics |
-|------|--------|-----------|
-| wrapping | `wrapping` line | mod 2^64; bit-exact interp↔native; LLVM free to optimize |
-| checked *(default)* | absent | overflow kills candidates in sieve; traps natively |
-| proven *(M3)* | automatic | Z3 absence proof ⇒ flag-free codegen |
+Integer arithmetic is checked: overflow kills candidates in the sieve and
+traps natively. Keep intermediate values in range via invariants or small
+domains. A future `proven` tier (M3) plans Z3 absence proofs for flag-free
+codegen.
 
 Speed requires declaration.
 

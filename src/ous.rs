@@ -37,7 +37,6 @@ pub fn pack(entry: &Entry, obj_bytes: &[u8]) -> Vec<u8> {
     let manifest = serde_json::json!({
         "name": entry.name,
         "signature": entry.signature,
-        "wrapping": entry.wrapping,
         "key": entry.key,
     });
     write_section(&mut out, manifest.to_string().as_bytes());
@@ -63,7 +62,6 @@ pub fn pack_full(entry: &Entry, obj_bytes: &[u8], header_text: &str) -> Vec<u8> 
     let manifest = serde_json::json!({
         "name": entry.name,
         "signature": entry.signature,
-        "wrapping": entry.wrapping,
         "key": entry.key,
     });
     write_section(&mut out, manifest.to_string().as_bytes());
@@ -119,7 +117,6 @@ mod tests {
             key: "abc123".to_string(),
             name: "mean".to_string(),
             signature: "fn Stats.mean(%xs: List<F64>) -> F64".to_string(),
-            wrapping: true,
             sketch_text: "fn @mean(%xs: List<F64>) -> F64 { 0.0 }".to_string(),
             mlir: "module {\n  func.func @mean(%xs: memref<?xf64>) -> f64 {\n    return 0.0 : f64\n  }\n}".to_string(),
         }
@@ -140,7 +137,6 @@ mod tests {
         assert_eq!(unpacked.obj_bytes, obj);
         assert_eq!(unpacked.header_text, hdr);
         assert_eq!(unpacked.manifest["name"], "mean");
-        assert_eq!(unpacked.manifest["wrapping"], true);
     }
 
     #[test]

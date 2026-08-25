@@ -1,0 +1,47 @@
+// Metrics: population statistics over one F64 list.
+// Semi-complex on purpose: each gen nests let/fold/map/index, and the
+// opaque evidence forces the general form rather than memorized outputs.
+
+fn Metrics.sum(%xs: List<F64>) -> F64
+  | %res >= 0.0
+  hint "fold %v in %xs, %acc from 0.0 { %acc + %v }"
+  => [1.0, 2.0, 3.0] -> 6.0 ± 1e-9
+  => [] -> 0.0 ± 0
+  ?? [4.0, 5.0, 6.0, 7.0] -> 22.0 ± 1e-9
+
+fn Metrics.mean(%xs: List<F64>) -> F64
+  | len(%xs) > 0
+  hint "sum then divide: let %s = fold %v in %xs, %acc from 0.0 { %acc + %v }; %s / len(%xs)"
+  => [2.0, 4.0] -> 3.0 ± 1e-12
+  => [5.0] -> 5.0 ± 1e-12
+  ?? [1.0, 2.0, 3.0, 4.0, 5.0] -> 3.0 ± 1e-12
+
+fn Metrics.variance(%xs: List<F64>) -> F64
+  | len(%xs) > 0
+  | %res >= 0.0
+  hint "population variance: let %m = fold %v in %xs, %acc from 0.0 { %acc + %v } / len(%xs); fold %v in %xs, %acc from 0.0 { %acc + (%v - %m) * (%v - %m) } / len(%xs)"
+  => [2.0, 4.0] -> 1.0 ± 1e-9
+  => [3.0] -> 0.0 ± 0
+  ?? [1.0, 2.0, 3.0, 4.0, 5.0] -> 2.0 ± 1e-9
+
+fn Metrics.stddev(%xs: List<F64>) -> F64
+  | len(%xs) > 0
+  | %res >= 0.0
+  hint "sqrt of population variance; reuse the variance shape inside sqrt"
+  => [2.0, 4.0] -> 1.0 ± 1e-9
+  => [7.0] -> 0.0 ± 0
+  ?? [1.0, 2.0, 3.0, 4.0, 5.0] -> 1.4142135623730951 ± 1e-9
+
+fn Metrics.maxdev(%xs: List<F64>) -> F64
+  | len(%xs) > 0
+  hint "max absolute deviation from the mean: let %m = fold %v in %xs, %acc from 0.0 { %acc + %v } / len(%xs); fold over v in xs, acc from 0.0 { if abs(%v - %m) > acc { abs(%v - %m) } else { acc } }"
+  => [1.0, 2.0, 3.0] -> 1.0 ± 1e-12
+  => [5.0] -> 0.0 ± 0
+  ?? [1.0, 1.0, 1.0, 5.0] -> 2.0 ± 1e-12
+
+fn Metrics.zscores(%xs: List<F64>) -> List<F64>
+  | len(%xs) > 0
+  | len(%res) == len(%xs)
+  hint "standardize each element: mean m = sum/len, std s = sqrt(var); map(%v in %xs) { (%v - m) / s }"
+  => [2.0, 4.0] -> [ -1.0, 1.0 ] ± 1e-9
+  ?? [1.0, 2.0, 3.0] -> [ -1.224744871391589, 0.0, 1.224744871391589 ] ± 1e-9

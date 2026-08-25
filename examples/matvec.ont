@@ -1,4 +1,3 @@
-wrapping
 fn Linalg.matvec(%mat: List<F64>, %vec: List<F64>) -> List<F64>
   | len(%vec) > 0
   | len(%mat) == len(%vec) * len(%vec)

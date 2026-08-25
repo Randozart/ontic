@@ -1,4 +1,3 @@
-wrapping
 fn Linalg.matmul(%a: List<F64>, %b: List<F64>, %n: Int) -> List<F64>
   | %n > 0
   | len(%a) == %n * %n

@@ -171,8 +171,6 @@ struct Emitter {
     out: String,
     counter: usize,
     indent: usize,
-    /// Wrapping tier: plain ops. Checked tier: widen-check-narrow expansion.
-    wrapping: bool,
     calls: CallMap,
 }
 
@@ -182,7 +180,6 @@ impl Emitter {
             out: String::new(),
             counter: 0,
             indent: 0,
-            wrapping: false,
             calls: CallMap::new(),
         }
     }
@@ -243,12 +240,10 @@ pub fn emit_fn(
     params: &[(String, Ty)],
     ret: &Ty,
     body: &Expr,
-    wrapping: bool,
     calls: &CallMap,
 ) -> Result<String, String> {
     let out_ty = mlir_ret_type(ret)?;
     let mut em = Emitter::new();
-    em.wrapping = wrapping;
     em.calls = calls.clone();
 
     let sig: Vec<String> = params
@@ -1570,7 +1565,7 @@ fn emit_binop(
         em.line(&stmt);
         return Ok(out);
     }
-    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) && !em.wrapping {
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
         return emit_checked_arith(op, &lv_s, &rv_s, em);
     }
     let out = em.fresh("op");
@@ -1816,7 +1811,7 @@ mod tests {
     fn lower(src: &str) -> String {
         let c = sketch::parse(src).unwrap();
         check::check(&c).unwrap();
-        emit_fn(&c.name, &c.params, &c.ret, &c.body, true, &CallMap::new()).expect("lowers")
+        emit_fn(&c.name, &c.params, &c.ret, &c.body, &CallMap::new()).expect("lowers")
     }
 
     #[test]
@@ -1860,7 +1855,7 @@ mod tests {
         )
         .unwrap();
         check::check(&c).unwrap();
-        let ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, true, &CallMap::new())
+        let ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, &CallMap::new())
             .expect("lowers");
         assert!(
             ir.contains("memref<?xf64>"),
@@ -1896,16 +1891,12 @@ mod tier_tests {
     use crate::sketch;
 
     #[test]
-    fn test_checked_tier_expands_wide_check_and_trap() {
+    fn test_checked_arith_expands_wide_check_and_trap() {
         let c = sketch::parse("fn @f(%a: Int, %b: Int) -> Int { %a + %b }").unwrap();
-        let ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, false, &CallMap::new()).unwrap();
+        let ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, &CallMap::new()).unwrap();
         assert!(ir.contains("ontic_trap"), "missing trap decl");
         assert!(ir.contains("i128"));
         assert!(ir.contains("scf.if"));
-        // Wrapping tier of the same body stays plain.
-        let plain = emit_fn(&c.name, &c.params, &c.ret, &c.body, true, &CallMap::new()).unwrap();
-        assert!(!plain.contains("i128"));
-        assert!(plain.contains("arith.addi"));
     }
 }
 
@@ -2488,7 +2479,7 @@ mod hpp_tests {
 
     fn matvec_gen() -> Vec<crate::sketch::Expr> {
         let g = crate::gen::parse(
-            "wrapping\nuse Linalg.matvec\nfn T.m(%m: List<F64>, %v: List<F64>) -> List<F64>\n  | len(%v) > 0\n  | len(%m) == len(%v) * len(%v)\n  => [1.0], [2.0] -> [2.0]\n",
+            "use Linalg.matvec\nfn T.m(%m: List<F64>, %v: List<F64>) -> List<F64>\n  | len(%v) > 0\n  | len(%m) == len(%v) * len(%v)\n  => [1.0], [2.0] -> [2.0]\n",
         )
         .unwrap();
         g.invariants
@@ -2525,7 +2516,7 @@ mod hpp_tests {
         .unwrap();
         // Attach an invariant manually via gen parse instead:
         let gg = crate::gen::parse(
-            "wrapping\nfn G.w(%x: F64, %sigma: F64) -> F64\n  | %sigma > 0.0\n  => 1.0, 1.0 -> 1.0\n",
+            "fn G.w(%x: F64, %sigma: F64) -> F64\n  | %sigma > 0.0\n  => 1.0, 1.0 -> 1.0\n",
         )
         .unwrap();
         let _ = g;
@@ -2544,7 +2535,7 @@ mod hpp_tests {
     fn test_hpp_untranslated_listed() {
         // res-referencing postconditions are outside the v1 subset.
         let gg = crate::gen::parse(
-            "wrapping\nfn G.p(%a: List<F64>) -> F64\n  | len(%a) > 0 && res >= 0.0\n  => [1.0] -> 1.0\n",
+            "fn G.p(%a: List<F64>) -> F64\n  | len(%a) > 0 && res >= 0.0\n  => [1.0] -> 1.0\n",
         )
         .unwrap();
         let h = emit_header_hpp(
@@ -2739,7 +2730,7 @@ mod shim_tests {
     #[test]
     fn test_shim_scalar_preconditions() {
         let g = crate::gen::parse(
-            "wrapping\nfn GeoSum.g(%r: F64) -> F64\n\
+            "fn GeoSum.g(%r: F64) -> F64\n\
              | %r >= 0.0 && %r < 1.0\n\
              => 0.5 -> 2.0 ± 0.001\n",
         )
@@ -2758,7 +2749,7 @@ mod shim_tests {
     #[test]
     fn test_shim_int_sentinel() {
         let g = crate::gen::parse(
-            "wrapping\nfn Foo.f(%x: Int) -> Int\n\
+            "fn Foo.f(%x: Int) -> Int\n\
              | %x > 0\n\
              => 1 -> 1\n",
         )
@@ -2771,7 +2762,7 @@ mod shim_tests {
     #[test]
     fn test_shim_list_shape_guard() {
         let g = crate::gen::parse(
-            "wrapping\nfn Dot.dot(%a: List<F64>, %b: List<F64>) -> F64\n\
+            "fn Dot.dot(%a: List<F64>, %b: List<F64>) -> F64\n\
              | len(%a) == len(%b)\n\
              => [1.0], [2.0] -> 2.0\n",
         )

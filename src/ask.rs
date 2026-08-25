@@ -285,13 +285,11 @@ mod tests {
 
     const DRAFT_A: &str = "\
 === file: inner.ont ===
-wrapping
 fn Inner.double(%x: Int) -> Int
   => 2 -> 4
 ?? 3 -> 6
 === end ===
 === file: outer.ont ===
-wrapping
 use Inner.double
 fn Outer.quad(%x: Int) -> Int
   hint \"double(double(x))\"
@@ -306,7 +304,7 @@ fn Outer.quad(%x: Int) -> Int
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].filename, "inner.ont");
         assert_eq!(nodes[1].filename, "outer.ont");
-        assert!(nodes[0].text.starts_with("wrapping"));
+        assert!(nodes[0].text.starts_with("fn Inner.double"));
     }
 
     #[test]
@@ -328,7 +326,7 @@ fn Outer.quad(%x: Int) -> Int
 
     #[test]
     fn test_validate_nodes_rejects_invariant_violating_example() {
-        let bad = "=== file: bad.ont ===\nwrapping\nfn B.f(%n: Int, %a: List<Int>) -> Int\n  | len(%a) == %n * %n\n  => 1, [7] -> 7\n?? 2, [1,2,3,4] -> 10\n=== end ===";
+        let bad = "=== file: bad.ont ===\nfn B.f(%n: Int, %a: List<Int>) -> Int\n  | len(%a) == %n * %n\n  => 1, [7] -> 7\n?? 2, [1,2,3,4] -> 10\n=== end ===";
         let nodes = parse_tree(bad).unwrap();
         // example n=1 with 1-elem list is fine; make it violate:
         let bad = bad.replace("=> 1, [7] -> 7", "=> 2, [7] -> 7");
@@ -348,14 +346,12 @@ fn Outer.quad(%x: Int) -> Int
     fn test_topo_order_detects_cycle() {
         let cyc = "\
 === file: a.ont ===
-wrapping
 use B.g
 fn A.f(%x: Int) -> Int
   => 1 -> 2
 ?? 3 -> 6
 === end ===
 === file: b.ont ===
-wrapping
 use A.f
 fn B.g(%x: Int) -> Int
   => 1 -> 2

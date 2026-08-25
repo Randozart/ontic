@@ -1,4 +1,3 @@
-wrapping
 use Chain.mv2
 use Linalg.matvec
 fn Chain.energy(%mat: List<F64>, %vec: List<F64>) -> F64
