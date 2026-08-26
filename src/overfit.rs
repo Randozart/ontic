@@ -144,6 +144,16 @@ fn walk(e: &Expr, leaked: &HashSet<i64>, st: &mut Stats) {
             walk(v, leaked, st);
             walk(b, leaked, st);
         }
+        Expr::FlatMap { list, body, .. } => {
+            walk(list, leaked, st);
+            walk(body, leaked, st);
+        }
+        Expr::Builtin3(_, a, b, c, d) => {
+            walk(a, leaked, st);
+            walk(b, leaked, st);
+            walk(c, leaked, st);
+            walk(d, leaked, st);
+        }
         Expr::Fold { list, init, body, .. } => {
             st.has_fold = true;
             walk(list, leaked, st);
@@ -186,12 +196,16 @@ fn guard_uses_example_literal(
 
 fn mentions_var(e: &Expr) -> bool {
     match e {
+        Expr::FlatMap { list, body, .. } => mentions_var(list) || mentions_var(body),
         Expr::LetTup(_, v, b) => mentions_var(v) || mentions_var(b),
         Expr::Var(_) => true,
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::ListLit(_) | Expr::FloatListLit(_) => false,
         Expr::UnOp(_, i) => mentions_var(i),
         Expr::Builtin(_, i) => mentions_var(i),
         Expr::Builtin2(_, a, b) => mentions_var(a) || mentions_var(b),
+        Expr::Builtin3(_, a, b, c, d) => {
+            mentions_var(a) || mentions_var(b) || mentions_var(c) || mentions_var(d)
+        }
         Expr::Tuple(items) => items.iter().any(mentions_var),
         Expr::Map { var, list, body } => {
             let _ = var;

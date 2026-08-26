@@ -546,11 +546,20 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
                     &report,
                 );
             }
-            let winner = report.survivors.first().unwrap();
-            if !store {
-                return 0;
+            match report.survivors.first() {
+                Some(winner) => {
+                    if !store {
+                        return 0;
+                    }
+                    emit_and_store(&w, winner, &resolved, &fcfg, &first_prompt)
+                }
+                None => {
+                    eprintln!(
+                        "no candidate survived native differential (all natives unproven)"
+                    );
+                    1
+                }
             }
-            emit_and_store(&w, winner, &resolved, &fcfg, &first_prompt)
         }
     }
 }
@@ -558,13 +567,14 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
 /// When the LLVM toolchain is present, re-time every survivor on real
 /// compiled objects and re-rank by that. Interpreter timing remains the
 /// fallback ordering; the native table is the honest one.
-fn native_rerank(_w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<sieve::Survivor>) {
+fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<sieve::Survivor>) {
     let dep_mlirs: Vec<String> = resolved.mlirs.clone();
     if pipeline::find_tool("mlir-opt").is_none() || pipeline::find_tool("llc").is_none() {
         println!("native bench: toolchain missing, interpreter ranking stands");
         return;
     }
     let mut measured: Vec<(sieve::Survivor, u64)> = Vec::new();
+    let mut native_failed: Vec<String> = Vec::new();
     for s in survivors.iter() {
         match lower::emit_fn(
             &s.candidate.name,
@@ -594,17 +604,45 @@ fn native_rerank(_w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<sie
                     sketch::Ty::Tuple(cs) => cs.iter().map(kind_of).collect(),
                     one => vec![kind_of(one)],
                 };
-                // S7 input sizing: fixed 1024-element probe buffer, 2000 iters.
-                match pipeline::bench_native(&mlir, &s.candidate.name, &kinds, 2_000, &[], &ret_kinds) {
-                    Ok(ns) => measured.push((s.clone(), ns)),
-                    Err(e) => eprintln!(
-                        "native bench failed for {}: {} (interpreter ranking stands for this candidate)",
+                // Real spec-shaped input row: transparent examples satisfy
+                // the invariants by definition.
+                let row: Vec<crate::gen::Value> = w
+                    .transparent
+                    .first()
+                    .map(|ex| ex.inputs.clone())
+                    .unwrap_or_default();
+                // S7: bench on the real row, then GR6 differential parity —
+                // native must reproduce the oracle's VALUE, not merely run.
+                let benched = pipeline::bench_native(
+                    &mlir, &s.candidate.name, &kinds, 2_000, &[], &ret_kinds, &row,
+                );
+                if let Err(e) = benched {
+                    eprintln!(
+                        "KILLED {} native-exec / differential-unproven : {}",
                         s.candidate.name, e
-                    ),
+                    );
+                    native_failed.push(s.candidate.name.clone());
+                    continue;
                 }
+                if let Err(e) = differential_parity(&mlir, &s.candidate, &resolved.map, &row) {
+                    eprintln!("KILLED {} differential-mismatch : {}", s.candidate.name, e);
+                    native_failed.push(s.candidate.name.clone());
+                    continue;
+                }
+                let ns = pipeline::bench_native(
+                    &mlir, &s.candidate.name, &kinds, 2_000, &[], &ret_kinds, &row,
+                )
+                .unwrap_or_else(|_| s.ns_per_call);
+                measured.push((s.clone(), ns));
             }
-            Err(e) => eprintln!("lowering failed during native rerank: {}", e),
+            Err(e) => {
+                eprintln!("lowering failed during native rerank: {}", e);
+                native_failed.push(s.candidate.name.clone());
+            }
         }
+    }
+    if !native_failed.is_empty() {
+        survivors.retain(|s| !native_failed.contains(&s.candidate.name));
     }
     if !measured.is_empty() {
         measured.sort_by_key(|(s, ns)| (*ns, sieve::ast_size(&s.candidate.body)));
@@ -612,6 +650,97 @@ fn native_rerank(_w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<sie
             s.ns_per_call = ns;
             s
         }).collect();
+    }
+}
+
+
+/// Differential value parity: oracle vs native on one row. Ok when the
+/// return shape has a supported driver AND values agree; Err kills.
+fn differential_parity(
+    mlir: &str,
+    cand: &sketch::Candidate,
+    deps: &interp::DepMap,
+    row: &[crate::gen::Value],
+) -> Result<(), String> {
+    use crate::gen::Value;
+    let ret_spec = match &cand.ret {
+        sketch::Ty::Int | sketch::Ty::Bool => pipeline::RetSpec::I64,
+        sketch::Ty::F64 => pipeline::RetSpec::F64,
+        sketch::Ty::F32 => pipeline::RetSpec::F32,
+        sketch::Ty::ListF64 => pipeline::RetSpec::ListF64,
+        _ => return Ok(()), // List<Int>/tuple ret drivers: parity TODO
+    };
+    let mut lists_i: Vec<Vec<i64>> = Vec::new();
+    let mut lists_f: Vec<Vec<f64>> = Vec::new();
+    let lists_f32: Vec<Vec<f64>> = Vec::new();
+    let mut si_i = Vec::new();
+    let mut si_f = Vec::new();
+    let si_f32 = Vec::new();
+    for v in row {
+        match v {
+            Value::Int(x) => si_i.push(*x),
+            Value::Bool(b) => si_i.push(*b as i64),
+            Value::Float(f) => si_f.push(*f),
+            Value::List(vs) => lists_i.push(vs.clone()),
+            Value::FloatList(vs) => lists_f.push(vs.clone()),
+            Value::Tuple(_) => return Ok(()),
+        }
+    }
+    let ictx = interp::Ctx {
+        deps: std::sync::Arc::new(deps.clone()),
+    };
+    let expect = interp::eval_candidate(cand, row, &ictx)
+        .map_err(|e| format!("oracle re-eval failed: {e}"))?;
+    let want = match &expect {
+        Value::Int(v) => *v as f64,
+        Value::Bool(b) => *b as i64 as f64,
+        Value::Float(f) => *f,
+        _ => f64::NAN, // list/tuple handled below
+    };
+    let kinds: Vec<pipeline::CK> = cand
+        .params
+        .iter()
+        .zip(row.iter())
+        .map(|((_, t), v)| match (t, v) {
+            (sketch::Ty::ListInt, _) => pipeline::CK::List,
+            (sketch::Ty::ListF64, _) | (_, Value::FloatList(_)) => pipeline::CK::ListF64,
+            (sketch::Ty::ListF32, _) => pipeline::CK::ListF32,
+            (sketch::Ty::F64, _) => pipeline::CK::F64,
+            (sketch::Ty::F32, _) => pipeline::CK::F32,
+            _ => pipeline::CK::I64,
+        })
+        .collect();
+    let got = pipeline::eval_native(
+        mlir,
+        &cand.name,
+        &kinds,
+        &lists_i,
+        &lists_f,
+        &lists_f32,
+        &si_i,
+        &si_f,
+        &si_f32,
+        ret_spec,
+        &[],
+    )
+    .map_err(|e| format!("native eval failed: {e}"))?;
+    // Shape-aware comparison.
+    if let Value::FloatList(vs) = &expect {
+        let n = got.first().copied().unwrap_or(-1.0) as usize;
+        for (i, w) in vs.iter().take(4).enumerate() {
+            let g = got.get(i + 1).copied().unwrap_or(f64::NAN);
+            if (g - w).abs() > 1e-6_f64.max(w.abs() * 1e-9) {
+                return Err(format!("elem {i}: oracle says {w}, native says {g}"));
+            }
+        }
+        let _ = n;
+        return Ok(());
+    }
+    let g = got.first().copied().unwrap_or(f64::NAN);
+    if (g - want).abs() <= 1e-6_f64.max(want.abs() * 1e-9) {
+        Ok(())
+    } else {
+        Err(format!("oracle says {want}, native says {g}"))
     }
 }
 

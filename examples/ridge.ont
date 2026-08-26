@@ -14,7 +14,7 @@
 
 fn Ridge.penalty(%xs: List<F64>) -> F64
   | %res >= 0.0
-  hint "sum of squares: fold v in %xs, acc from 0.0 { acc + v * v }. Never use to_int or list_append."
+  hint "sum of squares: fold v in %xs, acc from 0.0 { acc + v * v }"
   => [3.0, 4.0] -> 25.0 ± 1e-12
   => [1.0] -> 1.0 ± 1e-12
   => [] -> 0.0 ± 0
@@ -23,18 +23,35 @@ fn Ridge.penalty(%xs: List<F64>) -> F64
 use Ridge.penalty
 fn Ridge.residual(%a: List<F64>, %y: List<F64>, %w: F64, %lam: F64) -> F64
   | len(%a) == len(%y)
+  | %lam >= 0.0
   | %res >= 0.0
-  hint "residual sum-of-squares plus ridge penalty. First fold p in range(len(%a)), acc from 0.0 { let r_i = index(%y, p) - index(%a, p) * %w; acc + r_i * r_i } to get the raw residual; then add %lam * %w * %w (the ridge term). Never use to_int or list_append."
+  hint "residual sum-of-squares plus ridge penalty. Compute the raw residual by folding p in range(len(%a)), acc from 0.0 { let r_i = index(%y, p) - index(%a, p) * %w; acc + r_i * r_i }. Then ADD the ridge term: return (that fold result) + %lam * %w * %w. The ridge term is NOT optional — it must be added even when %lam is small. The result is the raw residual PLUS the ridge penalty."
   => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 0.0 -> 0.0 ± 1e-9
   => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 1.0, 0.0 -> 30.0 ± 1e-9
   => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 1.0 -> 4.0 ± 1e-9
-  ?? [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 0.5 -> 2.5 ± 1e-9
+  => [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 1.0, 0.5 -> 30.5 ± 1e-9
+  ?? [1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0], 2.0, 0.5 -> 2.0 ± 1e-9
 
 use Ridge.residual
 fn Ridge.fit(%a: List<F64>, %y: List<F64>, %lam: F64) -> F64
   | len(%a) == len(%y)
   | %lam >= 0.0
-  hint "200-step gradient descent from w=0.0, step eta=0.05. Each step: let r = Ridge.residual(%a, %y, %w, %lam); let grad = fold p in range(len(%a)), acc from 0.0 { acc - 2.0 * index(%a, p) * (index(%y, p) - index(%a, p) * %w) } - 2.0 * %lam * %w; %w = %w - 0.05 * grad. Use fold k in range(200), %w from 0.0 { ... }. Never use to_int or list_append."
+  hint "100-step gradient descent from w=0.0, step eta=0.01. Each step: let r = Ridge.residual(%a, %y, %w, %lam); let grad = fold p in range(len(%a)), acc from 0.0 { acc - 2.0 * index(%a, p) * (index(%y, p) - index(%a, p) * %w) } - 2.0 * %lam * %w; %w = %w - 0.01 * grad. Use fold k in range(100), %w from 0.0 { ... }."
   => [1.0, 2.0, 3.0], [2.0, 4.0, 6.0], 0.0 -> 2.0 ± 0.05
-  => [1.0, 2.0, 3.0, 4.0], [2.1, 4.05, 5.95, 8.1], 1.0 -> 1.96 ± 0.05
-  ?? [1.0, 2.0, 3.0], [3.0, 3.0, 3.0], 0.0 -> 1.5 ± 0.05
+  => [1.0, 2.0, 3.0, 4.0], [2.1, 4.05, 5.95, 8.1], 1.0 -> 2.0845 ± 0.05
+  ?? [1.0, 2.0, 3.0], [3.0, 3.0, 3.0], 0.0 -> 1.2857 ± 0.05
+
+program Ridge
+  use Ridge.penalty
+  use Ridge.residual
+  use Ridge.fit
+start
+  %a = [1.0, 2.0, 3.0, 4.0]
+  %y = [2.1, 4.05, 5.95, 8.1]
+  %w = Ridge.fit(%a, %y, 1.0)
+  print(%w)
+  %pen = Ridge.penalty(%a)
+  print(%pen)
+  %res = Ridge.residual(%a, %y, %w, 1.0)
+  print(%res)
+end

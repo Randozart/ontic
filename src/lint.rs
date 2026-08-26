@@ -6,7 +6,6 @@
 //! makes every probe row impossible and any solve vacuous.
 
 use crate::gen::{Example, Gen, Value};
-use crate::sketch::Ty;
 use crate::probes_solver;
 
 /// One lint finding.

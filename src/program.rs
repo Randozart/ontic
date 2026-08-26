@@ -263,7 +263,6 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
 
     Ok(format!(
         "#include <stdio.h>\n#include <stdlib.h>\n\n{}\
-long ontic_trap(void) {{ abort(); }}\n\n\
 int main(void) {{\n{}  return 0;\n}}\n",
         protos, body
     ))
@@ -355,7 +354,7 @@ pub fn run_in(file: &OntFile, vault_dir: &str) -> Result<Vec<String>, String> {
         bindings.push(DepBinding {
             path: dep_path.clone(),
             c_fn,
-            params_is_list: w.params.iter().map(|(_, t)| matches!(t, crate::sketch::Ty::ListInt)).collect(),
+            params_is_list: w.params.iter().map(|(_, t)| matches!(t, crate::sketch::Ty::ListInt | crate::sketch::Ty::ListF64 | crate::sketch::Ty::ListF32)).collect(),
             mlir: entry.mlir.clone(),
         });
     }
@@ -364,11 +363,19 @@ pub fn run_in(file: &OntFile, vault_dir: &str) -> Result<Vec<String>, String> {
     let c_p = dir.join("driver.c");
     let bin_p = dir.join("driver");
     std::fs::write(&c_p, c_src).map_err(|e| e.to_string())?;
+    // Trap stub: provides ontic_trap/ontic_trapf definitions for guarded calls.
+    let trap_c = dir.join("trap.c");
+    std::fs::write(
+        &trap_c,
+        "#include <stdlib.h>\nlong ontic_trap(void) { abort(); }\ndouble ontic_trapf(void) { abort(); }\n",
+    )
+    .map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
     let mut link_args: Vec<&str> = vec!["-O2", c_p.to_str().expect("c path")];
     for o in &objects {
         link_args.push(o.to_str().expect("obj path"));
     }
+    link_args.push(trap_c.to_str().expect("trap path"));
     link_args.push("-o");
     link_args.push(bin_p.to_str().expect("bin path"));
     run_cmd(&cc, &link_args)?;

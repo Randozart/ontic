@@ -154,6 +154,19 @@ pub fn render(e: &Expr) -> String {
             render(v),
             render(b)
         ),
+        FlatMap { var, list, body } => format!(
+            "flatmap({} in {}) {{ {} }}",
+            var,
+            render(list),
+            render(body)
+        ),
+        Builtin3(_b, a, c, d, f) => format!(
+            "index2({}, {}, {}, {})",
+            render(a),
+            render(c),
+            render(d),
+            render(f)
+        ),
         IntLit(v) => v.to_string(),
         FloatLit(v) => format!("{:.1}", v),
         BoolLit(b) => b.to_string(),
@@ -175,6 +188,7 @@ pub fn render(e: &Expr) -> String {
                 crate::sketch::Builtin::Min => "min",
                 crate::sketch::Builtin::MinEl => "min_el",
                 crate::sketch::Builtin::MaxEl => "max_el",
+                crate::sketch::Builtin::Index2 => "index2",
                 crate::sketch::Builtin::Sqrt => "sqrt",
                 crate::sketch::Builtin::Exp => "exp",
                 crate::sketch::Builtin::Log => "log",

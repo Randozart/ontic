@@ -71,6 +71,9 @@ pub enum Builtin {
     MinEl,
     MaxEl,
     Index,
+    /// 2D flat indexing: Index2(t, i, j, stride) ≡ index(t, i*stride + j)
+    /// with bounds checks on BOTH dimensions.
+    Index2,
     Range,
     Sum,
     Max,
@@ -116,6 +119,16 @@ pub enum Expr {
         list: Box<Expr>,
         body: Box<Expr>,
     },
+    /// Flat map: binds %var to each element; body must evaluate to a
+    /// List<T>; results concatenated in order into one flat List<T>.
+    /// The 2D-construction primitive (DP tables, per-row emission).
+    FlatMap {
+        var: String,
+        list: Box<Expr>,
+        body: Box<Expr>,
+    },
+    /// Ternary builtin: Index2(table, i, j, stride).
+    Builtin3(Builtin, Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
     /// Expression-list constructor: [e1, e2, ...]. Elements may be any expr;
     /// typechecker enforces uniform element type. Distinct from ListLit/
     /// FloatListLit (pure literals) for backward compat.
@@ -281,7 +294,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                     | "abs" | "map" | "fold" | "let" | "if" | "else" | "true"
                     | "false" | "in" | "from" | "Int" | "F64" | "F32" | "Bool"
                     | "List" | "fn" | "index" | "range" | "until"
-                    | "min_el" | "max_el"
+                    | "min_el" | "max_el" | "flatmap" | "index2"
             );
             if !is_keyword {
                 // Speculative dotted-path scan: ident ('.' ident)* then ws+'('
@@ -346,6 +359,8 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "until" => Some("until"),
                 "min_el" => Some("min_el"),
                 "max_el" => Some("max_el"),
+                "flatmap" => Some("flatmap"),
+                "index2" => Some("index2"),
                 "in" => Some("in"),
                 "from" => Some("from"),
                 "Int" => Some("Int"),
@@ -382,6 +397,7 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
             "&&" => Some("&&"),
             "||" => Some("||"),
             "->" => Some("->"),
+            "++" => Some("++"),
             _ => None,
         };
         if let Some(s) = sym2 {
@@ -708,7 +724,8 @@ impl Parser {
         let mut lhs = self.parse_mul()?;
         loop {
             let op = match self.peek() {
-                Some(Tok::Sym("+")) | Some(Tok::Sym("++")) => BinOp::Add,
+                Some(Tok::Sym("+")) => BinOp::Add,
+                Some(Tok::Sym("++")) => BinOp::Concat,
                 Some(Tok::Sym("-")) => BinOp::Sub,
                 _ => break,
             };
@@ -848,7 +865,26 @@ impl Parser {
                 self.eat_sym(")")?;
                 Ok(Expr::Call(p.clone(), args))
             }
-            Some(Tok::Word(w @ ("len" | "index" | "range" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs"))) => {
+            Some(Tok::Word("index2")) => {
+                self.pos += 1;
+                self.eat_sym("(")?;
+                let t = self.parse_expr()?;
+                self.eat_sym(",")?;
+                let i = self.parse_expr()?;
+                self.eat_sym(",")?;
+                let j = self.parse_expr()?;
+                self.eat_sym(",")?;
+                let st = self.parse_expr()?;
+                self.eat_sym(")")?;
+                Ok(Expr::Builtin3(
+                    Builtin::Index2,
+                    Box::new(t),
+                    Box::new(i),
+                    Box::new(j),
+                    Box::new(st),
+                ))
+            }
+            Some(Tok::Word(w @ ("len" | "index" | "range" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs" | "min_el" | "max_el"))) => {
                 self.pos += 1;
                 self.eat_sym("(")?;
                 let e = self.parse_expr()?;
@@ -880,6 +916,7 @@ impl Parser {
                 }
             }
             Some(Tok::Word("map")) => self.parse_map(),
+            Some(Tok::Word("flatmap")) => self.parse_flatmap(),
             Some(Tok::Word("fold")) => self.parse_fold(),
             other => {
                 let _ = other;
@@ -904,6 +941,24 @@ impl Parser {
         let body = self.parse_expr()?;
         self.eat_sym("}")?;
         Ok(Expr::Map {
+            var,
+            list: Box::new(list),
+            body: Box::new(body),
+        })
+    }
+
+    /// `flatmap(%v in <list-expr>) { <list-valued body-expr> }`
+    fn parse_flatmap(&mut self) -> Result<Expr, ParseError> {
+        self.eat_word("flatmap")?;
+        self.eat_sym("(")?;
+        let var = self.eat_pident()?;
+        self.eat_word("in")?;
+        let list = self.parse_expr()?;
+        self.eat_sym(")")?;
+        self.eat_sym("{")?;
+        let body = self.parse_expr()?;
+        self.eat_sym("}")?;
+        Ok(Expr::FlatMap {
             var,
             list: Box::new(list),
             body: Box::new(body),
@@ -1011,7 +1066,8 @@ cpath       ::= ident ("." ident)*
 callargs    ::= e (ws "," ws e)*
 unop1       ::= "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs" | "range"
 binop1      ::= "index"
-prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | binop1 ws "(" ws e ws "," ws e ws ")" | callx | "map" ws pid ws "in" ws e ws "{" ws e ws "}" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | binop1 ws "(" ws e ws "," ws e ws ")" | binop2b ws "(" ws e ws "," ws e ws "," ws e ws "," ws e ws ")" | callx | "map" ws pid ws "in" ws e ws "{" ws e ws "}" | "flatmap" ws pid ws "in" ws e ws "{" ws e ws "}" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
+binop2b     ::= "index2"
 pid         ::= "%" [a-zA-Z_] [a-zA-Z0-9_]*
 listlit     ::= "[" ws "]" | "[" ws int (ws "," ws int)* ws "]"
 int         ::= "-"? [0-9]+
@@ -1139,5 +1195,5 @@ mod until_tests {
             Expr::Fold { until, .. } => assert!(until.is_none()),
             _ => panic!(),
         }
-    }
+}
 }

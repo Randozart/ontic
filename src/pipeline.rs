@@ -22,13 +22,14 @@ pub fn scratch_dir_pub(tag: &str) -> PathBuf {
     scratch_dir(tag)
 }
 
-/// C scalar type for a component kind.
+/// C scalar type for a component kind. List kinds use the flat-MemRef
+/// descriptor struct `MR` (by-value, matching LLVM's lowered memref).
 fn kind_ctype(k: &CK) -> &'static str {
     match k {
         CK::I64 => "long",
         CK::F64 => "double",
         CK::F32 => "float",
-        _ => "void*",
+        CK::List | CK::ListF64 | CK::ListF32 => "MR",
     }
 }
 
@@ -37,7 +38,7 @@ fn kind_letter(k: &CK) -> char {
         CK::I64 => 'l',
         CK::F64 => 'd',
         CK::F32 => 'f',
-        _ => 'p',
+        _ => 'm',
     }
 }
 
@@ -48,13 +49,26 @@ pub fn tuple_tag(kinds: &[CK]) -> String {
 }
 
 /// C typedef for a tuple return: `typedef struct { T0 _0; ... } tag;`.
+/// Prepends the MR descriptor typedef when any component is a list.
 pub fn tuple_typedef(kinds: &[CK]) -> String {
+    let needs_mr = kinds
+        .iter()
+        .any(|k| matches!(k, CK::List | CK::ListF64 | CK::ListF32));
+    let mr = if needs_mr {
+        "typedef struct { void* base; void* data; long off; long size; long stride; } MR;\n"
+    } else {
+        ""
+    };
     let fields: Vec<String> = kinds
         .iter()
         .enumerate()
         .map(|(i, k)| format!("{} _{};", kind_ctype(k), i))
         .collect();
-    format!("typedef struct {{ {} }} {};", fields.join(" "), tuple_tag(kinds))
+    format!(
+        "{mr}typedef struct {{ {} }} {};",
+        fields.join(" "),
+        tuple_tag(kinds)
+    )
 }
 
 /// What a differential driver prints about the return value.
@@ -236,86 +250,100 @@ pub fn validate_mlir(mlir_path: &std::path::Path) -> Result<(), String> {
 /// params pass as plain longs. The loop accumulates results into `acc`
 /// (printed, so it survives dead-code elimination); the binary times itself
 /// with CLOCK_MONOTONIC and prints `<total_ns> <acc>`.
-pub fn bench_c_source(fn_name: &str, kinds: &[CK], iters: usize, ret_kinds: &[CK]) -> String {
-    let tup_tag = if ret_kinds.is_empty() {
-        String::new()
-    } else {
-        tuple_tag(ret_kinds)
-    };
-    let tup_typedef_text = if ret_kinds.is_empty() {
-        String::new()
-    } else {
-        tuple_typedef(ret_kinds)
-    };
-    let ret_decl = if ret_kinds.is_empty() {
-        "long".to_string()
-    } else {
-        tup_tag.clone()
-    };
+/// Timing driver fed with REAL spec-shaped inputs (a probe-plan row):
+/// list lengths satisfy the gen's shape invariants, so bounds traps only
+/// fire for genuinely broken candidates.
+pub fn bench_c_source_from_row(
+    fn_name: &str,
+    kinds: &[CK],
+    iters: usize,
+    ret_kinds: &[CK],
+    row: &[crate::gen::Value],
+) -> Result<String, String> {
+    let _ = kinds; // element types derive from the row values themselves.
     let mut proto = String::new();
     let mut decls = String::new();
-    let mut init = String::new();
     let mut call_args = String::new();
-    for (i, k) in kinds.iter().enumerate() {
+    for (i, v) in row.iter().enumerate() {
         if !proto.is_empty() {
             proto.push_str(", ");
         }
-        proto.push_str(k.proto());
-        match k {
-            CK::List | CK::ListF64 => {
-                let t = if matches!(k, CK::List) { "long" } else { "double" };
-                decls.push_str(&format!("  {}* b{} = malloc(N * sizeof({}));\n", t, i, t));
-                init.push_str(&format!(
-                    "    for (long i = 0; i < N; i++) b{0}[i] = ({1})(i % 97);\n",
-                    i, t
+        match v {
+            crate::gen::Value::Int(n) => {
+                proto.push_str("long");
+                decls.push_str(&format!("  long s{0} = {1}L;\n", i, n));
+                call_args.push_str(&format!("s{}, ", i));
+            }
+            crate::gen::Value::Bool(bv) => {
+                proto.push_str("long");
+                decls.push_str(&format!("  long s{0} = {1};\n", i, *bv as i64));
+                call_args.push_str(&format!("s{}, ", i));
+            }
+            crate::gen::Value::Float(f) => {
+                proto.push_str("double");
+                decls.push_str(&format!("  double s{0} = {1:e};\n", i, f));
+                call_args.push_str(&format!("s{}, ", i));
+            }
+            crate::gen::Value::List(vs) => {
+                proto.push_str("void*, void*, long, long, long");
+                let vals: Vec<String> = vs.iter().map(|x| x.to_string()).collect();
+                decls.push_str(&format!(
+                    "  long b{0}[] = {{{1}}};\n",
+                    i,
+                    if vals.is_empty() { "0".to_string() } else { vals.join(", ") }
                 ));
-                call_args.push_str(&format!("b{}, b{}, 0, N, 1, ", i, i));
+                call_args.push_str(&format!("b{0}, b{0}, 0, {1}, 1, ", i, vs.len().max(1)));
             }
-            CK::I64 => {
-                decls.push_str(&format!("  long s{} = 3;\n", i));
-                call_args.push_str(&format!("s{}, ", i));
+            crate::gen::Value::FloatList(vs) => {
+                proto.push_str("void*, void*, long, long, long");
+                let vals: Vec<String> = vs.iter().map(|x| format!("{:e}", x)).collect();
+                decls.push_str(&format!(
+                    "  double d{0}[] = {{{1}}};\n",
+                    i,
+                    if vals.is_empty() { "0".to_string() } else { vals.join(", ") }
+                ));
+                call_args.push_str(&format!("d{0}, d{0}, 0, {1}, 1, ", i, vs.len().max(1)));
             }
-            CK::F64 => {
-                decls.push_str(&format!("  double s{} = 3.0;\n", i));
-                call_args.push_str(&format!("s{}, ", i));
-            }
-            CK::F32 => {
-                decls.push_str(&format!("  float s{} = 3.0f;\n", i));
-                call_args.push_str(&format!("s{}, ", i));
-            }
-            CK::ListF32 => {
-                decls.push_str(&format!("  float b{0}[] = {{0.f}};\n", i));
-                init.push_str("    b0[0] = 0.f;\n");
-                call_args.push_str(&format!("b{0}, b{0}, 0, N, 1, ", i));
+            crate::gen::Value::Tuple(_) => {
+                return Err("tuple-valued bench input unsupported".to_string());
             }
         }
     }
     let tail = call_args.trim_end_matches(", ");
-    let acc_stmt = if ret_kinds.is_empty() {
-        format!("acc += {fn_name}({tail});")
-    } else {
-        // Accumulate the SUM OF SCALAR components; pointer components
-        // (list descriptors) contribute nothing — the call itself is the
-        // timed work.
-        let adds: Vec<String> = ret_kinds
-            .iter()
-            .enumerate()
-            .filter(|(_, k)| matches!(k, CK::I64 | CK::F64 | CK::F32))
-            .map(|(i, k)| {
-                let t = kind_ctype(k);
-                format!("acc += (long)r._{i}; /* {t} */")
-            })
-            .collect();
-        if adds.is_empty() {
-            format!("{{ {tup_tag} r = {fn_name}({tail}); (void)r; }}")
-        } else {
-            format!(
-                "{{ {tup_tag} r = {fn_name}({tail}); {} }}",
-                adds.join(" ")
+    // Return declaration: scalar / single-MR / tuple-of-components.
+    let (ret_decl, tup_typedef_text) = match ret_kinds {
+        [] => ("long".to_string(), String::new()),
+        [one] if !matches!(one, CK::List | CK::ListF64 | CK::ListF32) => {
+            (kind_ctype(one).to_string(), String::new())
+        }
+        [one @ (CK::List | CK::ListF64 | CK::ListF32)] => {
+            // Single memref result lowers to the bare MR descriptor.
+            let _ = one;
+            (
+                "MR".to_string(),
+                "typedef struct { void* base; void* data; long off; long size; long stride; } MR;"
+                    .to_string(),
             )
         }
+        ks => (tuple_tag(ks), tuple_typedef(ks)),
     };
-    format!(
+    let ret_type_for_stmt = ret_decl.clone();
+    let acc_stmt = if !ret_kinds.is_empty()
+        && (ret_kinds.len() > 1
+            || matches!(ret_kinds[0], CK::List | CK::ListF64 | CK::ListF32))
+    {
+        // Multi-component or list result: time the call, ignore values.
+        format!(
+            "{{ {} r = {fn_name}({tail}); (void)r; }}",
+            ret_type_for_stmt
+        )
+    } else if ret_kinds.len() == 1 {
+        let acc_t = kind_ctype(&ret_kinds[0]);
+        format!("{acc_t} r = {fn_name}({tail}); acc += (long)r;")
+    } else {
+        format!("acc += {fn_name}({tail});")
+    };
+    Ok(format!(
         r#"#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -327,12 +355,13 @@ long ontic_trap(void) {{
   extern void abort(void);
   abort();
 }}
+double ontic_trapf(void) {{
+  abort();
+}}
 
 int main(void) {{
-  const long N = 1024;
   const long ITERS = {iters};
 {decls}
-{init}
   struct timespec t0, t1;
   long acc = 0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -352,20 +381,20 @@ int main(void) {{
         tup_typedef_text = tup_typedef_text,
         iters = iters,
         decls = decls,
-        init = init,
-    )
+    ))
 }
 
 /// Build a C driver that calls the function once on FIXED inputs and prints
 /// the result (%.17g). Used by differential tests: interpreter and native
 /// must agree bit-for-bit.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn eval_c_source(
     fn_name: &str,
     kinds: &[CK],
-    list_vals: &[i64],
-    list_f64_vals: &[f64],
-    list_f32_vals: &[f64],
+    lists_i: &[Vec<i64>],
+    lists_f64: &[Vec<f64>],
+    lists_f32: &[Vec<f64>],
     scalars_i64: &[i64],
     scalars_f64: &[f64],
     scalars_f32: &[f64],
@@ -382,31 +411,25 @@ pub fn eval_c_source(
         proto.push_str(k.proto());
         match k {
             CK::List => {
-                let vals: Vec<String> = list_vals.iter().map(|v| v.to_string()).collect();
+                let g = &lists_i[li];
+                let vals: Vec<String> = g.iter().map(|v| v.to_string()).collect();
                 decls.push_str(&format!(
                     "  long b{0}[] = {{{1}}};\n",
                     li,
-                    vals.join(", ")
+                    if g.is_empty() { "0".to_string() } else { vals.join(", ") }
                 ));
-                call_args.push_str(&format!(
-                    "b{0}, b{0}, 0, {1}, 1, ",
-                    li,
-                    list_vals.len()
-                ));
+                call_args.push_str(&format!("b{0}, b{0}, 0, {1}, 1, ", li, g.len()));
                 li += 1;
             }
             CK::ListF64 => {
-                let vals: Vec<String> = list_f64_vals.iter().map(|v| format!("{:e}", v)).collect();
+                let g = &lists_f64[li];
+                let vals: Vec<String> = g.iter().map(|v| format!("{:e}", v)).collect();
                 decls.push_str(&format!(
                     "  double d{0}[] = {{{1}}};\n",
                     li,
-                    vals.join(", ")
+                    if g.is_empty() { "0".to_string() } else { vals.join(", ") }
                 ));
-                call_args.push_str(&format!(
-                    "d{0}, d{0}, 0, {1}, 1, ",
-                    li,
-                    list_f64_vals.len()
-                ));
+                call_args.push_str(&format!("d{0}, d{0}, 0, {1}, 1, ", li, g.len()));
                 li += 1;
             }
             CK::I64 => {
@@ -425,17 +448,14 @@ pub fn eval_c_source(
                 sf32 += 1;
             }
             CK::ListF32 => {
-                let vals: Vec<String> = list_f32_vals.iter().map(|v| format!("{:e}f", v)).collect();
+                let g = &lists_f32[lf32];
+                let vals: Vec<String> = g.iter().map(|v| format!("{:e}f", v)).collect();
                 decls.push_str(&format!(
                     "  float e{0}[] = {{{1}}};\n",
                     lf32,
-                    vals.join(", ")
+                    if g.is_empty() { "0".to_string() } else { vals.join(", ") }
                 ));
-                call_args.push_str(&format!(
-                    "e{0}, e{0}, 0, {1}, 1, ",
-                    lf32,
-                    list_f32_vals.len()
-                ));
+                call_args.push_str(&format!("e{0}, e{0}, 0, {1}, 1, ", lf32, g.len()));
                 lf32 += 1;
             }
         }
@@ -505,6 +525,9 @@ long ontic_trap(void) {{
   extern void abort(void);
   abort();
 }}
+double ontic_trapf(void) {{
+  abort();
+}}
 
 int main(void) {{
 {decls}
@@ -525,13 +548,14 @@ int main(void) {{
 /// Run the function once natively; returns the parsed numeric result
 /// (integer results arrive as exact f64).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn eval_native(
     mlir_text: &str,
     fn_name: &str,
     kinds: &[CK],
-    list_vals: &[i64],
-    list_f64_vals: &[f64],
-    list_f32_vals: &[f64],
+    lists_i: &[Vec<i64>],
+    lists_f64: &[Vec<f64>],
+    lists_f32: &[Vec<f64>],
     scalars_i64: &[i64],
     scalars_f64: &[f64],
     scalars_f32: &[f64],
@@ -562,9 +586,9 @@ pub fn eval_native(
     let c_text = eval_c_source(
         fn_name,
         kinds,
-        list_vals,
-        list_f64_vals,
-        list_f32_vals,
+        lists_i,
+        lists_f64,
+        lists_f32,
         scalars_i64,
         scalars_f64,
         scalars_f32,
@@ -606,6 +630,7 @@ pub fn bench_native(
     iters: usize,
     extra_mls: &[String],
     ret_kinds: &[CK],
+    row: &[crate::gen::Value],
 ) -> Result<u64, String> {
     let dir = scratch_dir("bench");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -618,8 +643,8 @@ pub fn bench_native(
     std::fs::write(&mlir_p, mlir_text).map_err(|e| e.to_string())?;
     mlir_to_llvmir(&mlir_p, &ll_mlir)?;
     object_from_ll(&ll_mlir, &o_p)?;
-    std::fs::write(&c_p, bench_c_source(fn_name, kinds, iters, ret_kinds))
-        .map_err(|e| e.to_string())?;
+    let c_text = bench_c_source_from_row(fn_name, kinds, iters, ret_kinds, row)?;
+    std::fs::write(&c_p, c_text).map_err(|e| e.to_string())?;
     let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
     // Extra dependency modules compiled alongside the candidate.
     let mut dep_objs: Vec<PathBuf> = Vec::new();
@@ -693,7 +718,7 @@ mod tests {
             &mlir,
             &cand.name,
             &[CK::List],
-            &[3, 1, 4, 1, 5, 9, 2, 6],
+            &[vec![3, 1, 4, 1, 5, 9, 2, 6]],
             &[],
             &[],
             &[],
@@ -712,10 +737,13 @@ mod tests {
 
     #[test]
     fn test_bench_harness_source_shape() {
-        let c = bench_c_source("f", &[CK::List, CK::I64], 10, &[]);
+        let c = bench_c_source_from_row("f", &[CK::List, CK::I64], 10, &[], &[Value::List(vec![3,4,5]), Value::Int(2)]).unwrap();
         assert!(c.contains("extern long f(void*, void*, long, long, long, long);"));
-        assert!(c.contains("b0, b0, 0, N, 1, s1"));
-        let c_scalar_only = bench_c_source("g", &[CK::I64], 5, &[]);
+        // Row-driven inputs: real lengths, no synthetic N-buffer fill.
+        assert!(c.contains("long b0[] = {3, 4, 5};"));
+        assert!(c.contains("b0, b0, 0, 3, 1, s1"));
+        assert!(!c.contains("malloc"), "no synthetic buffers");
+        let c_scalar_only = bench_c_source_from_row("g", &[CK::I64], 5, &[], &[Value::Int(9)]).unwrap();
         assert!(c_scalar_only.contains("extern long g(long);"));
     }
 }
@@ -740,7 +768,7 @@ mod trap_tests {
 
         // Clean inputs: both tiers agree.
         let got =
-            eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], &[], &[], RetSpec::I64, &[])
+            eval_native(&mlir, "f", &[CK::List], &[vec![3, 4, 5]], &[], &[], &[], &[], &[], RetSpec::I64, &[])
                 .expect("clean runs");
         assert_eq!(got, vec![12.0]);
 
@@ -753,7 +781,7 @@ mod trap_tests {
         assert!(killed.is_err());
         // ...and native must not return a value either.
         assert!(
-            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], &[], &[], RetSpec::I64, &[]).is_err(),
+            eval_native(&mlir, "f", &[CK::List], &[vec![i64::MAX, 1]], &[], &[], &[], &[], &[], RetSpec::I64, &[]).is_err(),
             "native returned a value where the oracle kills"
         );
     }
@@ -878,7 +906,7 @@ mod listf64_tests {
             "dot",
             &[CK::ListF64],
             &[],
-            &[1.5, 2.0, -0.5],
+            &[vec![1.5, 2.0, -0.5]],
             &[],
             &[],
             &[],
@@ -929,7 +957,7 @@ mod broadcast_tests {
             "scale",
             &[CK::ListF64],
             &[],
-            &[1.0, 2.0],
+            &[vec![1.0, 2.0]],
             &[],
             &[],
             &[],

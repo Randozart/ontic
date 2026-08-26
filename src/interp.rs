@@ -78,6 +78,7 @@ fn as_promotable(v: &Value) -> Option<f64> {
 fn eval_builtin(b: Builtin, inner: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
     let v = eval_ctx(inner, env, ctx)?;
     match b {
+        Builtin::Index2 => unreachable!("index2 routes through Builtin3"),
         Builtin::Range => match v {
             Value::Int(n) => {
                 if n < 0 || n > 10_000_000 {
@@ -418,6 +419,71 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
         Expr::FloatListLit(items) => Ok(Value::FloatList(items.clone())),
         Expr::Builtin(b, inner) => eval_builtin(*b, inner, env, ctx),
         Expr::Builtin2(b, l, r) => eval_builtin2(*b, l, r, env, ctx),
+        Expr::FlatMap { var, list, body } => {
+            // Oracle semantics: evaluate the body per element; each result
+            // must be a list of the same element kind as the source; all
+            // rows concatenated in order.
+            let (src_items, is_float_src) = match eval_ctx(list, env, ctx)? {
+                Value::List(vs) => (
+                    vs.into_iter().map(Value::Int).collect::<Vec<Value>>(),
+                    false,
+                ),
+                Value::FloatList(vs) => (
+                    vs.into_iter().map(Value::Float).collect::<Vec<Value>>(),
+                    true,
+                ),
+                other => return Err(EvalError::TypeError(format!("flatmap over {}", other))),
+            };
+            let mut flat_i: Vec<i64> = Vec::new();
+            let mut flat_f: Vec<f64> = Vec::new();
+            for item in &src_items {
+                let mut scoped = env.clone();
+                scoped.insert(var.clone(), item.clone());
+                match eval_ctx(body, &scoped, ctx)? {
+                    Value::List(row) if !is_float_src => flat_i.extend(row),
+                    Value::FloatList(row) if is_float_src => flat_f.extend(row),
+                    other => {
+                        return Err(EvalError::TypeError(format!(
+                            "flatmap row kind mismatch: {}",
+                            other
+                        ))
+                    )
+                    }
+                }
+            }
+            Ok(if is_float_src {
+                Value::FloatList(flat_f)
+            } else {
+                Value::List(flat_i)
+            })
+        }
+        Expr::Builtin3(crate::sketch::Builtin::Index2, t, i, j, st) => {
+            let v_t = eval_ctx(t, env, ctx)?;
+            let vi = int_of(&eval_ctx(i, env, ctx)?)?;
+            let vj = int_of(&eval_ctx(j, env, ctx)?)?;
+            let vs = int_of(&eval_ctx(st, env, ctx)?)?;
+            if vi < 0 || vj < 0 || vs <= 0 {
+                return Err(EvalError::IndexOutOfBounds(vi * vs + vj));
+            }
+            let pos = vi
+                .checked_mul(vs)
+                .and_then(|p| p.checked_add(vj))
+                .ok_or(EvalError::Overflow)?;
+            match v_t {
+                Value::List(items) => items
+                    .get(pos as usize)
+                    .map(|v| Value::Int(*v))
+                    .ok_or(EvalError::IndexOutOfBounds(pos)),
+                Value::FloatList(items) => items
+                    .get(pos as usize)
+                    .map(|v| Value::Float(*v))
+                    .ok_or(EvalError::IndexOutOfBounds(pos)),
+                other => Err(EvalError::TypeError(format!("index2 over {}", other))),
+            }
+        }
+        Expr::Builtin3(_, ..) => Err(EvalError::TypeError(
+            "only index2 is a ternary builtin".to_string(),
+        )),
         Expr::Map { var, list, body } => {
             let items = match eval_ctx(list, env, ctx)? {
                 Value::List(vs) => vs.into_iter().map(Value::Int).collect::<Vec<_>>(),

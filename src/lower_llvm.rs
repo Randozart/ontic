@@ -173,6 +173,12 @@ fn emit_expr(e: &Expr, em: &mut LlvmEmitter) -> Result<String, String> {
         Expr::LetTup(..) => Err(
             "direct LLVM: tuple destructuring requires the MLIR pipeline".to_string(),
         ),
+        Expr::FlatMap { .. } => Err(
+            "direct LLVM: flatmap requires the MLIR pipeline".to_string(),
+        ),
+        Expr::Builtin3(_, ..) => Err(
+            "direct LLVM: index2 requires the MLIR pipeline".to_string(),
+        ),
         Expr::IntLit(v) => {
             let r = em.fresh();
             em.line(&format!("{} = add i64 {}, 0", r, v));

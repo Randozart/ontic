@@ -1,5 +1,31 @@
 # CHANGES
 
+## Changes Made on 2026-08-26 (late)
+
+### flatmap/index2 + GR6 differential parity in solve
+
+Plan: docs/plans/2026-08-26-nested-lists-design.md.
+
+- `flatmap(%v in %xs) { list-body }` and `index2(t,i,j,stride)` through
+  all layers (lexer keywords, parser, GRAMMAR, checker, interp oracle,
+  MLIR emission with grow-and-copy acc + deallocs, honest direct-LLVM
+  rejects).
+- Bug fixes forced by the gates: `++` parsed as Add (Concat unreachable
+  from source!), concat right-copy iter_args init collision, fold
+  acc-type from init expr (memref rows carry through iter_args),
+  min_el/max_el missing from builtin word dispatch, bench trapf stub,
+  List-sentinel NULL in shims.
+- **GR6 closed in solve flow**: native_rerank now benches on the real
+  transparent-example row AND runs differential value parity vs the
+  interpreter oracle. Native exec failure or value mismatch KILLS the
+  candidate — nothing vaults unproven.
+- Result: Levenshtein passes S1–S5 + vaults natively for dup; lev's own
+  native path DIVERGES (oracle 2, native 0) and is correctly killed —
+  first candidate caught by the new gate. Root-causing the nested-fold
+  memref lowering is the next leg.
+
+Suite: 179/179.
+
 ## Changes Made on 2026-08-26 (follow-ups)
 
 ### 2026-08-26 — tuple destructuring + F32 drivers

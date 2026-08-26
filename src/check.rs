@@ -19,7 +19,7 @@ fn builtin_ty(b: Builtin, t: Ty) -> Result<Ty, String> {
             Ty::ListInt | Ty::ListF64 | Ty::ListF32 => Ok(Ty::Int),
             other => Err(format!("len of {}", other.name())),
         },
-        Builtin::Index => unreachable_index(),
+        Builtin::Index | Builtin::Index2 => unreachable_index(),
         Builtin::Range => match t {
             Ty::Int => Ok(Ty::ListInt),
             other => Err(format!("range of {}", other.name())),
@@ -211,12 +211,54 @@ fn infer_dep(
             let elem_ty = match list_ty {
                 Ty::ListInt => Ty::Int,
                 Ty::ListF64 => Ty::F64,
+                Ty::ListF32 => Ty::F32,
                 other => return Err(format!("map over {}", other.name())),
             };
             let mut scoped = env.clone();
             scoped.insert(var.clone(), elem_ty);
             let body_ty = infer_dep(body, &scoped, deps)?;
-            Ok(if matches!(body_ty, Ty::F64) { Ty::ListF64 } else { Ty::ListInt })
+            Ok(list_of(&body_ty))
+        }
+        Expr::FlatMap { var, list, body } => {
+            let list_ty = infer_dep(list, env, deps)?;
+            let elem_ty = match list_ty {
+                Ty::ListInt => Ty::Int,
+                Ty::ListF64 => Ty::F64,
+                Ty::ListF32 => Ty::F32,
+                other => return Err(format!("flatmap over {}", other.name())),
+            };
+            let scoped_row = {
+                let mut sc = env.clone();
+                sc.insert(var.clone(), elem_ty.clone());
+                sc
+            };
+            // Body must itself be a list of the same element type; the
+            // result is the concatenation: still List<elem>.
+            let row_ty = infer_dep(body, &scoped_row, deps)?;
+            let expected = list_of(&elem_ty);
+            if row_ty == expected {
+                Ok(row_ty)
+            } else {
+                Err(format!(
+                    "flatmap body must be {}, got {}",
+                    expected.name(),
+                    row_ty.name()
+                ))
+            }
+        }
+        Expr::Builtin3(b @ crate::sketch::Builtin::Index2, t, i, j, st) => {
+            expect_ty_in(t, env, &Ty::ListInt)
+                .or_else(|_| expect_ty_in(t, env, &Ty::ListF64))
+                .or_else(|_| expect_ty_in(t, env, &Ty::ListF32))?;
+            expect_ty_in(i, env, &Ty::Int)?;
+            expect_ty_in(j, env, &Ty::Int)?;
+            expect_ty_in(st, env, &Ty::Int)?;
+            let _ = b;
+            Ok(match expr_elem_ty(t, env) {
+                Ty::F64 => Ty::F64,
+                Ty::F32 => Ty::F32,
+                _ => Ty::Int,
+            })
         }
         Expr::If(c, t, f) => {
             expect_ty_in(c, env, &Ty::Bool)?;
@@ -286,6 +328,25 @@ fn expect_dep(
 }
 
 /// Typecheck one vault call against declared dependency signatures.
+/// List type over the given element (Int default for scalars).
+fn list_of(elem: &Ty) -> Ty {
+    match elem {
+        Ty::F64 => Ty::ListF64,
+        Ty::F32 => Ty::ListF32,
+        _ => Ty::ListInt,
+    }
+}
+
+/// Element type of a list-typed expression.
+fn expr_elem_ty(e: &Expr, env: &HashMap<String, Ty>) -> Ty {
+    match infer(e, env) {
+        Ok(Ty::ListInt) => Ty::Int,
+        Ok(Ty::ListF64) => Ty::F64,
+        Ok(Ty::ListF32) => Ty::F32,
+        _ => Ty::Int,
+    }
+}
+
 /// Call arguments of an expression known to be a Call.
 fn args_of(e: &Expr) -> &[Expr] {
     match e {
@@ -375,14 +436,45 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
                 other => return Err(format!("map over {}", other.name())),
             };
             let mut scoped = env.clone();
-            scoped.insert(var.clone(), elem);
+            scoped.insert(var.clone(), elem.clone());
             let body_ty = infer(body, &scoped)?;
-            Ok(match body_ty {
-                Ty::F64 => Ty::ListF64,
-                Ty::F32 => Ty::ListF32,
-                _ => Ty::ListInt,
-            })
+            Ok(list_of(&body_ty))
         }
+        Expr::FlatMap { var, list, body } => {
+            let list_ty = infer(list, env)?;
+            let elem = match list_ty {
+                Ty::ListInt => Ty::Int,
+                Ty::ListF64 => Ty::F64,
+                Ty::ListF32 => Ty::F32,
+                other => return Err(format!("flatmap over {}", other.name())),
+            };
+            let mut scoped = env.clone();
+            scoped.insert(var.clone(), elem.clone());
+            let row_ty = infer(body, &scoped)?;
+            let expected = list_of(&elem);
+            if row_ty == expected {
+                Ok(row_ty)
+            } else {
+                Err(format!(
+                    "flatmap body must be {}, got {}",
+                    expected.name(),
+                    row_ty.name()
+                ))
+            }
+        }
+        Expr::Builtin3(crate::sketch::Builtin::Index2, t, i, j, st) => {
+            let tt = infer(t, env)?;
+            expect_ty_in(i, env, &Ty::Int)?;
+            expect_ty_in(j, env, &Ty::Int)?;
+            expect_ty_in(st, env, &Ty::Int)?;
+            match tt {
+                Ty::ListInt => Ok(Ty::Int),
+                Ty::ListF64 => Ok(Ty::F64),
+                Ty::ListF32 => Ok(Ty::F32),
+                other => Err(format!("index2 over {}", other.name())),
+            }
+        }
+        Expr::Builtin3(_, ..) => Err("only index2 is a ternary builtin".to_string()),
         Expr::Builtin2(b, l, r) => infer_builtin2(*b, l, r, env),
         Expr::ListCons(elems) => {
             if elems.is_empty() {

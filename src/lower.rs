@@ -25,9 +25,42 @@ pub struct CallTarget {
 pub type CallMap = HashMap<String, CallTarget>;
 
 /// Pretty-print an expression back to sketch surface syntax.
+/// Display name for a builtin in diagnostics.
+fn builtin_name(b: Builtin) -> &'static str {
+    match b {
+        Builtin::Len => "len",
+        Builtin::Range => "range",
+        Builtin::Sum => "sum",
+        Builtin::Max => "max",
+        Builtin::Min => "min",
+        Builtin::Sqrt => "sqrt",
+        Builtin::Exp => "exp",
+        Builtin::Log => "log",
+        Builtin::Abs => "abs",
+        Builtin::Index => "index",
+        Builtin::Index2 => "index2",
+        Builtin::MinEl => "min_el",
+        Builtin::MaxEl => "max_el",
+    }
+}
+
 /// Used by canonical gen serialization and sieve diagnostics.
 pub fn expr_display(e: &Expr) -> String {
     match e {
+        Expr::FlatMap { var, list, body } => format!(
+            "flatmap({} in {}) {{ {} }}",
+            var,
+            expr_display(list),
+            expr_display(body)
+        ),
+        Expr::Builtin3(b, a, c, d, f) => format!(
+            "{}({}, {}, {}, {})",
+            builtin_name(*b),
+            expr_display(a),
+            expr_display(c),
+            expr_display(d),
+            expr_display(f)
+        ),
         Expr::LetTup(names, v, b) => format!(
             "let ({}) = {}; {}",
             names.join(", "),
@@ -70,7 +103,7 @@ pub fn expr_display(e: &Expr) -> String {
                 Builtin::Exp => "exp",
                 Builtin::Log => "log",
                 Builtin::Abs => "abs",
-                Builtin::Index => "index",
+                Builtin::Index | Builtin::Index2 => "index",
                 Builtin::MinEl => "min_el",
                 Builtin::MaxEl => "max_el",
             },
@@ -455,6 +488,24 @@ fn emit_expr(
         Expr::Builtin2(crate::sketch::Builtin::Index, l, r) => {
             emit_index(l, r, env, tyenv, em)
         }
+        Expr::FlatMap { var, list, body } => {
+            emit_flatmap(var, list, body, env, tyenv, em)
+        }
+        Expr::Builtin3(crate::sketch::Builtin::Index2, t, i, j, st) => {
+            // index2(t, i, j, stride) ≡ index(t, i*stride + j) with the
+            // oracle's double bounds semantics carried by the pos math.
+            let pos = Expr::BinOp(
+                crate::sketch::BinOp::Add,
+                Box::new(Expr::BinOp(
+                    crate::sketch::BinOp::Mul,
+                    i.clone(),
+                    st.clone(),
+                )),
+                j.clone(),
+            );
+            emit_index(t, &pos, env, tyenv, em)
+        }
+        Expr::Builtin3(_, ..) => Err("lowering: only index2 is a ternary builtin".to_string()),
         Expr::Map { var, list, body } => {
             emit_map(var, list, body, env, tyenv, em)
         }
@@ -623,6 +674,7 @@ fn emit_builtin(
     em: &mut Emitter,
 ) -> Result<String, String> {
     match b {
+        Builtin::Index2 => unreachable!("index2 routes through Builtin3"),
         Builtin::MinEl | Builtin::MaxEl => Err(format!(
             "lowering: {:?} is binary (internal routing error)",
             b
@@ -1017,7 +1069,7 @@ fn emit_concat(
     ));
     em.line(&format!(
         "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (index) {{",
-        accr, ivr, dim_l, endr, step, accr, accr
+        accr, ivr, dim_l, endr, step, accr, dim_l
     ));
     em.indent += 1;
     let vr = em.fresh("vr");
@@ -1043,6 +1095,160 @@ fn emit_concat(
 /// evaluating body per element and storing. Element type from body's
 /// static inference.
 #[allow(clippy::too_many_arguments)]
+
+/// Emit `flatmap(v in list) { row_body }`: per element, evaluate the body
+/// to a row memref, then append its contents to a growable accumulator.
+/// scf.for carries the acc memref (same type memref<?xT> across iters);
+/// each iteration allocs the new total and copies old+row into it.
+fn emit_flatmap(
+    var: &str,
+    list: &Expr,
+    body: &Expr,
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let m = emit_expr(list, env, tyenv, em)?;
+    let list_ty = expr_ty(list, tyenv);
+    let elem_is_f32 = matches!(list_ty, Ty::ListF32);
+    let elem_is_float = matches!(list_ty, Ty::ListF64 | Ty::ListF32);
+    let in_mty = if elem_is_f32 {
+        "memref<?xf32>"
+    } else if elem_is_float {
+        "memref<?xf64>"
+    } else {
+        "memref<?xi64>"
+    };
+    // Row element type mirrors the checker: probe with var bound.
+    let mut probe = tyenv.clone();
+    probe.insert(
+        var.to_string(),
+        if elem_is_f32 {
+            Ty::F32
+        } else if elem_is_float {
+            Ty::F64
+        } else {
+            Ty::Int
+        },
+    );
+    let row_ty = expr_ty(body, &probe);
+    let out_mty = match row_ty {
+        Ty::ListF32 => "memref<?xf32>",
+        Ty::ListF64 => "memref<?xf64>",
+        _ => "memref<?xi64>",
+    };
+
+    let idx0 = em.const_index(0);
+    let step = em.const_index(1);
+    let dim = em.fresh("fdim");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        dim, m, idx0, in_mty
+    ));
+
+    // Empty accumulator: zero-length alloc of the row type.
+    let zero_i = em.const_index(0);
+    let empty = em.fresh("fempty");
+    em.line(&format!(
+        "{} = memref.alloc({}) : {}",
+        empty, zero_i, out_mty
+    ));
+
+    let iv = em.fresh("fi");
+    let acc_out = em.fresh("fout");
+    let acc_in = em.fresh("fin");
+    em.line(&format!(
+        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> ({}) {{",
+        acc_out, iv, idx0, dim, step, acc_in, empty, out_mty
+    ));
+    em.indent += 1;
+
+    let elem = em.fresh("fe");
+    em.line(&format!("{} = memref.load {}[{}] : {}", elem, m, iv, in_mty));
+    env.push(Binding { name: var.to_string(), ssa: elem });
+    tyenv.insert(
+        var.to_string(),
+        if elem_is_f32 {
+            Ty::F32
+        } else if elem_is_float {
+            Ty::F64
+        } else {
+            Ty::Int
+        },
+    );
+
+    // Evaluate the row for this element.
+    let row = emit_expr(body, env, tyenv, em)?;
+    let rlen = em.fresh("frlen");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        rlen, row, idx0, out_mty
+    ));
+    let alen = em.fresh("falen");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : ({}, index) -> index",
+        alen, acc_in, idx0, out_mty
+    ));
+    let newlen = em.fresh("fnewlen");
+    em.line(&format!("{} = arith.addi {}, {} : index", newlen, alen, rlen));
+    let newbuf = em.fresh("fnew");
+    em.line(&format!(
+        "{} = memref.alloc({}) : {}",
+        newbuf, newlen, out_mty
+    ));
+
+    // Copy [0, alen): old acc.
+    let c1 = em.fresh("fc1");
+    let i1 = em.fresh("ci");
+    let p1 = em.fresh("cp");
+    em.line(&format!(
+        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (index) {{",
+        c1, i1, idx0, alen, step, p1, idx0
+    ));
+    em.indent += 1;
+    let v1 = em.fresh("fv1");
+    em.line(&format!("{} = memref.load {}[{}] : {}", v1, acc_in, i1, out_mty));
+    em.line(&format!(
+        "memref.store {}, {}[{}] : {}",
+        v1, newbuf, i1, out_mty
+    ));
+    em.line(&format!("scf.yield {} : index", p1));
+    em.indent -= 1;
+    em.line("}");
+    // Old accumulator fully copied: release it ONCE, after the copy loop.
+    em.line(&format!("memref.dealloc {} : {}", acc_in, out_mty));
+
+    // Copy row at offset alen.
+    let c2 = em.fresh("fc2");
+    let i2 = em.fresh("cj");
+    let p2 = em.fresh("cq");
+    em.line(&format!(
+        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (index) {{",
+        c2, i2, idx0, rlen, step, p2, idx0
+    ));
+    em.indent += 1;
+    let v2 = em.fresh("fv2");
+    em.line(&format!("{} = memref.load {}[{}] : {}", v2, row, i2, out_mty));
+    let dst = em.fresh("fdst");
+    em.line(&format!("{} = arith.addi {}, {} : index", dst, alen, i2));
+    em.line(&format!(
+        "memref.store {}, {}[{}] : {}",
+        v2, newbuf, dst, out_mty
+    ));
+    em.line(&format!("scf.yield {} : index", p2));
+    em.indent -= 1;
+    em.line("}");
+    // Row fully copied: release it ONCE, after the copy loop.
+    em.line(&format!("memref.dealloc {} : {}", row, out_mty));
+
+    em.line(&format!("scf.yield {} : {}", newbuf, out_mty));
+    em.indent -= 1;
+    em.line("}");
+
+    env.pop();
+    Ok(acc_out)
+}
+
 fn emit_map(
     var: &str,
     list: &Expr,
@@ -1184,7 +1390,22 @@ fn emit_fold(
 
     let iv = em.fresh("i");
     let acc_ssa = em.fresh("acc");
-    let ty_str = if matches!(expr_ty(init, tyenv), Ty::F64 | Ty::F32) { "f64" } else { "i64" };
+    // Acc type mirrors the init expression exactly — scalars carry as
+    // i64/f64; list inits (DP rows built via `range`/`++`) carry their
+    // flat-memref type through iter_args.
+    let init_ty = expr_ty(init, tyenv);
+    let ty_str = match &init_ty {
+        Ty::ListInt => "memref<?xi64>",
+        Ty::ListF64 => "memref<?xf64>",
+        Ty::ListF32 => "memref<?xf32>",
+        Ty::F64 | Ty::F32 => "f64",
+        _ => "i64",
+    };
+    let acc_scalar_ty = match &init_ty {
+        Ty::F64 | Ty::ListF64 => Ty::F64,
+        Ty::F32 | Ty::ListF32 => Ty::F32,
+        _ => Ty::Int,
+    };
     em.line(&format!(
         "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> ({}) {{",
         acc_ssa, iv, idx0, dim, step, acc_ssa, init_v, ty_str
@@ -1202,8 +1423,13 @@ fn emit_fold(
         em.line(&format!("{} = memref.load {}[{}] : {}", elem, m, iv, mty));
     }
 
-    tyenv.insert(var.to_string(), if matches!(expr_ty(list, tyenv), Ty::ListF64 | Ty::ListF32) { Ty::F64 } else { Ty::Int });
-    tyenv.insert(acc.to_string(), if ty_str == "f64" { Ty::F64 } else { Ty::Int });
+    let list_elem_ty = match expr_ty(list, tyenv) {
+        Ty::ListF64 => Ty::F64,
+        Ty::ListF32 => Ty::F32,
+        _ => Ty::Int,
+    };
+    tyenv.insert(var.to_string(), list_elem_ty);
+    tyenv.insert(acc.to_string(), acc_scalar_ty);
     env.push(Binding {
         name: var.to_string(),
         ssa: elem.clone(),
@@ -1500,7 +1726,7 @@ fn fold_elem_ty(list: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
             Some(Ty::ListF64) => Ty::F64,
             _ => Ty::Int,
         },
-        Expr::Call(p, _) if p.ends_with("range") => Ty::Int,
+        Expr::Call(p, _) if p.ends_with("range") => Ty::ListInt,
         _ => Ty::Int,
     }
 }
@@ -1776,6 +2002,22 @@ fn mlir_float(v: f64) -> String {
 /// for the subset the emitter needs; candidates were typechecked already).
 fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
     match e {
+        Expr::FlatMap { body, .. } => match expr_ty(body, tyenv) {
+            Ty::ListF64 => Ty::ListF64,
+            _ => Ty::ListInt,
+        },
+        Expr::Builtin3(
+            crate::sketch::Builtin::Index2,
+            t,
+            _i,
+            _j,
+            _st,
+        ) => match expr_ty(t, tyenv) {
+            Ty::ListF64 => Ty::F64,
+            Ty::ListF32 => Ty::F32,
+            _ => Ty::Int,
+        },
+        Expr::Builtin3(_, ..) => Ty::Int,
         Expr::LetTup(_, _, b) => expr_ty(b, tyenv),
         Expr::IntLit(_) => Ty::Int,
         Expr::FloatLit(_) => Ty::F64,
@@ -2748,7 +2990,9 @@ mod hpp_tests {
 pub fn c_guard_sentinel(ty: &Ty) -> &'static str {
     match ty {
         Ty::F64 | Ty::F32 => "NAN",
-        Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 | Ty::ListF32 => "LONG_MIN",
+        Ty::Int | Ty::Bool => "LONG_MIN",
+        // List returns are flat-MemRef descriptors: NULL pointer.
+        Ty::ListInt | Ty::ListF64 | Ty::ListF32 => "0",
         Ty::Tuple(_) => "LONG_MIN",
     }
 }
@@ -2951,7 +3195,8 @@ pub fn emit_shim_c(
          #include <stdio.h>\n\
          #include <stdlib.h>\n\
          #include <stdint.h>\n\
-         #include <stdbool.h>\n\n\
+         #include <stdbool.h>\n\
+         #include <limits.h>\n\n\
          /* ---- policy constants ---- */\n\
          #define ONTIC_POLICY_ABORT 0\n\
          #define ONTIC_POLICY_TRAP  1\n\n\
