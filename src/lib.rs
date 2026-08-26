@@ -13,6 +13,7 @@ pub mod forge;
 pub mod genrand;
 pub mod http;
 pub mod interp;
+pub mod lint;
 pub mod lower;
 pub mod lower_llvm;
 pub mod ous;

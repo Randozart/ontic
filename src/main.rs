@@ -38,7 +38,11 @@ fn dispatch(args: &[String]) -> i32 {
         Some("eval") => cmd_eval(args),
         Some("sweep") => cmd_sweep(args),
         Some("bench") => cmd_bench(args),
-        Some("vault") => cmd_vault(args),        Some("lib") => cmd_lib(args),
+        Some("vault") => cmd_vault(args),
+        Some("lint") => match args.get(2) {
+            Some(path) => cmd_lint(path),
+            None => usage("lint needs a .ont file"),
+        },        Some("lib") => cmd_lib(args),
         Some("ablate") => cmd_ablate(args),
         Some("pack") => cmd_pack(args),
         Some("unpack") => cmd_unpack(args),
@@ -1565,6 +1569,44 @@ fn cmd_vault_import(args: &[String]) -> i32 {
 fn die(msg: &str) -> i32 {
     eprintln!("{msg}");
     1
+}
+
+/// `ontic lint <file.ont>` — static spec-quality findings before forge spend.
+fn cmd_lint(path: &str) -> i32 {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return die(&format!("read {path}: {e}")),
+    };
+    let file = match recipe::parse_ont(&src) {
+        Ok(f) => f,
+        Err(e) => return die(&format!("{path}: invalid gen: {e}")),
+    };
+    let vault = Vault::open(
+        std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
+    )
+    .ok();
+    let findings = ontic::lint::lint_file(&file.gens, vault.as_ref());
+    if findings.is_empty() {
+        println!("lint: {} gen(s) clean", file.gens.len());
+        return 0;
+    }
+    let mut errs = 0;
+    for f in &findings {
+        if f.severity == ontic::lint::Severity::Err {
+            errs += 1;
+        }
+        println!("{} [{}] {}: {}", f.severity, f.rule, f.path, f.detail);
+    }
+    let (info, warn): (usize, usize) = findings.iter().fold((0, 0), |(i, w), f| match f.severity {
+        ontic::lint::Severity::Info => (i + 1, w),
+        ontic::lint::Severity::Warn => (i, w + 1),
+        ontic::lint::Severity::Err => (i, w),
+    });
+    println!(
+        "lint: {} finding(s) — {errs} err, {warn} warn, {info} info",
+        findings.len()
+    );
+    if errs > 0 { 1 } else { 0 }
 }
 
 /// `ontic run <file.ont>` — execute a recipe over vault-verified functions.
