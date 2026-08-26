@@ -121,6 +121,56 @@ fn infer_dep(
             scoped.insert(n.clone(), vt);
             infer_dep(body, &scoped, deps)
         }
+        Expr::LetTup(names, value, body) => {
+            // RHS must be a dep call returning a tuple; names bind
+            // componentwise. Restriction keeps lowering unambiguous.
+            let path = match value.as_ref() {
+                Expr::Call(p, _) => p.clone(),
+                other => {
+                    return Err(format!(
+                        "tuple destructuring RHS must be a dependency call, got {}",
+                        other_display(other)
+                    ))
+                }
+            };
+            let (want_ps, want_rt) = deps.get(&path).ok_or_else(|| {
+                format!("call to undeclared dependency `{path}`")
+            })?;
+            if args_of(value).len() != want_ps.len() {
+                return Err(format!(
+                    "call `{}` arity {} != {}",
+                    path,
+                    args_of(value).len(),
+                    want_ps.len()
+                ));
+            }
+            let comps = match want_rt.tuple_components() {
+                Some(cs) => cs,
+                None => {
+                    return Err(format!(
+                        "destructuring `{}` needs a tuple return, got {}",
+                        path,
+                        want_rt.name()
+                    ))
+                }
+            };
+            if comps.len() != names.len() {
+                return Err(format!(
+                    "destructuring arity: {} names for {} components of `{}`",
+                    names.len(),
+                    comps.len(),
+                    path
+                ));
+            }
+            // Typecheck the call args themselves (single-result path would
+            // fail on the tuple ret; check args against params directly).
+            typecheck_call(&path, args_of(value), env, deps)?;
+            let mut scoped = env.clone();
+            for (n, t) in names.iter().zip(comps.iter()) {
+                scoped.insert(n.clone(), t.clone());
+            }
+            infer_dep(body, &scoped, deps)
+        }
         Expr::Fold {
             var,
             acc,
@@ -236,6 +286,19 @@ fn expect_dep(
 }
 
 /// Typecheck one vault call against declared dependency signatures.
+/// Call arguments of an expression known to be a Call.
+fn args_of(e: &Expr) -> &[Expr] {
+    match e {
+        Expr::Call(_, args) => args,
+        _ => &[],
+    }
+}
+
+/// Short display for checker diagnostics (delegates to lower::expr_display).
+fn other_display(e: &Expr) -> String {
+    crate::lower::expr_display(e)
+}
+
 fn typecheck_call(
     path: &str,
     args: &[Expr],
@@ -284,6 +347,10 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
         Expr::Call(p, _) => Err(format!(
             "call to `{}` requires declared `use` dependency (checker context missing)",
             p
+        )),
+        Expr::LetTup(names, _value, _body) => Err(format!(
+            "tuple destructuring requires declared `use` dependency (checker context missing): let ({})",
+            names.join(", ")
         )),
         Expr::IntLit(_) => Ok(Ty::Int),
         Expr::FloatLit(_) => Ok(Ty::F64),
@@ -628,5 +695,29 @@ mod tests {
     fn test_list_equality_rejected_v0() {
         let c = sketch::parse("fn @e(%a: List<Int>) -> Bool { %a == [1] }").unwrap();
         assert!(check(&c).is_err());
+    }
+
+    #[test]
+    fn test_let_destructure_arity_mismatch_killed() {
+        // Target returns (F64, F64); pattern has three names.
+        let src = "fn @f(%x: F64) -> F64 { let (a, b, c) = Dep.pair(%x); a }";
+        let cand = sketch::parse(src).unwrap();
+        let mut deps = DepSigs::new();
+        deps.insert(
+            "Dep.pair".to_string(),
+            (vec![Ty::F64], Ty::Tuple(vec![Ty::F64, Ty::F64])),
+        );
+        let err = check_with(&cand, &deps).unwrap_err();
+        assert!(err.contains("arity"), "{err}");
+    }
+
+    #[test]
+    fn test_let_destructure_non_tuple_rhs_killed() {
+        let src = "fn @f(%x: F64) -> F64 { let (a, b) = Dep.scalar(%x); a }";
+        let cand = sketch::parse(src).unwrap();
+        let mut deps = DepSigs::new();
+        deps.insert("Dep.scalar".to_string(), (vec![Ty::F64], Ty::F64));
+        let err = check_with(&cand, &deps).unwrap_err();
+        assert!(err.contains("tuple return"), "{err}");
     }
 }

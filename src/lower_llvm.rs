@@ -170,6 +170,9 @@ fn emit_expr(e: &Expr, em: &mut LlvmEmitter) -> Result<String, String> {
         Expr::Tuple(_) => Err(
             "direct LLVM: tuple bodies require the MLIR pipeline".to_string(),
         ),
+        Expr::LetTup(..) => Err(
+            "direct LLVM: tuple destructuring requires the MLIR pipeline".to_string(),
+        ),
         Expr::IntLit(v) => {
             let r = em.fresh();
             em.line(&format!("{} = add i64 {}, 0", r, v));

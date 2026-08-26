@@ -99,6 +99,9 @@ pub enum Expr {
     UnOp(UnOp, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(String, Box<Expr>, Box<Expr>),
+    /// Tuple destructuring: `let (a, b) = rhs; body`. RHS must be a call
+    /// whose target returns a tuple; names bind componentwise.
+    LetTup(Vec<String>, Box<Expr>, Box<Expr>),
     ListLit(Vec<i64>),
     FloatListLit(Vec<f64>),
     /// Unary builtins: Len/Sum/Max/Min over lists; Sqrt/Exp/Log/Abs numeric;
@@ -616,6 +619,29 @@ impl Parser {
 
     fn parse_let(&mut self) -> Result<Expr, ParseError> {
         self.eat_word("let")?;
+        // Tuple destructuring: `let (a, b) = rhs; body`.
+        if matches!(self.peek(), Some(Tok::Sym("("))) {
+            self.pos += 1;
+            let mut names = Vec::new();
+            loop {
+                names.push(self.eat_pident()?);
+                match self.peek() {
+                    Some(Tok::Sym(",")) => {
+                        self.pos += 1;
+                    }
+                    Some(Tok::Sym(")")) => {
+                        self.pos += 1;
+                        break;
+                    }
+                    _ => return Err(err(self.offset(), "expected `,` or `)` in tuple pattern")),
+                }
+            }
+            self.eat_sym("=")?;
+            let value = self.parse_expr()?;
+            self.eat_sym(";")?;
+            let body = self.parse_expr()?;
+            return Ok(Expr::LetTup(names, Box::new(value), Box::new(body)));
+        }
         let name = self.eat_pident()?;
         self.eat_sym("=")?;
         let value = self.parse_expr()?;
@@ -967,8 +993,9 @@ params      ::= param (ws "," ws param)*
 param       ::= pid ws ":" ws type
 type        ::= "Int" | "F64" | "F32" | "Bool" | "List" "<" ("Int"| "F64" | "F32") ">" | "(" ws tupparts ws ")"
 tupparts    ::= type (ws "," ws type)*
-e           ::= letx | ifx | orx
+e           ::= letx | letx2 | ifx | orx
 letx        ::= "let" ws pid ws "=" ws e ws ";" ws e
+letx2       ::= "let" ws "(" ws pid (ws "," ws pid)* ws ")" ws "=" ws e ws ";" ws e
 ifx         ::= "if" ws e ws "{" ws e ws "}" ws "else" ws "{" ws e ws "}"
 orx         ::= andx (ws "||" ws andx)*
 andx        ::= cmpx (ws "&&" ws cmpx)*

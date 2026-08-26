@@ -454,6 +454,7 @@ pub fn ast_size(e: &Expr) -> usize {
     1 + match e {
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::Var(_)
         | Expr::ListLit(_) | Expr::FloatListLit(_) => 0,
+        Expr::LetTup(_, v, b) => 1 + ast_size(v) + ast_size(b),
         Expr::Builtin(_, i) | Expr::UnOp(_, i) => ast_size(i),
         Expr::ListCons(elems) => 1 + elems.iter().map(ast_size).sum::<usize>(),
         Expr::Tuple(items) => items.iter().map(ast_size).sum::<usize>(),

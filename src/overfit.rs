@@ -140,6 +140,10 @@ fn walk(e: &Expr, leaked: &HashSet<i64>, st: &mut Stats) {
             walk(v, leaked, st);
             walk(b, leaked, st);
         }
+        Expr::LetTup(_, v, b) => {
+            walk(v, leaked, st);
+            walk(b, leaked, st);
+        }
         Expr::Fold { list, init, body, .. } => {
             st.has_fold = true;
             walk(list, leaked, st);
@@ -182,6 +186,7 @@ fn guard_uses_example_literal(
 
 fn mentions_var(e: &Expr) -> bool {
     match e {
+        Expr::LetTup(_, v, b) => mentions_var(v) || mentions_var(b),
         Expr::Var(_) => true,
         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::ListLit(_) | Expr::FloatListLit(_) => false,
         Expr::UnOp(_, i) => mentions_var(i),

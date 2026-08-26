@@ -28,6 +28,12 @@ pub type CallMap = HashMap<String, CallTarget>;
 /// Used by canonical gen serialization and sieve diagnostics.
 pub fn expr_display(e: &Expr) -> String {
     match e {
+        Expr::LetTup(names, v, b) => format!(
+            "let ({}) = {}; {}",
+            names.join(", "),
+            expr_display(v),
+            expr_display(b)
+        ),
         Expr::IntLit(v) => v.to_string(),
         Expr::FloatLit(v) => format!("{:e}", v),
         Expr::BoolLit(b) => b.to_string(),
@@ -527,6 +533,37 @@ fn emit_expr(
             });
             emit_expr(body, env, tyenv, em)
         }
+        Expr::LetTup(names, rhs, body) => {
+            // Checker guarantees RHS is a dep call with tuple ret; bind one
+            // SSA per component.
+            let path = match rhs.as_ref() {
+                Expr::Call(p, _) => p.clone(),
+                other => return Err(format!("destructuring RHS must be a call, got {:?}", other)),
+            };
+            let call_args: &[Expr] = match rhs.as_ref() {
+                Expr::Call(_, a) => a,
+                _ => &[],
+            };
+            let ssas = emit_call_multi(&path, call_args, env, tyenv, em)?;
+            if ssas.len() != names.len() {
+                return Err(format!(
+                    "destructuring arity mismatch at lowering: {} names vs {} results",
+                    names.len(),
+                    ssas.len()
+                ));
+            }
+            // Component types come from the call target's ret.
+            let target = em.calls.get(&path).cloned().ok_or_else(|| format!("no target `{path}`"))?;
+            let comps = match &target.ret {
+                Ty::Tuple(cs) => cs.clone(),
+                _ => return Err(format!("target `{path}` ret is not a tuple")),
+            };
+            for ((n, t), ssa) in names.iter().zip(comps.iter()).zip(ssas.into_iter()) {
+                tyenv.insert(n.clone(), t.clone());
+                env.push(Binding { name: n.clone(), ssa });
+            }
+            emit_expr(body, env, tyenv, em)
+        }
         Expr::Fold {
             var,
             acc,
@@ -743,6 +780,25 @@ fn emit_call(
     tyenv: &mut HashMap<String, Ty>,
     em: &mut Emitter,
 ) -> Result<String, String> {
+    let outs = emit_call_multi(path, args, env, tyenv, em)?;
+    match outs.as_slice() {
+        [one] => Ok(one.clone()),
+        many => Err(format!(
+            "lowering: call `{}` returns {} values; destructure with `let (…) =`",
+            path,
+            many.len()
+        )),
+    }
+}
+
+/// Multi-result dep-call emission: one SSA per return component.
+fn emit_call_multi(
+    path: &str,
+    args: &[Expr],
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<Vec<String>, String> {
     let target = em
         .calls
         .get(path)
@@ -783,29 +839,46 @@ fn emit_call(
             _ => "i64",
         })
         .collect();
-    let ret_ty = match target.ret {
-        Ty::F64 | Ty::F32 => "f64",
-        Ty::ListF64 => "memref<?xf64>",
-        Ty::ListF32 => "memref<?xf32>",
-        Ty::ListInt => "memref<?xi64>",
-        other => {
-            return Err(format!(
-                "lowering: dep call return {:?} unsupported",
-                other
-            ))
-        }
+    // Return shapes: single scalar/list, or tuple of them. NOTE the F32
+    // arm: f32 calls must carry : f32, not be swallowed into f64.
+    let ret_tys: Vec<String> = match &target.ret {
+        Ty::Tuple(cs) => cs
+            .iter()
+            .map(mlir_ret_type)
+            .collect::<Result<Vec<&'static str>, String>>()?
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        Ty::Int | Ty::Bool => vec!["i64".to_string()],
+        Ty::F64 => vec!["f64".to_string()],
+        Ty::F32 => vec!["f32".to_string()],
+        Ty::ListF64 => vec!["memref<?xf64>".to_string()],
+        Ty::ListF32 => vec!["memref<?xf32>".to_string()],
+        Ty::ListInt => vec!["memref<?xi64>".to_string()],
     };
-    let out = em.fresh("call");
-    // func.call type suffix lists PARAM TYPES only, never SSA names.
-    em.line(&format!(
-        "{} = func.call @{}({}) : ({}) -> {}",
-        out,
-        target.symbol,
-        prepared.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(", "),
-        param_tys.join(", "),
-        ret_ty
-    ));
-    Ok(out)
+    if ret_tys.len() == 1 {
+        let out = em.fresh("call");
+        em.line(&format!(
+            "{} = func.call @{}({}) : ({}) -> {}",
+            out,
+            target.symbol,
+            prepared.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(", "),
+            param_tys.join(", "),
+            ret_tys[0]
+        ));
+        Ok(vec![out])
+    } else {
+        let outs: Vec<String> = (0..ret_tys.len()).map(|_| em.fresh("call")).collect();
+        em.line(&format!(
+            "{} = func.call @{}({}) : ({}) -> ({})",
+            outs.join(", "),
+            target.symbol,
+            prepared.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(", "),
+            param_tys.join(", "),
+            ret_tys.join(", ")
+        ));
+        Ok(outs)
+    }
 }
 
 
@@ -1703,6 +1776,7 @@ fn mlir_float(v: f64) -> String {
 /// for the subset the emitter needs; candidates were typechecked already).
 fn expr_ty(e: &Expr, tyenv: &HashMap<String, Ty>) -> Ty {
     match e {
+        Expr::LetTup(_, _, b) => expr_ty(b, tyenv),
         Expr::IntLit(_) => Ty::Int,
         Expr::FloatLit(_) => Ty::F64,
         Expr::BoolLit(_) => Ty::Bool,
@@ -2200,6 +2274,8 @@ fn c_ret_ty(ty: &Ty) -> Result<&'static str, String> {
 }
 
 /// Component C types of a tuple return, in declaration order.
+/// List components use the same by-value flat-MemRef descriptor (`MR`)
+/// that single-list returns lower to.
 fn c_tuple_components(ty: &Ty) -> Result<Vec<&'static str>, String> {
     match ty.tuple_components() {
         Some(cs) => cs
@@ -2208,6 +2284,7 @@ fn c_tuple_components(ty: &Ty) -> Result<Vec<&'static str>, String> {
                 Ty::Int | Ty::Bool => Ok("long"),
                 Ty::F64 => Ok("double"),
                 Ty::F32 => Ok("float"),
+                Ty::ListInt | Ty::ListF64 | Ty::ListF32 => Ok("MR"),
                 other => Err(format!(
                     "tuple component {} unsupported in C ABI",
                     other.name()
@@ -2218,6 +2295,13 @@ fn c_tuple_components(ty: &Ty) -> Result<Vec<&'static str>, String> {
     }
 }
 
+/// True when the tuple carries any list component (shim/header then need
+/// the MR descriptor typedef).
+fn c_tuple_needs_mr(ty: &Ty) -> bool {
+    matches!(ty.tuple_components(), Some(cs)
+        if cs.iter().any(|t| matches!(t, Ty::ListInt | Ty::ListF64 | Ty::ListF32)))
+}
+
 /// Deterministic struct tag: ontic_tup<arity>_<kind letters>.
 fn c_tuple_tag(ty: &Ty) -> Result<String, String> {
     let comps = c_tuple_components(ty)?;
@@ -2226,6 +2310,7 @@ fn c_tuple_tag(ty: &Ty) -> Result<String, String> {
         .map(|c| match *c {
             "long" => 'l',
             "double" => 'd',
+            "MR" => 'm',
             _ => 'f',
         })
         .collect();
@@ -2233,6 +2318,7 @@ fn c_tuple_tag(ty: &Ty) -> Result<String, String> {
 }
 
 /// `typedef struct { T0 _0; ... } tag;` for a tuple return type.
+/// List-carrying tuples also get the flat-MemRef `MR` descriptor typedef.
 fn c_tuple_typedef(ty: &Ty) -> Result<String, String> {
     let comps = c_tuple_components(ty)?;
     let fields: Vec<String> = comps
@@ -2240,8 +2326,13 @@ fn c_tuple_typedef(ty: &Ty) -> Result<String, String> {
         .enumerate()
         .map(|(i, c)| format!("{c} _{i};"))
         .collect();
+    let mr = if c_tuple_needs_mr(ty) {
+        "typedef struct { void* base; void* data; long off; long size; long stride; } MR;\n"
+    } else {
+        ""
+    };
     Ok(format!(
-        "typedef struct {{ {} }} {};",
+        "{mr}typedef struct {{ {} }} {};",
         fields.join(" "),
         c_tuple_tag(ty)?
     ))
@@ -2720,9 +2811,12 @@ pub fn emit_shim_c(
     let sentinel_expr = if let Some(cs) = ret.tuple_components() {
         let comps: Result<Vec<String>, String> = cs
             .iter()
-            .map(|t| match t.tuple_components() {
-                Some(_) => Err("nested tuple component".to_string()),
-                None => Ok(c_guard_sentinel(t).to_string()),
+            .map(|t| match t {
+                Ty::ListInt | Ty::ListF64 | Ty::ListF32 => {
+                    Ok("{0}".to_string())
+                }
+                Ty::Tuple(_) => Err("nested tuple component".to_string()),
+                _ => Ok(c_guard_sentinel(t).to_string()),
             })
             .collect();
         format!("({}) {{ {} }}", rt, comps?.join(", "))
@@ -2833,7 +2927,21 @@ pub fn emit_shim_c(
         ));
     }
 
-    let call_args: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+    // Raw-call arguments mirror the C parameter expansion exactly:
+    // list params pass their five flat-memref fields, scalars pass names.
+    let call_args: Vec<String> = params
+        .iter()
+        .flat_map(|(n, t)| match t {
+            Ty::ListInt | Ty::ListF64 | Ty::ListF32 => vec![
+                format!("{n}_a"),
+                format!("{n}_b"),
+                format!("{n}_o"),
+                format!("{n}_s"),
+                format!("{n}_st"),
+            ],
+            _ => vec![n.clone()],
+        })
+        .collect();
 
     Ok(format!(
         "/* Auto-generated Ontic runtime guard shim — do not edit. */\n\

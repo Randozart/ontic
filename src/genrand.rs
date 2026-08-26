@@ -148,6 +148,12 @@ fn gen_expr(ty: &Ty, ctx: &mut Ctx) -> Expr {
 pub fn render(e: &Expr) -> String {
     use Expr::*;
     match e {
+        LetTup(names, v, b) => format!(
+            "let ({}) = {}; {}",
+            names.join(", "),
+            render(v),
+            render(b)
+        ),
         IntLit(v) => v.to_string(),
         FloatLit(v) => format!("{:.1}", v),
         BoolLit(b) => b.to_string(),

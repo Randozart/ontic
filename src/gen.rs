@@ -123,8 +123,9 @@ fn parse_value(s: &str) -> Result<Value, String> {
     // Tuple literal: `(v1, v2, ...)`. Components parse recursively.
     if t.starts_with('(') && t.ends_with(')') {
         let inner = &t[1..t.len() - 1];
-        let parts: Result<Vec<Value>, String> = inner
-            .split(',')
+        // Bracket-aware split: list literals inside tuples carry commas.
+        let parts: Result<Vec<Value>, String> = split_top_level(inner)
+            .iter()
             .filter(|p| !p.trim().is_empty())
             .map(|p| parse_value(p).map_err(|e| format!("tuple component: {e}")))
             .collect();

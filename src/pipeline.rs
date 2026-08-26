@@ -293,10 +293,26 @@ pub fn bench_c_source(fn_name: &str, kinds: &[CK], iters: usize, ret_kinds: &[CK
     let acc_stmt = if ret_kinds.is_empty() {
         format!("acc += {fn_name}({tail});")
     } else {
-        let acc_t = kind_ctype(&ret_kinds[0]);
-        format!(
-            "{{ {tup_tag} r = {fn_name}({tail}); acc += ({acc_t})r._0; }}"
-        )
+        // Accumulate the SUM OF SCALAR components; pointer components
+        // (list descriptors) contribute nothing — the call itself is the
+        // timed work.
+        let adds: Vec<String> = ret_kinds
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| matches!(k, CK::I64 | CK::F64 | CK::F32))
+            .map(|(i, k)| {
+                let t = kind_ctype(k);
+                format!("acc += (long)r._{i}; /* {t} */")
+            })
+            .collect();
+        if adds.is_empty() {
+            format!("{{ {tup_tag} r = {fn_name}({tail}); (void)r; }}")
+        } else {
+            format!(
+                "{{ {tup_tag} r = {fn_name}({tail}); {} }}",
+                adds.join(" ")
+            )
+        }
     };
     format!(
         r#"#include <stdio.h>
@@ -957,34 +973,31 @@ pub fn link_shared_so(obj: &Path, c_sources: &[&Path], out_so: &Path) -> Result<
 /// `out_so`.  The shim source is returned for vault reproducibility.
 pub fn build_shared_so_guarded(
     composite_mlir: &str,
+    kernel_name: &str,
     shim_source: &str,
     out_so: &Path,
 ) -> Result<String, String> {
     let dir = scratch_dir("so_guarded");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    // Rename kernel: func.func @<name>(...)  →  func.func @<name>__raw(...)
+    // Rename ONLY the candidate's own function to <name>__raw; dependency
+    // kernels keep their public names so intra-composite calls resolve.
+    let target_prefix = format!("func.func @{}", kernel_name);
     let guarded_mlir = composite_mlir
         .lines()
         .map(|line| {
-            if line.trim_start().starts_with("func.func @") {
-                // Replace the first @name with @name__raw
-                if let Some(at_pos) = line.find('@') {
-                    let after_at = &line[at_pos + 1..];
-                    if let Some(paren_pos) = after_at.find('(') {
-                        let name = &after_at[..paren_pos];
-                        if !name.ends_with("__raw") {
-                            return format!(
-                                "{}@{}__raw{}",
-                                &line[..at_pos],
-                                name,
-                                &after_at[paren_pos..]
-                            );
-                        }
-                    }
-                }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with(&target_prefix)
+                && trimmed[target_prefix.len()..].starts_with('(')
+            {
+                line.replacen(
+                    &format!("@{}(", kernel_name),
+                    &format!("@{}__raw(", kernel_name),
+                    1,
+                )
+            } else {
+                line.to_string()
             }
-            line.to_string()
         })
         .collect::<Vec<_>>()
         .join("\n");

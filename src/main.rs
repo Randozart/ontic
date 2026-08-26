@@ -855,6 +855,7 @@ fn emit_and_store(
                     Ok(shim_src) => {
                         match pipeline::build_shared_so_guarded(
                             &validation_text,
+                            &survivor.candidate.name,
                             &shim_src,
                             &guarded_so_path,
                         ) {

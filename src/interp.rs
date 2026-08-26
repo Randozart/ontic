@@ -383,6 +383,32 @@ pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
         Expr::IntLit(v) => Ok(Value::Int(*v)),
         // IEEE semantics: inf/NaN propagate; only div/mod by zero on INTEGERS errors.
         Expr::FloatLit(v) => Ok(Value::Float(*v)),
+        Expr::LetTup(names, rhs, body) => {
+            let bound = eval_ctx(rhs, env, ctx)?;
+            let parts = match bound {
+                Value::Tuple(vs) => vs,
+                other => {
+                    return Err(EvalError::TypeError(format!(
+                        "destructuring `let ({})` needs a tuple, got {}",
+                        names.join(", "),
+                        other
+                    ))
+                )
+                }
+            };
+            if parts.len() != names.len() {
+                return Err(EvalError::TypeError(format!(
+                    "destructuring arity: {} names for {} values",
+                    names.len(),
+                    parts.len()
+                )));
+            }
+            let mut inner = env.clone();
+            for (n, v) in names.iter().zip(parts.into_iter()) {
+                inner.insert(n.clone(), v);
+            }
+            eval_ctx(body, &inner, ctx)
+        }
         Expr::BoolLit(b) => Ok(Value::Bool(*b)),
         Expr::Var(n) => env
             .get(n)
