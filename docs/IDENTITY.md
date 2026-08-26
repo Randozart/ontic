@@ -1,6 +1,6 @@
 # Ontic — Identity
 
-**Adopted:** 2026-08-23 · **Revised:** 2026-08-23 (flywheel consolidation)
+**Adopted:** 2026-08-23 · **Revised:** 2026-08-26 (production master plan)
 
 ## The one-liner
 
@@ -28,10 +28,10 @@ research reports P1–P3).
 
 ## What Ontic is not
 
-- **Not an application language.** No strings-in-sketch, no recursion, no
-  unbounded control flow, no kernel-side I/O inside gens. Smallness is the
-  feature; the soundness test governs every extension: *the interpreter must
-  remain a total, deterministic, bounded-step oracle.*
+- **Not an application language.** No string manipulation in sketch, no
+  recursion, no unbounded control flow, no kernel-side I/O inside gens.
+  Smallness is the feature; the soundness test governs every extension:
+  *the interpreter must remain a total, deterministic, bounded-step oracle.*
 - **Not an agent.** The transformer is a fixed-function candidate
   accelerator. One bounded refinement round per solve; bounded budgets also
   govern spec synthesis (`--repair-rounds`, `--recuts`). Unbounded retries

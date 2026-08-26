@@ -156,6 +156,12 @@ cargo run -- solve examples/ledger.ont    # sieve pipeline (hand candidates / fo
 cargo run -- bench examples/ledger.ont    # rank survivors with timings
 cargo run -- run examples/demo.ont        # execute a recipe over the vault
 cargo run -- vault ls                     # list verified functions
+cargo run -- vault status <kernel>        # per-kernel artifact + trust
+cargo run -- vault rm <prefix>            # remove one entry + artifacts
+cargo run -- vault doctor                 # structural findings
+cargo run -- vault gc                     # auto-remove orphans
+cargo run -- vault export <name> --out X  # .nous package (dep chain)
+cargo run -- vault import X.nous          # load .nous (add --verify)
 ```
 
 Forge flags: `--forge host:port --samples K --seed N` (defaults: env

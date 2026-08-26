@@ -165,10 +165,34 @@ came from verifier work while the model stayed frozen.
 
 Integer arithmetic is checked: overflow kills candidates in the sieve and
 traps natively. Keep intermediate values in range via invariants or small
-domains. A future `proven` tier (M3) plans Z3 absence proofs for flag-free
+domains. A future `proven` tier plans Z3 absence proofs for flag-free
 codegen.
 
 Speed requires declaration.
+
+## Type and expression surface
+
+| Type | Sketch | C ABI |
+|------|--------|-------|
+| `Int` | `Int` | `long` |
+| `F64` | `F64` | `double` |
+| `F32` | `F32` | `float` |
+| `Bool` | `Bool` | `long` |
+| `List<Int>` | `List<Int>` | `MR` (data ptr + size) |
+| `List<F64>` | `List<F64>` | `MR` |
+| `List<F32>` | `List<F32>` | `MR` |
+| `(T, U)` | `-> (T, U)` (return only) | struct `ontic_tup2_*` |
+
+| Expression | Purpose |
+|------------|---------|
+| `map(v in xs) { body }` | element-wise transform |
+| `flatmap(v in xs) { body }` | 2D DP tables, row concatenation |
+| `fold v in xs, acc from init { body }` | scalar/list accumulator |
+| `fold ... { body } until cond` | early-exit iterative solver |
+| `index2(m, i, j, stride)` | 2D-as-flat index |
+| `xs ++ ys` | list concatenation |
+| `let (a, b) = Dep.fn(...)` | destructure tuple returns |
+| `min_el(a, b)` / `max_el(a, b)` | scalar min/max |
 
 ## Setup
 
