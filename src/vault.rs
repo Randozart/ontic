@@ -181,6 +181,97 @@ impl Vault {
         }
     }
 
+    /// Remove one entry completely: manifest, mlir, artifacts, trust row.
+    /// Returns the list of files removed (for CLI reporting).
+    pub fn remove(&self, key: &str) -> Result<Vec<std::path::PathBuf>, String> {
+        let entry = self
+            .get(key)
+            .ok_or_else(|| format!("no vault entry with key {}", key))?;
+        let k8 = key[..8.min(key.len())].to_string();
+        let mut removed = Vec::new();
+        let candidates = [
+            format!("{}.json", key),
+            format!("{}.mlir", key),
+            format!("{}-{}.ous", entry.name, k8),
+            format!("{}-{}.h", entry.name, k8),
+            format!("{}-{}.hpp", entry.name, k8),
+            format!("{}-{}.guarded.c", entry.name, k8),
+            format!("lib{}-{}.so", entry.name, k8),
+            format!("lib{}-{}.guarded.so", entry.name, k8),
+            format!("{}-{}.o", entry.name, k8),
+        ];
+        for f in candidates {
+            let p = self.dir.join(f);
+            if p.exists() && std::fs::remove_file(&p).is_ok() {
+                removed.push(p);
+            }
+        }
+        let mut map = self.trust_map();
+        if map.remove(key).is_some() {
+            let mut entries: Vec<(String, String)> = map.into_iter().collect();
+            entries.sort();
+            let obj: serde_json::Map<String, serde_json::Value> = entries
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
+            let _ = std::fs::write(
+                self.trust_path(),
+                serde_json::to_string_pretty(&serde_json::Value::Object(obj))
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(removed)
+    }
+
+    /// Doctor: structural problems across the whole vault.
+    /// Returns per-key findings; empty = clean.
+    pub fn doctor(&self) -> Vec<(String, String)> {
+        let mut findings = Vec::new();
+        let entries = match self.list() {
+            Ok(es) => es,
+            Err(e) => return vec![("<vault>".to_string(), e)],
+        };
+        for e in &entries {
+            let k8 = e.key[..8.min(e.key.len())].to_string();
+            let ous = self.dir.join(format!("{}-{}.ous", e.name, k8));
+            if !ous.exists() {
+                findings.push((
+                    e.key.clone(),
+                    "missing .ous payload (cannot export or re-lower)".to_string(),
+                ));
+            }
+            let so = self.dir.join(format!("lib{}-{}.so", e.name, k8));
+            let obj = self.dir.join(format!("{}-{}.o", e.name, k8));
+            if !so.exists() && !obj.exists() {
+                findings.push((
+                    e.key.clone(),
+                    "not callable: neither shared object nor object file present"
+                        .to_string(),
+                ));
+            }
+            if e.gen_text.is_none() {
+                findings.push((
+                    e.key.clone(),
+                    "legacy manifest without gen_text (attest-only forever)"
+                        .to_string(),
+                ));
+            }
+        }
+        use std::collections::HashMap;
+        let mut by_path: HashMap<String, usize> = HashMap::new();
+        for e in &entries {
+            let sig_path = signature_path(&e.signature);
+            *by_path.entry(sig_path).or_insert(0) += 1;
+        }
+        for (path, n) in by_path.iter().filter(|(_, n)| **n > 1) {
+            findings.push((
+                path.clone(),
+                format!("{n} versions share this path (use `vault rm` manually)"),
+            ));
+        }
+        findings
+    }
+
     /// Record trust status for a key.
     pub fn set_trust(&self, key: &str, status: &str) -> Result<(), String> {
         if status != "verified" && status != "attested" {

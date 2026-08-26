@@ -1126,6 +1126,9 @@ fn cmd_vault(args: &[String]) -> i32 {
         Some("export") => return cmd_vault_export(&args[3..]),
         Some("import") => return cmd_vault_import(&args[3..]),
         Some("status") => return cmd_vault_status(&args[3..]),
+        Some("rm") => return cmd_vault_rm(&args[3..]),
+        Some("doctor") => return cmd_vault_doctor(&args[3..]),
+        Some("gc") => return cmd_vault_gc(&args[3..]),
         _ => {}
     }
     let json = args.iter().any(|a| a == "--json");
@@ -1253,6 +1256,105 @@ fn cmd_vault_status(args: &[String]) -> i32 {
             artifacts.join(" ")
         };
         println!("  artifacts: {artifacts_s}");
+    }
+    0
+}
+
+fn cmd_vault_rm(args: &[String]) -> i32 {
+    let key = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(k) => k.clone(),
+        None => return usage("vault rm needs a key prefix"),
+    };
+    let dir = match args.iter().position(|a| a == "--dir") {
+        Some(i) => match args.get(i + 1) {
+            Some(d) => d.clone(),
+            None => return usage("--dir needs a path"),
+        },
+        None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
+    };
+    let v = match Vault::open(&dir) {
+        Ok(v) => v,
+        Err(e) => return die(&e),
+    };
+    // Resolve prefix to full key.
+    let full_key = match v.get(&key) {
+        Some(e) => e.key.clone(),
+        None => return die(&format!("no vault entry matching prefix `{key}`")),
+    };
+    match v.remove(&full_key) {
+        Ok(files) => {
+            println!("removed {} entry", &full_key[..12.min(full_key.len())]);
+            for f in &files {
+                println!("  {}", f.display());
+            }
+            0
+        }
+        Err(e) => die(&e),
+    }
+}
+
+fn cmd_vault_doctor(args: &[String]) -> i32 {
+    let dir = match args.iter().position(|a| a == "--dir") {
+        Some(i) => match args.get(i + 1) {
+            Some(d) => d.clone(),
+            None => return usage("--dir needs a path"),
+        },
+        None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
+    };
+    let v = match Vault::open(&dir) {
+        Ok(v) => v,
+        Err(e) => return die(&e),
+    };
+    let findings = v.doctor();
+    if findings.is_empty() {
+        println!("vault doctor: clean");
+    } else {
+        println!("vault doctor: {} findings", findings.len());
+        for (key, msg) in &findings {
+            println!("  {} {key}: {}", &key[..12.min(key.len())], msg);
+        }
+    }
+    0
+}
+
+fn cmd_vault_gc(args: &[String]) -> i32 {
+    let dir = match args.iter().position(|a| a == "--dir") {
+        Some(i) => match args.get(i + 1) {
+            Some(d) => d.clone(),
+            None => return usage("--dir needs a path"),
+        },
+        None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
+    };
+    let v = match Vault::open(&dir) {
+        Ok(v) => v,
+        Err(e) => return die(&e),
+    };
+    let entries = match v.list() {
+        Ok(es) => es,
+        Err(e) => return die(&e),
+    };
+    let mut removed = 0u32;
+    for e in &entries {
+        let k8 = e.key[..8.min(e.key.len())].to_string();
+        let dirp = std::path::Path::new(&dir);
+        let ous = dirp.join(format!("{}-{}.ous", e.name, k8));
+        let so = dirp.join(format!("lib{}-{}.so", e.name, k8));
+        let obj = dirp.join(format!("{}-{}.o", e.name, k8));
+        let orphan = !ous.exists() || (!so.exists() && !obj.exists()) || e.gen_text.is_none();
+        if orphan {
+            if let Ok(files) = v.remove(&e.key) {
+                println!("gc: removed {} ({})", &e.key[..12.min(e.key.len())], e.name);
+                for f in &files {
+                    println!("  {}", f.display());
+                }
+                removed += 1;
+            }
+        }
+    }
+    if removed == 0 {
+        println!("vault gc: nothing to remove");
+    } else {
+        println!("vault gc: removed {removed} orphan(s)");
     }
     0
 }
