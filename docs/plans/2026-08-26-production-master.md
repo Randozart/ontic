@@ -1,7 +1,9 @@
 # Ontic Production Readiness — Master Plan
 
 **Date:** 2026-08-26
-**Status:** approved, executing to completion
+**Status:** COMPLETE — all 8 phases landed 2026-08-26 (commits
+8674659, 6b6b94e, 0794f75, b950b74, ee0a7d0, 3085c8e; P5 regression run,
+P8 sweep). See CHANGES.md entry for the phase map.
 **Scope:** everything discussed this session. No deferrals, no skips.
 Every item listed here ships functional, tested, and documented by the
 final commit of this run.

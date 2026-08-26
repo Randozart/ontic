@@ -1,5 +1,59 @@
 # CHANGES
 
+## Changes Made on 2026-08-26 (production master plan, phases 1–8)
+
+Plan: docs/plans/2026-08-26-production-master.md. All eight phases
+landed; suite 181/181 default build, 185/185 with `--features proven`.
+
+### P1 — differential parity completeness (`8674659`)
+`differential_parity` now drives List<Int> returns (ListI64 driver),
+tuple returns (RetSpec::Tuple), ListF32 returns, and real F32 scalar/
+list streams. Unmatched return shapes kill instead of skipping — no
+vacuous verification remains in the solve-time parity gate.
+
+### P2 — forge surface sync (`6b6b94e`)
+ask_langref.txt rewritten for the full current vocabulary (tuples +
+destructuring, flatmap, index2, ++, F32, min_el/max_el; stale
+NEVER-concat line removed). Grammar↔parser parity harness added:
+one fixture per GRAMMAR production panics on drift.
+
+### P3 — vault hygiene (`0794f75`)
+`vault rm <prefix>` / `vault doctor` / `vault gc`. Doctor reports
+missing payloads, non-callable entries, legacy manifests without
+gen_text, path sprawl. GC purged 84 debug-pollution orphans; vault at
+19 clean entries.
+
+### P4 — docs truthfulness (`b950b74`)
+README type/ABI table (tuples, F32, fold-until, concat), vault
+subcommands in AGENTS.md, IDENTITY.md stale no-strings claim dropped.
+
+### P5 — flywheel regression run
+f32_scale re-solved end-to-end post-refactor: S1–S7 + native ranking
++ differential parity + vault, 2 ns/call. scan3 (List<Int> return)
+passes the new parity gate. Levenshtein remains verified end-to-end.
+
+### P6 — Str v1, fail-closed (`ee0a7d0`)
+Ty::Str in candidate grammar + gen-level specs; quoted evidence strings;
+Value::Str oracle; str_len/str_eq parse, strictly typechecked, evaluate.
+Native positions fail closed at S2 ("opaque FFI ABI pending") because no
+Str construction exists — a Proven-style hole would be worse than an
+honest boundary. Parity harness caught missing lexer keyword registration
+on first str fixture run (the harness earns its keep).
+
+### P7 — proven tier v1 (`3085c8e`)
+`ontic prove ... --hand <cand>` under `--features proven`: z3 0.12
+(system lib) overflow-absence proofs over the invariant domain.
+Interp-exact trap disjunction (add/sub/mul range, checked_neg MIN);
+Unsat ⇒ PROVEN, Sat ⇒ UNPROVEN with minimal witness (x*2 unbounded ⇒
+witness x=2^62, the true minimal overflow point). Division family
+excluded by design: SMT div rounds Euclidean vs oracle truncation — a
+Proven claim there could be fabricated via parent range checks.
+Straight-line subset only; unknown shapes fail conservative.
+
+### P8 — hardening sweep
+Both profiles zero warnings. 24 examples lint+check clean. Vault doctor
+clean. Full-solve regressions green across Int/List<Int>/F32 shapes.
+
 ## Changes Made on 2026-08-26 (late)
 
 ### flatmap/index2 + GR6 differential parity in solve
