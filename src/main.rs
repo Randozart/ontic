@@ -42,7 +42,10 @@ fn dispatch(args: &[String]) -> i32 {
         Some("lint") => match args.get(2) {
             Some(path) => cmd_lint(path),
             None => usage("lint needs a .ont file"),
-        },        Some("lib") => cmd_lib(args),
+        },
+        #[cfg(feature = "proven")]
+        Some("prove") => cmd_prove(&args[2..]),
+        Some("lib") => cmd_lib(args),
         Some("ablate") => cmd_ablate(args),
         Some("pack") => cmd_pack(args),
         Some("unpack") => cmd_unpack(args),
@@ -85,6 +88,7 @@ USAGE:
   ontic pack <key|Path> -o <name>.ous             bundle a kernel into .ous
   ontic unpack <x.ous> -d <dir>                   extract .so/.h/.mlir from bundle
   ontic key <file.ont> [--gen Path]               print canonical SHA-256 key
+  ontic prove <file.ont> --hand <cand>            overflow-absence proof (build: --features proven)
   ontic corpus [backfill|stats|export]            training-corpus tooling
     export: --format chat|dpo --out F --exclude-key K1,K2  (ONTIC_COLLECT=1)
 
@@ -1855,6 +1859,62 @@ fn cmd_vault_import(args: &[String]) -> i32 {
 fn die(msg: &str) -> i32 {
     eprintln!("{msg}");
     1
+}
+
+/// `ontic prove <file.ont> --hand <cand>` — overflow-absence analysis for
+/// the proven tier (feature-gated). Reports Proven/Unproven with honest
+/// reasons or a trapping parameter witness. Runs only after a candidate
+/// exists; it never substitutes for the sieve.
+#[cfg(feature = "proven")]
+fn cmd_prove(args: &[String]) -> i32 {
+    let path = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(p) => p.clone(),
+        None => return usage("prove needs a .ont file"),
+    };
+    let hand_idx = match args.iter().position(|a| a == "--hand") {
+        Some(i) => i,
+        None => return usage("prove needs --hand <candidate-file>"),
+    };
+    let cand_path = match args.get(hand_idx + 1) {
+        Some(p) => p.clone(),
+        None => return usage("--hand needs a candidate file path"),
+    };
+    let src = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => return die(&format!("read {path}: {e}")),
+    };
+    let file = match recipe::parse_ont(&src) {
+        Ok(f) => f,
+        Err(e) => return die(&format!("{path}: invalid gen: {e}")),
+    };
+    let gen = match pick_gen(&file, None) {
+        Ok(g) => g,
+        Err(e) => return die(&format!("{path}: {e}")),
+    };
+    let cand_text = match std::fs::read_to_string(&cand_path) {
+        Ok(s) => s,
+        Err(e) => return die(&format!("read {cand_path}: {e}")),
+    };
+    let cand = match sketch::parse(&cand_text) {
+        Ok(c) => c,
+        Err(e) => return die(&format!("{cand_path}: S1 parse failed: {e:?}")),
+    };
+    if let Err(e) = check::check(&cand) {
+        return die(&format!("{cand_path}: S2 typecheck failed: {e}"));
+    }
+    match ontic::prove::proof_for(&gen, &cand) {
+        ontic::prove::Proof::Proven(how) => {
+            println!("PROVEN   {}", gen.name);
+            println!("  {how}");
+            println!("  flag-free codegen eligible (GR11 declared fast tier)");
+            0
+        }
+        ontic::prove::Proof::Unproven(why) => {
+            println!("UNPROVEN {}", gen.name);
+            println!("  {why}");
+            1
+        }
+    }
 }
 
 /// `ontic lint <file.ont>` — static spec-quality findings before forge spend.

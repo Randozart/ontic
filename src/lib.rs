@@ -23,6 +23,8 @@ pub mod probes;
 pub mod nous;
 pub mod probes_solver;
 pub mod program;
+#[cfg(feature = "proven")]
+pub mod prove;
 pub mod recipe;
 pub mod rng;
 pub mod sampler;
