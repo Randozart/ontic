@@ -116,6 +116,7 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         ));
                         locals.push((name.clone(), Local::ListF { c_name: cn, len: vs.len() }));
                     }
+                    crate::gen::Value::Str(_) => unreachable!("Str recipe literal"),
                 }
             }
             Stmt::BindCall(target, callee, args) => {
@@ -167,8 +168,9 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                                 call_args.push_str(&format!("{}L, ", *b as i64))
                             }
                             crate::gen::Value::List(_)
-                            | crate::gen::Value::FloatList(_) => {
-                                return Err(format!("list literal arg to `{}` unsupported", callee))
+                            | crate::gen::Value::FloatList(_)
+                            | crate::gen::Value::Str(_) => {
+                                return Err(format!("literal arg to `{}` unsupported", callee))
                             }
                         },
                         (CallArg::Lit(_), true) => {

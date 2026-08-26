@@ -311,6 +311,9 @@ pub fn bench_c_source_from_row(
             crate::gen::Value::Tuple(_) => {
                 return Err("tuple-valued bench input unsupported".to_string());
             }
+            crate::gen::Value::Str(_) => {
+                return Err("Str-valued bench input unsupported".to_string());
+            }
         }
     }
     let tail = call_args.trim_end_matches(", ");

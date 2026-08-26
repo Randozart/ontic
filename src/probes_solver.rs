@@ -165,6 +165,7 @@ fn table_of(gen: &Gen) -> Table {
             }
             Ty::Tuple(_) => {}
             Ty::F64 | Ty::F32 => {}
+        Ty::Str => unreachable!("Str not supported here"),
         }
     }
     entries.sort();

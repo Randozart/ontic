@@ -12,6 +12,8 @@ pub enum Ty {
     ListInt,
     ListF64,
     ListF32,
+    /// Opaque string — only str_len/str_eq operate on it.
+    Str,
     /// Multi-value return: components in declaration order. Params of
     /// tuple type are rejected at S2; only return positions allow them.
     Tuple(Vec<Ty>),
@@ -28,6 +30,7 @@ impl Ty {
             Ty::ListInt => "List<Int>".to_string(),
             Ty::ListF64 => "List<F64>".to_string(),
             Ty::ListF32 => "List<F32>".to_string(),
+            Ty::Str => "Str".to_string(),
             Ty::Tuple(ts) => format!(
                 "({})",
                 ts.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")
@@ -82,6 +85,10 @@ pub enum Builtin {
     Exp,
     Log,
     Abs,
+    /// str_len(Str) -> Int: opaque string length.
+    StrLen,
+    /// str_eq(Str, Str) -> Bool: opaque string equality.
+    StrEq,
 }
 
 /// Unary operators.
@@ -294,7 +301,8 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                     | "abs" | "map" | "fold" | "let" | "if" | "else" | "true"
                     | "false" | "in" | "from" | "Int" | "F64" | "F32" | "Bool"
                     | "List" | "fn" | "index" | "range" | "until"
-                    | "min_el" | "max_el" | "flatmap" | "index2"
+                    | "min_el" | "max_el" | "flatmap" | "index2" | "str_len"
+                    | "str_eq" | "Str"
             );
             if !is_keyword {
                 // Speculative dotted-path scan: ident ('.' ident)* then ws+'('
@@ -367,7 +375,10 @@ fn lex(src: &str) -> Result<Vec<Lexed>, ParseError> {
                 "F64" => Some("F64"),
                 "F32" => Some("F32"),
                 "Bool" => Some("Bool"),
+                "Str" => Some("Str"),
                 "List" => Some("List"),
+                "str_len" => Some("str_len"),
+                "str_eq" => Some("str_eq"),
                 _ => None,
             };
             match kw {
@@ -553,6 +564,10 @@ impl Parser {
             Some(Tok::Word("Bool")) => {
                 self.pos += 1;
                 Ok(Ty::Bool)
+            }
+            Some(Tok::Word("Str")) => {
+                self.pos += 1;
+                Ok(Ty::Str)
             }
             Some(Tok::Word("List")) => {
                 self.pos += 1;
@@ -884,12 +899,12 @@ impl Parser {
                     Box::new(st),
                 ))
             }
-            Some(Tok::Word(w @ ("len" | "index" | "range" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs" | "min_el" | "max_el"))) => {
+            Some(Tok::Word(w @ ("len" | "index" | "range" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs" | "min_el" | "max_el" | "str_len" | "str_eq"))) => {
                 self.pos += 1;
                 self.eat_sym("(")?;
                 let e = self.parse_expr()?;
-                // index and elementwise min/max take a second argument.
-                let second = if w == "index" || w == "min_el" || w == "max_el" {
+                // index, elementwise min/max, str_eq take a second argument.
+                let second = if w == "index" || w == "min_el" || w == "max_el" || w == "str_eq" {
                     self.eat_sym(",")?;
                     Some(self.parse_expr()?)
                 } else {
@@ -908,6 +923,8 @@ impl Parser {
                     "sqrt" => Builtin::Sqrt,
                     "exp" => Builtin::Exp,
                     "log" => Builtin::Log,
+                    "str_len" => Builtin::StrLen,
+                    "str_eq" => Builtin::StrEq,
                     _ => Builtin::Abs,
                 };
                 match second {
@@ -1046,7 +1063,7 @@ root        ::= name ws "(" ws params ws ")" ws "->" ws type ws "{" ws e ws "}" 
 name        ::= [a-z_] [a-zA-Z0-9_]*
 params      ::= param (ws "," ws param)*
 param       ::= pid ws ":" ws type
-type        ::= "Int" | "F64" | "F32" | "Bool" | "List" "<" ("Int"| "F64" | "F32") ">" | "(" ws tupparts ws ")"
+type        ::= "Int" | "F64" | "F32" | "Bool" | "Str" | "List" "<" ("Int"| "F64" | "F32") ">" | "(" ws tupparts ws ")"
 tupparts    ::= type (ws "," ws type)*
 e           ::= letx | letx2 | ifx | orx
 letx        ::= "let" ws pid ws "=" ws e ws ";" ws e
@@ -1064,8 +1081,8 @@ unx         ::= "-" unx | "!" unx | prim
 callx       ::= cpath ws "(" ws callargs ws ")"
 cpath       ::= ident ("." ident)*
 callargs    ::= e (ws "," ws e)*
-unop1       ::= "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs" | "range"
-binop1      ::= "index"
+unop1       ::= "len" | "sum" | "max" | "min" | "sqrt" | "exp" | "log" | "abs" | "range" | "str_len"
+binop1      ::= "index" | "str_eq"
 prim        ::= int | float | "true" | "false" | pid | listlit | unop1 ws "(" ws e ws ")" | binop1 ws "(" ws e ws "," ws e ws ")" | binop2b ws "(" ws e ws "," ws e ws "," ws e ws "," ws e ws ")" | callx | "map" ws pid ws "in" ws e ws "{" ws e ws "}" | "flatmap" ws pid ws "in" ws e ws "{" ws e ws "}" | "fold" ws pid ws "in" ws e ws "," ws pid ws "from" ws e ws "{" ws e ws "}" | "(" ws e ws ")"
 binop2b     ::= "index2"
 pid         ::= "%" [a-zA-Z_] [a-zA-Z0-9_]*
@@ -1112,10 +1129,8 @@ mod tests {
             ("str-type", "fn @f(%s: Str) -> Int { str_len(%s) }"),
         ];
         for (label, src) in fixtures {
-            // Strings are Phase-6 vocabulary: skip until Ty::Str lands.
-            if *label == "str-type" && !cfg!(feature = "strings") {
-                continue;
-            }
+            // Str is grammar-live since Phase 6; every fixture must parse.
+            let _ = label;
             if let Err(e) = parse(src) {
                 panic!("grammar parity fixture `{label}` failed to parse: {e:?}\n{src}");
             }

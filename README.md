@@ -182,6 +182,7 @@ Speed requires declaration.
 | `List<F64>` | `List<F64>` | `MR` |
 | `List<F32>` | `List<F32>` | `MR` |
 | `(T, U)` | `-> (T, U)` (return only) | struct `ontic_tup2_*` |
+| `Str` | declare-only v1; specs load, solves fail-closed at S2 | pending |
 
 | Expression | Purpose |
 |------------|---------|

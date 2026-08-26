@@ -22,6 +22,8 @@ pub enum Value {
     Bool(bool),
     List(Vec<i64>),
     FloatList(Vec<f64>),
+    /// Opaque string.
+    Str(String),
     /// Multi-component example output for tuple-returning gens.
     Tuple(Vec<Value>),
 }
@@ -35,6 +37,7 @@ impl Value {
             Value::Bool(_) => Ty::Bool,
             Value::List(_) => Ty::ListInt,
             Value::FloatList(_) => Ty::ListF64,
+            Value::Str(_) => Ty::Str,
             Value::Tuple(vs) => Ty::Tuple(vs.iter().map(|v| v.ty()).collect()),
         }
     }
@@ -56,6 +59,7 @@ impl fmt::Display for Value {
             Value::Int(v) => write!(f, "{}", v),
             Value::Float(v) => write!(f, "{}", v),
             Value::Bool(v) => write!(f, "{}", v),
+            Value::Str(s) => write!(f, "{}", s),
             Value::FloatList(vs) => {
                 write!(f, "[")?;
                 for (i, v) in vs.iter().enumerate() {
@@ -136,6 +140,14 @@ fn parse_value(s: &str) -> Result<Value, String> {
     }
     if t == "false" {
         return Ok(Value::Bool(false));
+    }
+    // Quoted string literal: opaque value, only str_len/str_eq consume it.
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        let inner = &t[1..t.len() - 1];
+        if inner.contains('"') {
+            return Err("string literal contains unescaped quote".to_string());
+        }
+        return Ok(Value::Str(inner.to_string()));
     }
     // List literals first: `[2.0, 4.0]` contains '.', which must not trip
     // scalar-float detection.
@@ -370,11 +382,12 @@ fn parse_type(s: &str) -> Result<Ty, String> {
         "F64" => Ok(Ty::F64),
         "F32" => Ok(Ty::F32),
         "Bool" => Ok(Ty::Bool),
+        "Str" => Ok(Ty::Str),
         "List<Int>" => Ok(Ty::ListInt),
         "List<F64>" => Ok(Ty::ListF64),
         "List<F32>" => Ok(Ty::ListF32),
         other => Err(format!(
-            "unsupported type `{}` (v1: Int, F64, F32, Bool, List<Int>, List<F64>, List<F32>)",
+            "unsupported type `{}` (v1: Int, F64, F32, Bool, Str, List<Int>, List<F64>, List<F32>)",
             other
         )),
     }

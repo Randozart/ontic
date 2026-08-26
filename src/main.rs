@@ -596,7 +596,7 @@ fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<siev
                     sketch::Ty::ListF32 => pipeline::CK::ListF32,
                     sketch::Ty::F64 => pipeline::CK::F64,
                     sketch::Ty::F32 => pipeline::CK::F32,
-                    sketch::Ty::Bool | sketch::Ty::Tuple(_) | sketch::Ty::Int => pipeline::CK::I64,
+                    sketch::Ty::Bool | sketch::Ty::Tuple(_) | sketch::Ty::Int | sketch::Ty::Str => pipeline::CK::I64,
                 };
                 let kinds: Vec<pipeline::CK> =
                     s.candidate.params.iter().map(|(_, t)| kind_of(t)).collect();
@@ -672,6 +672,7 @@ fn differential_parity(
         sketch::Ty::ListF64 => pipeline::RetSpec::ListF64,
         sketch::Ty::ListF32 => pipeline::RetSpec::ListF32,
         sketch::Ty::ListInt => pipeline::RetSpec::ListI64,
+        sketch::Ty::Str => return Err("Str return not supported in differential parity".to_string()),
         sketch::Ty::Tuple(cs) => pipeline::RetSpec::Tuple(
             cs.iter()
                 .map(|t| match t {
@@ -704,6 +705,7 @@ fn differential_parity(
             (Value::FloatList(vs), sketch::Ty::ListF32) => lists_f32.push(vs.clone()),
             (Value::FloatList(vs), _) => lists_f.push(vs.clone()),
             (Value::Tuple(_), _) => {}
+            (Value::Str(_), _) => {}
         }
     }
 

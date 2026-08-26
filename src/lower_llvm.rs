@@ -81,8 +81,8 @@ impl LlvmEmitter {
 fn llvm_param_types(ty: &Ty) -> Vec<&'static str> {
     match ty {
         Ty::ListInt | Ty::ListF64 | Ty::ListF32 => vec!["ptr", "ptr", "i64", "i64", "i64"],
-        // Checker rejects tuple params; direct-LLVM never sees them.
-        Ty::Tuple(_) => vec!["i64"],
+        // Checker rejects tuple and Str params; direct-LLVM never sees them.
+        Ty::Tuple(_) | Ty::Str => vec!["i64"],
         Ty::Int | Ty::Bool => vec!["i64"],
         Ty::F64 => vec!["double"],
         Ty::F32 => vec!["float"],

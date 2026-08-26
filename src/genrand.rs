@@ -51,6 +51,7 @@ impl Ctx {
 
 fn lit_of(ty: &Ty) -> Expr {
     match ty {
+        Ty::Str => Expr::IntLit(0),
         Ty::Int => Expr::IntLit(1),
         Ty::F64 | Ty::F32 => Expr::FloatLit(2.0),
         Ty::Bool => Expr::BoolLit(true),
@@ -141,6 +142,7 @@ fn gen_expr(ty: &Ty, ctx: &mut Ctx) -> Expr {
             ctx.depth_budget += 1;
             Expr::BinOp(op, Box::new(lhs), Box::new(rhs))
         }
+        Ty::Str => unreachable!("Str not supported here"),
     }
 }
 
@@ -181,6 +183,8 @@ pub fn render(e: &Expr) -> String {
         }
         Builtin(b, i) => {
             let name = match b {
+                crate::sketch::Builtin::StrLen => "str_len",
+                crate::sketch::Builtin::StrEq => "str_eq",
                 crate::sketch::Builtin::Len => "len",
                 crate::sketch::Builtin::Range => "range",
                 crate::sketch::Builtin::Sum => "sum",

@@ -28,6 +28,13 @@ fn builtin_ty(b: Builtin, t: Ty) -> Result<Ty, String> {
             "{:?} is elementwise (two arguments)",
             b
         )),
+        Builtin::StrLen => match t {
+            Ty::Str => Ok(Ty::Int),
+            other => Err(format!("str_len of {}", other.name())),
+        },
+        Builtin::StrEq => Err(format!(
+            "lowering: str_eq is binary (internal routing error)"
+        )),
         Builtin::Sum | Builtin::Max | Builtin::Min => match t {
             Ty::ListInt => Ok(Ty::Int),
             Ty::ListF64 => Ok(Ty::F64),
@@ -48,9 +55,32 @@ pub fn infer_type(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
     infer(e, env)
 }
 
+/// Str params/returns have no native ABI yet (no Str construction in the
+/// grammar); rejected at S2 exactly like tuple params. Widening later is
+/// additive (GR7).
+fn reject_str_positions(cand: &Candidate) -> Result<(), String> {
+    for (n, t) in &cand.params {
+        if matches!(t, Ty::Str) {
+            return Err(format!(
+                "param %{n}: Str params unsupported (opaque FFI ABI pending)"
+            ));
+        }
+    }
+    let str_ret = match &cand.ret {
+        Ty::Str => true,
+        Ty::Tuple(cs) => cs.iter().any(|c| matches!(c, Ty::Str)),
+        _ => false,
+    };
+    if str_ret {
+        return Err("return type: Str returns unsupported (no Str construction)".to_string());
+    }
+    Ok(())
+}
+
 /// Typecheck a candidate against its own signature. Returns Err with a
 /// human-readable reason on first mismatch.
 pub fn check(cand: &Candidate) -> Result<(), String> {
+    reject_str_positions(cand)?;
     let mut env: HashMap<String, Ty> = HashMap::new();
     for (n, t) in &cand.params {
         if env.insert(n.clone(), t.clone()).is_some() {
@@ -77,6 +107,7 @@ pub fn check(cand: &Candidate) -> Result<(), String> {
 
 /// Typecheck with declared vault dependencies available for call typing.
 pub fn check_with(cand: &Candidate, deps: &DepSigs) -> Result<(), String> {
+    reject_str_positions(cand)?;
     let mut env: HashMap<String, Ty> = HashMap::new();
     for (n, t) in &cand.params {
         if env.insert(n.clone(), t.clone()).is_some() {
@@ -628,6 +659,16 @@ fn infer_builtin2(b: Builtin, l: &Expr, r: &Expr, env: &HashMap<String, Ty>) -> 
                 return Err(format!("index position must be Int, got {}", rt.name()));
             }
             Ok(elem)
+        }
+        Builtin::StrEq => {
+            if lt != Ty::Str || rt != Ty::Str {
+                return Err(format!(
+                    "str_eq needs two Strs, got {} vs {}",
+                    lt.name(),
+                    rt.name()
+                ));
+            }
+            Ok(Ty::Bool)
         }
         Builtin::MinEl | Builtin::MaxEl => {
             if !matches!(lt, Ty::Int | Ty::F64) || !matches!(rt, Ty::Int | Ty::F64) {

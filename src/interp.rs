@@ -95,6 +95,13 @@ fn eval_builtin(b: Builtin, inner: &Expr, env: &Env, ctx: &Ctx) -> Result<Value,
             Value::FloatList(vs) => Ok(Value::Int(vs.len() as i64)),
             other => Err(EvalError::TypeError(format!("len of non-list {}", other))),
         },
+        Builtin::StrLen => match v {
+            Value::Str(s) => Ok(Value::Int(s.len() as i64)),
+            other => Err(EvalError::TypeError(format!("str_len of non-string {}", other))),
+        },
+        Builtin::StrEq => Err(EvalError::TypeError(
+            "internal: str_eq is binary".to_string(),
+        )),
         Builtin::MinEl | Builtin::MaxEl => Err(EvalError::TypeError(
             "internal: elementwise min/max are binary".to_string(),
         )),
@@ -309,6 +316,17 @@ fn eval_builtin2(
                     .map(|v| Value::Float(*v))
                     .ok_or(EvalError::IndexOutOfBounds(pos)),
                 other => Err(EvalError::TypeError(format!("index of {}", other))),
+            }
+        }
+        Builtin::StrEq => {
+            let lv = eval_ctx(l, env, ctx)?;
+            let rv = eval_ctx(r, env, ctx)?;
+            match (lv, rv) {
+                (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a == b)),
+                (Value::Str(_), other) | (other, Value::Str(_)) => {
+                    Err(EvalError::TypeError(format!("str_eq with non-string {}", other)))
+                }
+                (a, b) => Err(EvalError::TypeError(format!("str_eq of non-strings {} {}", a, b))),
             }
         }
         Builtin::MinEl | Builtin::MaxEl => {

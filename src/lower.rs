@@ -28,6 +28,8 @@ pub type CallMap = HashMap<String, CallTarget>;
 /// Display name for a builtin in diagnostics.
 fn builtin_name(b: Builtin) -> &'static str {
     match b {
+        Builtin::StrLen => "str_len",
+        Builtin::StrEq => "str_eq",
         Builtin::Len => "len",
         Builtin::Range => "range",
         Builtin::Sum => "sum",
@@ -95,6 +97,8 @@ pub fn expr_display(e: &Expr) -> String {
             "{}({})",
             match b {
                 Builtin::Len => "len",
+                Builtin::StrLen => "str_len",
+                Builtin::StrEq => "str_eq",
                 Builtin::Range => "range",
                 Builtin::Sum => "sum",
                 Builtin::Max => "max",
@@ -259,9 +263,10 @@ fn mlir_param_type(ty: &Ty) -> &'static str {
         Ty::ListInt => "memref<?xi64>",
         Ty::ListF64 => "memref<?xf64>",
         Ty::ListF32 => "memref<?xf32>",
-        // Checker rejects tuple params before emission; arm keeps the
-        // match exhaustive without inventing an ABI.
+        // Checker rejects tuple and Str params before emission; arms
+        // keep the match exhaustive without inventing an ABI.
         Ty::Tuple(_) => "",
+        Ty::Str => "",
     }
 }
 
@@ -276,6 +281,7 @@ fn mlir_ret_type(ty: &Ty) -> Result<&'static str, String> {
         // Multi-result emission is a separate path; single-type callers
         // must reject tuples before asking for one MLIR type.
         Ty::Tuple(_) => Err("tuple return needs multi-result emitter".to_string()),
+        Ty::Str => Err("Str return rejected at S2".to_string()),
     }
 }
 
@@ -819,6 +825,9 @@ fn emit_builtin(
             em.line(&format!("{} = {} {} : f64", out, op, xf));
             Ok(out)
         }
+        Builtin::StrLen | Builtin::StrEq => {
+            Err(format!("lowering: Str builtins not supported in MLIR"))
+        }
     }
 }
 
@@ -907,6 +916,7 @@ fn emit_call_multi(
         Ty::ListF64 => vec!["memref<?xf64>".to_string()],
         Ty::ListF32 => vec!["memref<?xf32>".to_string()],
         Ty::ListInt => vec!["memref<?xi64>".to_string()],
+        Ty::Str => vec!["!llvm.ptr".to_string()],
     };
     if ret_tys.len() == 1 {
         let out = em.fresh("call");
@@ -2526,6 +2536,7 @@ fn c_ret_ty(ty: &Ty) -> Result<&'static str, String> {
         Ty::ListInt | Ty::ListF64 | Ty::ListF32 => Ok("void*"),
         // Tuple returns use a by-value C struct (see c_tuple_tag).
         Ty::Tuple(_) => Err("tuple return uses struct ABI, not c_ret_ty".to_string()),
+        Ty::Str => Err("Str return rejected at S2".to_string()),
     }
 }
 
@@ -2621,7 +2632,8 @@ pub fn emit_header(
             Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
             Ty::F64 => parts.push(format!("double {n}")),
             Ty::F32 => parts.push(format!("float {n}")),
-            Ty::Tuple(_) => {}
+            // Checker rejects tuple and Str params; arms exhaustive only.
+            Ty::Tuple(_) | Ty::Str => {}
         }
     }
     // Deterministic sanitized guard tokens from key8 + kernel name.
@@ -2717,7 +2729,8 @@ pub fn emit_header_hpp(
             Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
             Ty::F64 => parts.push(format!("double {n}")),
             Ty::F32 => parts.push(format!("float {n}")),
-            Ty::Tuple(_) => {}
+            // Checker rejects tuple and Str params; arms exhaustive only.
+            Ty::Tuple(_) | Ty::Str => {}
         }
     }
     let sanitize = |s: &str| -> String {
@@ -3007,7 +3020,7 @@ pub fn c_guard_sentinel(ty: &Ty) -> &'static str {
         Ty::Int | Ty::Bool => "LONG_MIN",
         // List returns are flat-MemRef descriptors: NULL pointer.
         Ty::ListInt | Ty::ListF64 | Ty::ListF32 => "0",
-        Ty::Tuple(_) => "LONG_MIN",
+        Ty::Tuple(_) | Ty::Str => "LONG_MIN",
     }
 }
 
@@ -3016,7 +3029,7 @@ fn c_guard_printf_spec(ty: &Ty) -> &'static str {
     match ty {
         Ty::F64 | Ty::F32 => "%.17g",
         Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 | Ty::ListF32 => "%ld",
-        Ty::Tuple(_) => "%ld",
+        Ty::Tuple(_) | Ty::Str => "%ld",
     }
 }
 
@@ -3096,8 +3109,8 @@ pub fn emit_shim_c(
             Ty::Int | Ty::Bool => c_params.push(format!("long {n}")),
             Ty::F64 => c_params.push(format!("double {n}")),
             Ty::F32 => c_params.push(format!("float {n}")),
-            // Checker rejects tuple params; shim never sees one.
-            Ty::Tuple(_) => {}
+            // Checker rejects tuple and Str params; shim never sees one.
+            Ty::Tuple(_) | Ty::Str => {}
         }
     }
     let c_args_str = if c_params.is_empty() {
