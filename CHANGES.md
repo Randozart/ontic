@@ -1,5 +1,24 @@
 # CHANGES
 
+## Changes Made on 2026-08-26 (follow-ups)
+
+### 2026-08-26 — tuple destructuring + F32 drivers
+
+Plan: docs/plans/2026-08-26-followups-destructure-f32.md (fa9bde0).
+
+**Leg A (`3cccbd0`)** — `let (a, b) = Dep.f(...);` via additive
+Expr::LetTup across all layers; fixes: F32 dep-call f64 suffix bug,
+guarded rename clobbering dep symbols, shim list-param call expansion,
+MR-descriptor struct ABI for list-carrying tuples. E2E:
+Split.halve -> Split.sumhalves chain vaults with guarded twins;
+ctypes sumhalves(2, [1..4]) = 10.0.
+
+**Leg B (this commit)** — F32 differential drivers: eval_c_source /
+eval_native take f32 value streams; RetSpec::F32 (%.9g exact-roundtrip);
+new F32 bit-parity test vs interpreter oracle.
+
+Suite: 173/173.
+
 ## Changes Made on 2026-08-26 (overnight)
 
 ### Overnight slate — all five legs landed

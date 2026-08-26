@@ -62,6 +62,7 @@ pub fn tuple_typedef(kinds: &[CK]) -> String {
 pub enum RetSpec {
     I64,
     F64,
+    F32,
     /// memref<?xf64> descriptor returned by value; print first 4 elements.
     ListF64,
     /// Multi-value struct return; components printed space-separated.
@@ -358,19 +359,22 @@ int main(void) {{
 /// Build a C driver that calls the function once on FIXED inputs and prints
 /// the result (%.17g). Used by differential tests: interpreter and native
 /// must agree bit-for-bit.
+#[allow(clippy::too_many_arguments)]
 pub fn eval_c_source(
     fn_name: &str,
     kinds: &[CK],
     list_vals: &[i64],
     list_f64_vals: &[f64],
+    list_f32_vals: &[f64],
     scalars_i64: &[i64],
     scalars_f64: &[f64],
+    scalars_f32: &[f64],
     ret: RetSpec,
 ) -> Result<String, String> {
     let mut proto = String::new();
     let mut decls = String::new();
     let mut call_args = String::new();
-    let (mut li, mut si, mut sf) = (0usize, 0usize, 0usize);
+    let (mut li, mut si, mut sf, mut lf32, mut sf32) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for k in kinds {
         if !proto.is_empty() {
             proto.push_str(", ");
@@ -415,8 +419,24 @@ pub fn eval_c_source(
                 call_args.push_str(&format!("f{}, ", sf));
                 sf += 1;
             }
-            CK::F32 | CK::ListF32 => {
-                return Err("F32 drivers not wired into differential eval yet".to_string())
+            CK::F32 => {
+                decls.push_str(&format!("  float g{} = {:e}f;\n", sf32, scalars_f32[sf32]));
+                call_args.push_str(&format!("g{}, ", sf32));
+                sf32 += 1;
+            }
+            CK::ListF32 => {
+                let vals: Vec<String> = list_f32_vals.iter().map(|v| format!("{:e}f", v)).collect();
+                decls.push_str(&format!(
+                    "  float e{0}[] = {{{1}}};\n",
+                    lf32,
+                    vals.join(", ")
+                ));
+                call_args.push_str(&format!(
+                    "e{0}, e{0}, 0, {1}, 1, ",
+                    lf32,
+                    list_f32_vals.len()
+                ));
+                lf32 += 1;
             }
         }
     }
@@ -428,6 +448,7 @@ pub fn eval_c_source(
     let (ret_t, fmt) = match ret {
         RetSpec::I64 => ("long".to_string(), "%ld".to_string()),
         RetSpec::F64 => ("double".to_string(), "%.17g".to_string()),
+        RetSpec::F32 => ("float".to_string(), "%.9g".to_string()),
         RetSpec::ListF64 => ("MR".to_string(), String::new()),
         RetSpec::Tuple(_) => (tuple_tag(&tuple_kinds), String::new()),
     };
@@ -503,14 +524,17 @@ int main(void) {{
 
 /// Run the function once natively; returns the parsed numeric result
 /// (integer results arrive as exact f64).
+#[allow(clippy::too_many_arguments)]
 pub fn eval_native(
     mlir_text: &str,
     fn_name: &str,
     kinds: &[CK],
     list_vals: &[i64],
     list_f64_vals: &[f64],
+    list_f32_vals: &[f64],
     scalars_i64: &[i64],
     scalars_f64: &[f64],
+    scalars_f32: &[f64],
     ret: RetSpec,
     extra_mls: &[String],
 ) -> Result<Vec<f64>, String> {
@@ -540,8 +564,10 @@ pub fn eval_native(
         kinds,
         list_vals,
         list_f64_vals,
+        list_f32_vals,
         scalars_i64,
         scalars_f64,
+        scalars_f32,
         ret,
     )?;
     std::fs::write(&c_p, c_text).map_err(|e| e.to_string())?;
@@ -671,6 +697,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             RetSpec::I64,
             &[],
         )
@@ -712,7 +740,7 @@ mod trap_tests {
 
         // Clean inputs: both tiers agree.
         let got =
-            eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], RetSpec::I64, &[])
+            eval_native(&mlir, "f", &[CK::List], &[3, 4, 5], &[], &[], &[], &[], &[], RetSpec::I64, &[])
                 .expect("clean runs");
         assert_eq!(got, vec![12.0]);
 
@@ -725,9 +753,50 @@ mod trap_tests {
         assert!(killed.is_err());
         // ...and native must not return a value either.
         assert!(
-            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], RetSpec::I64, &[]).is_err(),
+            eval_native(&mlir, "f", &[CK::List], &[i64::MAX, 1], &[], &[], &[], &[], &[], RetSpec::I64, &[]).is_err(),
             "native returned a value where the oracle kills"
         );
+    }
+
+    /// F32 bit-parity: interpreter oracle vs native float pipeline must
+    /// agree within f32 precision (values round-trip exactly for the
+    /// chosen grid). Skips cleanly without the toolchain.
+    #[test]
+    fn test_f32_native_parity() {
+        if find_tool("mlir-opt").is_none() || find_tool("llc").is_none() {
+            eprintln!("toolchain missing; F32 parity skipped");
+            return;
+        }
+        let cand = sketch::parse("fn @s(%x: F32) -> F32 { %x * 2.0 }").unwrap();
+        check::check(&cand).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new()).unwrap();
+
+        let inputs = vec![Value::Float(1.5)];
+        let expect = interp::eval_candidate(&cand, &inputs, &interp::Ctx::checked()).unwrap();
+        let got = eval_native(
+            &mlir,
+            "s",
+            &[CK::F32],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[1.5],
+            RetSpec::F32,
+            &[],
+        )
+        .expect("f32 native evaluates");
+        match expect {
+            Value::Float(w) => {
+                let g = got[0];
+                assert!(
+                    (g - w).abs() <= (w.abs() * 1e-6).max(1e-6),
+                    "f32 parity drift: native {g} vs oracle {w}"
+                );
+            }
+            other => panic!("unexpected oracle value {other:?}"),
+        }
     }
 }
 
@@ -765,7 +834,9 @@ mod float_tests {
             &[],
             &[],
             &[],
+            &[],
             &[1.5, 2.5],
+            &[],
             RetSpec::F64,
             &[],
         )
@@ -808,6 +879,8 @@ mod listf64_tests {
             &[CK::ListF64],
             &[],
             &[1.5, 2.0, -0.5],
+            &[],
+            &[],
             &[],
             &[],
             RetSpec::F64,
@@ -857,6 +930,8 @@ mod broadcast_tests {
             &[CK::ListF64],
             &[],
             &[1.0, 2.0],
+            &[],
+            &[],
             &[],
             &[],
             RetSpec::ListF64,
