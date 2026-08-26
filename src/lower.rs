@@ -1011,10 +1011,28 @@ fn emit_concat(
     rt: &Ty,
     em: &mut Emitter,
 ) -> Result<String, String> {
-    let mty_l = if matches!(lt, Ty::ListF64) { "memref<?xf64>" } else { "memref<?xi64>" };
-    let mty_r = if matches!(rt, Ty::ListF64) { "memref<?xf64>" } else { "memref<?xi64>" };
-    let elem = if matches!(lt, Ty::ListF64) || matches!(rt, Ty::ListF64) { "f64" } else { "i64" };
-    let mty_out = if elem == "f64" { "memref<?xf64>" } else { "memref<?xi64>" };
+    let mty_l = match lt {
+        Ty::ListF64 => "memref<?xf64>",
+        Ty::ListF32 => "memref<?xf32>",
+        _ => "memref<?xi64>",
+    };
+    let mty_r = match rt {
+        Ty::ListF64 => "memref<?xf64>",
+        Ty::ListF32 => "memref<?xf32>",
+        _ => "memref<?xi64>",
+    };
+    let elem = if matches!(lt, Ty::ListF64) || matches!(rt, Ty::ListF64) {
+        "f64"
+    } else if matches!(lt, Ty::ListF32) || matches!(rt, Ty::ListF32) {
+        "f32"
+    } else {
+        "i64"
+    };
+    let mty_out = match elem {
+        "f64" => "memref<?xf64>",
+        "f32" => "memref<?xf32>",
+        _ => "memref<?xi64>",
+    };
 
     let idx0 = em.const_index(0);
     let step = em.const_index(1);
@@ -1059,29 +1077,25 @@ fn emit_concat(
     em.indent -= 1;
     em.line("}");
 
-    // Copy right side at offset = len(left).
+    // Copy right side at offset = len(left). The right source is indexed
+    // from ITS OWN zero; the destination is the absolute offset.
     let ivr = em.fresh("cir");
     let accr = em.fresh("car");
-    let endr = em.fresh("cer");
-    em.line(&format!(
-        "{} = arith.addi {}, {} : index",
-        endr, dim_l, dim_r
-    ));
     em.line(&format!(
         "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (index) {{",
-        accr, ivr, dim_l, endr, step, accr, dim_l
+        accr, ivr, idx0, dim_r, step, accr, idx0
     ));
     em.indent += 1;
     let vr = em.fresh("vr");
     em.line(&format!("{} = memref.load {}[{}] : {}", vr, rv, ivr, mty_r));
-    let off = em.fresh("coff");
+    let dst = em.fresh("cdst");
     em.line(&format!(
-        "{} = arith.subi {}, {} : index",
-        off, ivr, dim_l
+        "{} = arith.addi {}, {} : index",
+        dst, dim_l, ivr
     ));
     em.line(&format!(
         "memref.store {}, {}[{}] : {}",
-        vr, alloc, off, mty_out
+        vr, alloc, dst, mty_out
     ));
     em.line(&format!("scf.yield {} : index", accr));
     em.indent -= 1;

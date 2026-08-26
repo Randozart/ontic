@@ -1156,3 +1156,11 @@ pub fn build_shared_so_guarded(
 
     Ok(shim_source.to_string())
 }
+    #[test]
+    fn dbg_if_let() {
+        use crate::{interp, sketch};
+        let c = sketch::parse("fn @f(%x: Int) -> Int { let %d = %x + 1; [%d, (if %d <= 2 { %d } else { 9 })] }").unwrap_or_else(|e| { println!("PARSE ERR {e:?}"); panic!() });
+        // drop the accidental fold tail if present
+        let got = interp::eval_candidate(&c, &[crate::gen::Value::Int(5)], &interp::Ctx::checked());
+        println!("res={got:?}");
+    }
