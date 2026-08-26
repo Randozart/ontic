@@ -663,53 +663,69 @@ fn differential_parity(
     row: &[crate::gen::Value],
 ) -> Result<(), String> {
     use crate::gen::Value;
+    // Return-shape driver selection. Every expressible return type has a
+    // driver; an unmatched shape is a BUG — fail closed, never skip.
     let ret_spec = match &cand.ret {
         sketch::Ty::Int | sketch::Ty::Bool => pipeline::RetSpec::I64,
         sketch::Ty::F64 => pipeline::RetSpec::F64,
         sketch::Ty::F32 => pipeline::RetSpec::F32,
         sketch::Ty::ListF64 => pipeline::RetSpec::ListF64,
-        _ => return Ok(()), // List<Int>/tuple ret drivers: parity TODO
+        sketch::Ty::ListF32 => pipeline::RetSpec::ListF32,
+        sketch::Ty::ListInt => pipeline::RetSpec::ListI64,
+        sketch::Ty::Tuple(cs) => pipeline::RetSpec::Tuple(
+            cs.iter()
+                .map(|t| match t {
+                    sketch::Ty::ListInt => pipeline::CK::List,
+                    sketch::Ty::ListF64 => pipeline::CK::ListF64,
+                    sketch::Ty::ListF32 => pipeline::CK::ListF32,
+                    sketch::Ty::F64 => pipeline::CK::F64,
+                    sketch::Ty::F32 => pipeline::CK::F32,
+                    _ => pipeline::CK::I64,
+                })
+                .collect(),
+        ),
     };
+
+    // Parameter streams, grouped per list occurrence; F32 params route to
+    // their own f32-typed C arrays so buffers are never empty/vacuous.
     let mut lists_i: Vec<Vec<i64>> = Vec::new();
     let mut lists_f: Vec<Vec<f64>> = Vec::new();
-    let lists_f32: Vec<Vec<f64>> = Vec::new();
+    let mut lists_f32: Vec<Vec<f64>> = Vec::new();
     let mut si_i = Vec::new();
     let mut si_f = Vec::new();
-    let si_f32 = Vec::new();
-    for v in row {
-        match v {
-            Value::Int(x) => si_i.push(*x),
-            Value::Bool(b) => si_i.push(*b as i64),
-            Value::Float(f) => si_f.push(*f),
-            Value::List(vs) => lists_i.push(vs.clone()),
-            Value::FloatList(vs) => lists_f.push(vs.clone()),
-            Value::Tuple(_) => return Ok(()),
+    let mut si_f32 = Vec::new();
+    for (v, (_, t)) in row.iter().zip(cand.params.iter()) {
+        match (v, t) {
+            (Value::Int(x), _) => si_i.push(*x),
+            (Value::Bool(b), _) => si_i.push(*b as i64),
+            (Value::Float(f), sketch::Ty::F32) => si_f32.push(*f),
+            (Value::Float(f), _) => si_f.push(*f),
+            (Value::List(vs), _) => lists_i.push(vs.clone()),
+            (Value::FloatList(vs), sketch::Ty::ListF32) => lists_f32.push(vs.clone()),
+            (Value::FloatList(vs), _) => lists_f.push(vs.clone()),
+            (Value::Tuple(_), _) => {}
         }
     }
+
     let ictx = interp::Ctx {
         deps: std::sync::Arc::new(deps.clone()),
     };
     let expect = interp::eval_candidate(cand, row, &ictx)
         .map_err(|e| format!("oracle re-eval failed: {e}"))?;
-    let want = match &expect {
-        Value::Int(v) => *v as f64,
-        Value::Bool(b) => *b as i64 as f64,
-        Value::Float(f) => *f,
-        _ => f64::NAN, // list/tuple handled below
-    };
+
     let kinds: Vec<pipeline::CK> = cand
         .params
         .iter()
-        .zip(row.iter())
-        .map(|((_, t), v)| match (t, v) {
-            (sketch::Ty::ListInt, _) => pipeline::CK::List,
-            (sketch::Ty::ListF64, _) | (_, Value::FloatList(_)) => pipeline::CK::ListF64,
-            (sketch::Ty::ListF32, _) => pipeline::CK::ListF32,
-            (sketch::Ty::F64, _) => pipeline::CK::F64,
-            (sketch::Ty::F32, _) => pipeline::CK::F32,
+        .map(|(_, t)| match t {
+            sketch::Ty::ListInt => pipeline::CK::List,
+            sketch::Ty::ListF64 => pipeline::CK::ListF64,
+            sketch::Ty::ListF32 => pipeline::CK::ListF32,
+            sketch::Ty::F64 => pipeline::CK::F64,
+            sketch::Ty::F32 => pipeline::CK::F32,
             _ => pipeline::CK::I64,
         })
         .collect();
+
     let got = pipeline::eval_native(
         mlir,
         &cand.name,
@@ -720,27 +736,64 @@ fn differential_parity(
         &si_i,
         &si_f,
         &si_f32,
-        ret_spec,
+        ret_spec.clone(),
         &[],
     )
     .map_err(|e| format!("native eval failed: {e}"))?;
-    // Shape-aware comparison.
-    if let Value::FloatList(vs) = &expect {
-        let n = got.first().copied().unwrap_or(-1.0) as usize;
-        for (i, w) in vs.iter().take(4).enumerate() {
-            let g = got.get(i + 1).copied().unwrap_or(f64::NAN);
-            if (g - w).abs() > 1e-6_f64.max(w.abs() * 1e-9) {
-                return Err(format!("elem {i}: oracle says {w}, native says {g}"));
+
+    // Shape-aware comparison against the oracle value.
+    let close = |g: f64, w: f64| (g - w).abs() <= 1e-6_f64.max(w.abs() * 1e-9);
+    match (&expect, &cand.ret) {
+        (Value::FloatList(vs), sketch::Ty::ListF64)
+        | (Value::FloatList(vs), sketch::Ty::ListF32) => {
+            for (i, w) in vs.iter().take(4).enumerate() {
+                let g = got.get(i + 1).copied().unwrap_or(f64::NAN);
+                if !close(g, *w) {
+                    return Err(format!("elem {i}: oracle says {w}, native says {g}"));
+                }
+            }
+            Ok(())
+        }
+        (Value::List(vs), sketch::Ty::ListInt) => {
+            for (i, w) in vs.iter().take(4).enumerate() {
+                let g = got.get(i + 1).copied().unwrap_or(f64::NAN);
+                if !close(g, *w as f64) {
+                    return Err(format!("elem {i}: oracle says {w}, native says {g}"));
+                }
+            }
+            Ok(())
+        }
+        (Value::Tuple(ws), sketch::Ty::Tuple(_)) => {
+            for (i, w) in ws.iter().enumerate() {
+                let g = got.get(i).copied().unwrap_or(f64::NAN);
+                let w = match w {
+                    Value::Int(v) => *v as f64,
+                    Value::Bool(b) => *b as i64 as f64,
+                    Value::Float(f) => *f,
+                    other => {
+                        return Err(format!("tuple component {other:?} unsupported"))
+                    }
+                };
+                if !close(g, w) {
+                    return Err(format!("comp {i}: oracle says {w}, native says {g}"));
+                }
+            }
+            Ok(())
+        }
+        _ => {
+            let want = match &expect {
+                Value::Int(v) => *v as f64,
+                Value::Bool(b) => *b as i64 as f64,
+                Value::Float(f) => *f,
+                other => return Err(format!("unsupported oracle shape {other:?}")),
+            };
+            let g = got.first().copied().unwrap_or(f64::NAN);
+            if close(g, want) {
+                Ok(())
+            } else {
+                Err(format!("oracle says {want}, native says {g}"))
             }
         }
-        let _ = n;
-        return Ok(());
-    }
-    let g = got.first().copied().unwrap_or(f64::NAN);
-    if (g - want).abs() <= 1e-6_f64.max(want.abs() * 1e-9) {
-        Ok(())
-    } else {
-        Err(format!("oracle says {want}, native says {g}"))
     }
 }
 

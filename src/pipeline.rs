@@ -79,6 +79,10 @@ pub enum RetSpec {
     F32,
     /// memref<?xf64> descriptor returned by value; print first 4 elements.
     ListF64,
+    /// memref<?xi64> descriptor returned by value; print first 4 elements.
+    ListI64,
+    /// memref<?xf32> descriptor returned by value; print first 4 elements.
+    ListF32,
     /// Multi-value struct return; components printed space-separated.
     Tuple(Vec<CK>),
 }
@@ -469,7 +473,9 @@ pub fn eval_c_source(
         RetSpec::I64 => ("long".to_string(), "%ld".to_string()),
         RetSpec::F64 => ("double".to_string(), "%.17g".to_string()),
         RetSpec::F32 => ("float".to_string(), "%.9g".to_string()),
-        RetSpec::ListF64 => ("MR".to_string(), String::new()),
+        RetSpec::ListF64 | RetSpec::ListI64 | RetSpec::ListF32 => {
+            ("MR".to_string(), String::new())
+        }
         RetSpec::Tuple(_) => (tuple_tag(&tuple_kinds), String::new()),
     };
     let mr_def = "typedef struct { void* base; void* data; long off; long size; long stride; } MR;";
@@ -481,6 +487,13 @@ pub fn eval_c_source(
     let body = match ret {
         RetSpec::ListF64 => format!(
             "  MR r = {fname}({args});\n  long n = r.size < 4 ? r.size : 4;\n  printf(\"%ld\", n);\n  double* p = (double*)r.data;\n  for (long i = 0; i < n; i++) printf(\" %.17g\", p[i]);\n  printf(\"\\n\");",
+            fname = fn_name,
+            args = call_args_tail
+        ),
+        RetSpec::ListF32 | RetSpec::ListI64 => format!(
+            "  MR r = {fname}({args});\n  long n = r.size < 4 ? r.size : 4;\n  printf(\"%ld\", n);\n  {elem_t}* p = ({elem_t}*)r.data;\n  for (long i = 0; i < n; i++) printf(\" {fmt}\", p[i]);\n  printf(\"\\n\");",
+            elem_t = if matches!(ret, RetSpec::ListF32) { "float" } else { "long" },
+            fmt = if matches!(ret, RetSpec::ListF32) { "%.9g" } else { "%ld" },
             fname = fn_name,
             args = call_args_tail
         ),
