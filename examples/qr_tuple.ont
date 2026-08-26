@@ -1,0 +1,8 @@
+// Multi-output chain: consumes a tuple-returning vault core.
+use Split.halve
+fn Qr.chain(%n: Int, %xs: List<F64>) -> F64
+  | %n >= 1
+  | len(%xs) == %n * 2
+  hint "let (l, r) = Split.halve(%n, %xs); fold a in %l, acc from 0.0 { acc + a } + fold b in %r, acc from 0.0 { acc + b }"
+  => 1, [1.0, 2.0] -> 3.0 ± 1e-9
+  ?? 2, [1.0, 2.0, 3.0, 4.0] -> 10.0 ± 1e-9

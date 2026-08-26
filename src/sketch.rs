@@ -1078,6 +1078,49 @@ ws          ::= [ \t\n]*
 
 #[cfg(test)]
 mod tests {
+
+    /// GRAMMAR<->parser parity: every production in the GBNF text must be
+    /// exercisable by the Rust parser via these fixtures. If a fixture
+    /// fails to parse, GRAMMAR and Parser have drifted (they MUST change
+    /// together — see module docs).
+    #[test]
+    fn test_grammar_parser_parity_fixtures() {
+        // (label, candidate source). Each exercises one grammar production.
+        let fixtures: &[(&str, &str)] = &[
+            ("int-literal", "fn @f() -> Int { 42 }"),
+            ("float-literal", "fn @f() -> F64 { 1.5 }"),
+            ("bool-literal", "fn @f() -> Bool { true }"),
+            ("var", "fn @f(%x: Int) -> Int { %x }"),
+            ("listlit-int", "fn @f() -> List<Int> { [1, 2, 3] }"),
+            ("listlit-float", "fn @f() -> List<F64> { [1.0, 2.5] }"),
+            ("unop-neg", "fn @f(%x: Int) -> Int { -%x }"),
+            ("binop1-add", "fn @f(%a: Int, %b: Int) -> Int { (%a + %b) * 2 }"),
+            ("callx-vault", "fn @f(%x: F64) -> F64 { Dep.core(%x) }"),
+            ("map", "fn @f(%xs: List<Int>) -> List<Int> { map(v in %xs) { v + 1 } }"),
+            ("flatmap", "fn @f(%xs: List<Int>) -> List<Int> { flatmap(v in %xs) { [v, v] } }"),
+            ("fold", "fn @f(%xs: List<Int>) -> Int { fold v in %xs, acc from 0 { acc + v } }"),
+            ("fold-until", "fn @f(%x: F64) -> F64 { fold k in range(4), g from %x { (g + %x / g) * 0.5 } until abs(g * g - %x) < 1e-9 }"),
+            ("let", "fn @f(%x: Int) -> Int { let y = %x + 1; y }"),
+            ("let-tuple", "fn @f(%x: F64) -> F64 { let (a, b) = Dep.pair(%x); a + b }"),
+            ("if", "fn @f(%x: Int) -> Int { if %x > 0 { %x } else { -%x } }"),
+            ("index-len-range", "fn @f(%xs: List<Int>) -> Int { len(range(index(%xs, 0))) }"),
+            ("index2", "fn @f(%m: List<Int>, %n: Int) -> Int { index2(%m, 0, 1, %n) }"),
+            ("sqrt-exp-log-abs", "fn @f(%x: F64) -> F64 { sqrt(abs(exp(log(abs(%x))))) }"),
+            ("min-max-el", "fn @f(%a: Int, %b: Int) -> Int { min_el(max_el(%a, %b), 0) }"),
+            ("concat", "fn @f(%a: List<Int>, %b: List<Int>) -> List<Int> { %a ++ %b }"),
+            ("tuple-return", "fn @f(%x: F64) -> (F64, F64) { (%x, %x) }"),
+            ("str-type", "fn @f(%s: Str) -> Int { str_len(%s) }"),
+        ];
+        for (label, src) in fixtures {
+            // Strings are Phase-6 vocabulary: skip until Ty::Str lands.
+            if *label == "str-type" && !cfg!(feature = "strings") {
+                continue;
+            }
+            if let Err(e) = parse(src) {
+                panic!("grammar parity fixture `{label}` failed to parse: {e:?}\n{src}");
+            }
+        }
+    }
     use super::*;
 
     #[test]

@@ -1,0 +1,8 @@
+// 2D DP table built flat via fold + concat (Gap-3 pattern).
+fn Lev.distance(%a: List<Int>, %b: List<Int>) -> Int
+  | len(%a) >= 1
+  | len(%b) >= 1
+  hint "DP rows as growing lists; fold i over range(len(a)), inner fold j with min_el(min_el(del, ins), sub)"
+  => [1, 2, 3], [2, 3, 4] -> 2 ± 0
+  => [7], [7] -> 0 ± 0
+  ?? [1, 3], [2, 4] -> 2 ± 0
