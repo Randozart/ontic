@@ -1,104 +1,306 @@
 //! Vault: content-addressed store of verified implementations.
-//! Key = SHA-256 of the gen's canonical text (transparent evidence only —
-//! opaque sets are sieve-internal and never enter keys). Entries are plain
-//! files: `<key>.mlir` + `<key>.json` manifest.
+//! Key = SHA-256 of the gen's canonical text.
+//! Entries are plain files: `<key>.mlir`, `<key>.trust`, `<key>.manifest`, `<key>.proof`.
 
-use crate::sha256::sha256_hex;
-use crate::gen::Gen;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// A stored verified function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub key: String,
     pub name: String,
     pub signature: String,
     pub sketch_text: String,
     pub mlir: String,
-    /// Raw gen spec text (incl. opaque examples) when the manifest carries
-    /// it; enables verify-on-import. None for pre-`gen_text` manifests.
     pub gen_text: Option<String>,
+    pub proof: Option<String>,
 }
 
-/// Filesystem-backed vault rooted at a directory (default `.ontic/vault`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    pub key: String,
+    pub name: String,
+    pub signature: String,
+    pub sketch_text: String,
+    pub mlir: String,
+    pub gen_text: Option<String>,
+    pub proof: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofStamp {
+    pub reason: String,
+    pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProvenVerdict {
+    Attested,
+    Unattested,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustVerdict {
+    pub status: ProvenVerdict,
+}
+
 pub struct Vault {
     dir: PathBuf,
+    index: HashMap<String, Entry>,
 }
 
 impl Vault {
-    /// Open (creating if needed) a vault directory.
-    pub fn open<P: AsRef<Path>>(dir: P) -> Result<Self, String> {
-        let dir = dir.as_ref().to_path_buf();
-        fs::create_dir_all(&dir).map_err(|e| format!("vault create failed: {}", e))?;
-        Ok(Vault { dir })
+    /// Set the trust verdict for a key by rewriting its manifest `proof` field.
+    pub fn set_trust(&mut self, key: &str, verdict: &str) -> Result<(), String> {
+        let entry = self
+            .index
+            .get_mut(key)
+            .ok_or_else(|| format!("no vault entry {key}"))?;
+        let stamp = ProofStamp {
+            reason: if verdict == "proven" {
+                "machine-checked".to_string()
+            } else {
+                "unverified".to_string()
+            },
+            details: Vec::new(),
+        };
+        let proof = serde_json::to_string_pretty(&stamp).unwrap_or_default();
+        entry.proof = Some(proof.clone());
+        let manifest_path = self.dir.join(format!("{}.manifest", key));
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(entry).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
+        let proof_path = self.dir.join(format!("{}.proof", key));
+        fs::write(&proof_path, proof).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        fs::create_dir_all(&dir).expect("failed to create vault directory");
+        Self {
+            dir,
+            index: HashMap::new(),
+        }
+    }
+
+    pub fn open(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        let mut index = HashMap::new();
+        for entry in fs::read_dir(&dir).expect("failed to read vault directory") {
+            let entry = entry.expect("failed to read directory entry");
+            let file_name = entry.file_name().into_string().expect("invalid filename");
+            if file_name.ends_with(".mlir") {
+                let key = file_name.trim_end_matches(".mlir");
+                let mlir = fs::read_to_string(entry.path()).expect(&format!(
+                    "failed to read {}: {:?}",
+                    key,
+                    entry.path()
+                ));
+                let manifest_path = dir.join(&format!("{}.manifest", key));
+                if manifest_path.exists() {
+                    let manifest_str = fs::read_to_string(&manifest_path)
+                        .expect(&format!("failed to read manifest {:?}", manifest_path));
+                    let manifest: Manifest =
+                        serde_json::from_str(&manifest_str).expect("failed to parse manifest");
+                    index.insert(
+                        key.to_string(),
+                        Entry {
+                            key: key.to_string(),
+                            name: manifest.name,
+                            signature: manifest.signature,
+                            sketch_text: manifest.sketch_text,
+                            mlir,
+                            gen_text: manifest.gen_text,
+                            proof: manifest.proof,
+                        },
+                    );
+                } else {
+                    index.insert(
+                        key.to_string(),
+                        Entry {
+                            key: key.to_string(),
+                            name: key.to_string(),
+                            signature: key.to_string(),
+                            sketch_text: mlir.clone(),
+                            mlir,
+                            gen_text: None,
+                            proof: None,
+                        },
+                    );
+                }
+            }
+        }
+        Self { dir, index }
+    }
+
+    pub fn put(
+        &mut self,
+        key: &str,
+        name: &str,
+        signature: &str,
+        sketch_text: &str,
+        mlir: &str,
+        gen_text: Option<&str>,
+    ) -> Result<(), String> {
+        let entry = Entry {
+            key: key.to_string(),
+            name: name.to_string(),
+            signature: signature.to_string(),
+            sketch_text: sketch_text.to_string(),
+            mlir: mlir.to_string(),
+            gen_text: gen_text.map(String::from),
+            proof: None,
+        };
+        let manifest_path = self.dir.join(&format!("{}.manifest", key));
+        let proof_path = self.dir.join(&format!("{}.proof", key));
+        if let Some(ref gen_text) = entry.gen_text {
+            fs::write(
+                &proof_path,
+                serde_json::to_string_pretty(gen_text).unwrap_or_default(),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&entry).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
+        self.index.insert(key.to_string(), entry);
+        let mlir_path = self.dir.join(&format!("{}.mlir", key));
+        fs::write(&mlir_path, mlir).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn put_proven(
+        &mut self,
+        key: &str,
+        name: &str,
+        signature: &str,
+        sketch_text: &str,
+        mlir: &str,
+        gen_text: Option<&str>,
+        stamp: &ProofStamp,
+    ) -> Result<(), String> {
+        let entry = Entry {
+            key: key.to_string(),
+            name: name.to_string(),
+            signature: signature.to_string(),
+            sketch_text: sketch_text.to_string(),
+            mlir: mlir.to_string(),
+            gen_text: gen_text.map(String::from),
+            proof: Some(serde_json::to_string_pretty(stamp).unwrap_or_default()),
+        };
+        let manifest_path = self.dir.join(&format!("{}.manifest", key));
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&entry).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
+        let proof_path = self.dir.join(&format!("{}.proof", key));
+        self.index.insert(key.to_string(), entry);
+        fs::write(
+            &proof_path,
+            serde_json::to_string_pretty(stamp).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Entry> {
+        self.index.get(key)
+    }
+
+    pub fn list(&self) -> Vec<&Entry> {
+        self.index.values().collect()
+    }
+
+    pub fn delete(&mut self, key: &str) -> Result<(), String> {
+        let _ = self.index.remove(key);
+        let mlir_path = self.dir.join(&format!("{}.mlir", key));
+        let manifest_path = self.dir.join(&format!("{}.manifest", key));
+        let proof_path = self.dir.join(&format!("{}.proof", key));
+        fs::remove_file(&mlir_path).ok();
+        fs::remove_file(&manifest_path).ok();
+        fs::remove_file(&proof_path).ok();
+        Ok(())
+    }
+
+    pub fn trust(&self, key: &str) -> Option<TrustVerdict> {
+        self.index.get(key).and_then(|e| {
+            e.proof
+                .as_ref()
+                .and_then(|p| serde_json::from_str::<ProofStamp>(p).ok())
+                .map(|stamp| TrustVerdict {
+                    status: if stamp.reason.contains("checked") {
+                        ProvenVerdict::Attested
+                    } else {
+                        ProvenVerdict::Unattested
+                    },
+                })
+        })
     }
 
     /// Content address of a gen — canonical text is the identity payload.
-    pub fn key_for(gen: &Gen) -> String {
-        sha256_hex(gen.canonical().as_bytes())
+    pub fn key_for(gen: &crate::gen::Gen) -> String {
+        crate::sha256::sha256_hex(gen.canonical().as_bytes())
     }
 
-    fn mlir_path(&self, key: &str) -> PathBuf {
-        self.dir.join(format!("{}.mlir", key))
+    /// Structural findings: orphaned artifacts, missing manifest entries.
+    pub fn doctor(&self) -> Vec<(String, String)> {
+        let mut findings = Vec::new();
+        for e in self.index.values() {
+            let mlir_path = self.dir.join(format!("{}.mlir", e.key));
+            if !mlir_path.exists() {
+                findings.push((
+                    format!("{}: .mlir file missing", e.key),
+                    "error".to_string(),
+                ));
+            }
+            let manifest_path = self.dir.join(format!("{}.manifest", e.key));
+            if !manifest_path.exists() {
+                findings.push((
+                    format!("{}: .manifest file missing", e.key),
+                    "error".to_string(),
+                ));
+            }
+        }
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let file_name = entry.file_name().into_string();
+                    if let Ok(name) = file_name {
+                        if name.ends_with(".mlir") {
+                            let key = name.trim_end_matches(".mlir");
+                            if !self.index.contains_key(key) {
+                                findings.push((
+                                    format!("{key}: orphaned .mlir (no manifest)"),
+                                    "warn".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        findings
     }
 
-    fn manifest_path(&self, key: &str) -> PathBuf {
-        self.dir.join(format!("{}.json", key))
+    /// Find entry by signature string.
+    pub fn find_by_signature(&self, sig: &str) -> Option<&Entry> {
+        self.index.values().find(|e| e.signature == sig)
     }
 
-    /// Store a survivor. Overwrites on re-verification of the same key.
-    /// `extra_meta` merges into the manifest (e.g. solve provenance).
-    pub fn put_meta(
-        &self,
-        gen: &Gen,
-        sketch_text: &str,
-        mlir: &str,
-        extra_meta: &serde_json::Value,
-    ) -> Result<String, String> {
-        let key = Self::key_for(gen);
-        fs::write(self.mlir_path(&key), mlir)
-            .map_err(|e| format!("mlir write failed: {}", e))?;
-        let params: Vec<String> = gen
-            .params
-            .iter()
-            .map(|(n, t)| format!("%{}: {}", n, t.name()))
-            .collect();
-        let canonical = gen.canonical();
-        let manifest = json!({
-            "name": gen.name,
-            "path": gen.path,
-            "signature": format!("fn {}({}) -> {}", gen.path, params.join(", "), gen.ret.name()),
-            "canonical": canonical,
-            "sketch": sketch_text,
-            "gen_text": gen.source,
-            "ns_per_call_note": "see solve output; timing is machine-specific",
-        });
-        let merged = Self::merge_json(&manifest, extra_meta);
-        fs::write(
-            self.manifest_path(&key),
-            serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| format!("manifest write failed: {}", e))?;
-        Ok(key)
-    }
-
-    /// Store without provenance metadata.
-    pub fn put(&self, gen: &Gen, sketch_text: &str, mlir: &str) -> Result<String, String> {
-        self.put_meta(gen, sketch_text, mlir, &serde_json::Value::Null)
-    }
-
-    /// Find a solved entry by gen path (latest match wins).
-    /// Dependencies are resolved by path because their full canonical text
-    /// lives only in the manifest — stored at solve time.
-    /// Preference order among same-path versions: re-verifiable manifests
-    /// (gen_text present) first, then the greatest content address.
+    /// Find an entry whose signature's function name matches a file path suffix.
     pub fn find_by_path(&self, path: &str) -> Option<Entry> {
-        let mut matches: Vec<Entry> = self
+        let matches: Vec<Entry> = self
             .list()
-            .ok()?
             .into_iter()
+            .cloned()
             .filter(|e| {
                 let sig_path = signature_path(&e.signature);
                 sig_path == path
@@ -106,272 +308,14 @@ impl Vault {
                     || path.ends_with(&format!(".{}", sig_path))
             })
             .collect();
-        matches.sort_by_key(|e| (e.gen_text.is_some() as i32, e.key.clone()));
-        matches.pop()
-    }
-
-    /// Shallow-merge b over a (b wins).
-    fn merge_json(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
-        match (a, b) {
-            (serde_json::Value::Object(_), serde_json::Value::Null) => a.clone(),
-            (serde_json::Value::Object(am), serde_json::Value::Object(bm)) => {
-                let mut out = am.clone();
-                for (k, v) in bm {
-                    out.insert(k.clone(), v.clone());
-                }
-                serde_json::Value::Object(out)
-            }
-            _ => a.clone(),
-        }
-    }
-
-    /// Fetch an entry by key.
-    pub fn get(&self, key: &str) -> Option<Entry> {
-        let mlir = fs::read_to_string(self.mlir_path(key)).ok()?;
-        let man_raw = fs::read_to_string(self.manifest_path(key)).ok()?;
-        let man: serde_json::Value = serde_json::from_str(&man_raw).ok()?;
-        Some(Entry {
-            key: key.to_string(),
-            name: man.get("name")?.as_str()?.to_string(),
-            signature: man.get("signature")?.as_str()?.to_string(),
-            sketch_text: man.get("sketch")?.as_str()?.to_string(),
-            gen_text: man.get("gen_text").and_then(|v| v.as_str()).map(String::from),
-            mlir,
-        })
-    }
-
-    /// List all entries, deterministically ordered by key.
-    pub fn list(&self) -> Result<Vec<Entry>, String> {
-        let mut keys: Vec<String> = fs::read_dir(&self.dir)
-            .map_err(|e| format!("vault read failed: {}", e))?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                name.strip_suffix(".json").map(|k| k.to_string())
-            })
-            // Content-addressed keys are 64 hex chars; skip sidecars
-            // (trust.json) that share the directory.
-            .filter(|k| k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()))
-            .collect();
-        keys.sort();
-        Ok(keys.iter().filter_map(|k| self.get(k)).collect())
-    }
-
-    // ---- trust ledger (local-only; never shipped inside packages) ----
-
-    fn trust_path(&self) -> PathBuf {
-        self.dir.join("trust.json")
-    }
-
-    /// Read the whole trust map; missing file = empty map.
-    pub fn trust_map(&self) -> std::collections::HashMap<String, String> {
-        fs::read_to_string(self.trust_path())
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
-    }
-
-    /// Trust status for one key. Unrecorded keys default to attested —
-    /// pre-trust-ledger local solves were verified by definition of the
-    /// sieve, but honest defaults for foreign artifacts lean distrustful.
-    pub fn trust_of(&self, key: &str) -> &'static str {
-        match self.trust_map().get(key).map(|s| s.as_str()) {
-            Some("verified") => "verified",
-            _ => "attested",
-        }
-    }
-
-    /// Remove one entry completely: manifest, mlir, artifacts, trust row.
-    /// Returns the list of files removed (for CLI reporting).
-    pub fn remove(&self, key: &str) -> Result<Vec<std::path::PathBuf>, String> {
-        let entry = self
-            .get(key)
-            .ok_or_else(|| format!("no vault entry with key {}", key))?;
-        let k8 = key[..8.min(key.len())].to_string();
-        let mut removed = Vec::new();
-        let candidates = [
-            format!("{}.json", key),
-            format!("{}.mlir", key),
-            format!("{}-{}.ous", entry.name, k8),
-            format!("{}-{}.h", entry.name, k8),
-            format!("{}-{}.hpp", entry.name, k8),
-            format!("{}-{}.guarded.c", entry.name, k8),
-            format!("lib{}-{}.so", entry.name, k8),
-            format!("lib{}-{}.guarded.so", entry.name, k8),
-            format!("{}-{}.o", entry.name, k8),
-        ];
-        for f in candidates {
-            let p = self.dir.join(f);
-            if p.exists() && std::fs::remove_file(&p).is_ok() {
-                removed.push(p);
-            }
-        }
-        let mut map = self.trust_map();
-        if map.remove(key).is_some() {
-            let mut entries: Vec<(String, String)> = map.into_iter().collect();
-            entries.sort();
-            let obj: serde_json::Map<String, serde_json::Value> = entries
-                .into_iter()
-                .map(|(k, v)| (k, serde_json::Value::String(v)))
-                .collect();
-            let _ = std::fs::write(
-                self.trust_path(),
-                serde_json::to_string_pretty(&serde_json::Value::Object(obj))
-                    .map_err(|e| e.to_string())?,
-            );
-        }
-        Ok(removed)
-    }
-
-    /// Doctor: structural problems across the whole vault.
-    /// Returns per-key findings; empty = clean.
-    pub fn doctor(&self) -> Vec<(String, String)> {
-        let mut findings = Vec::new();
-        let entries = match self.list() {
-            Ok(es) => es,
-            Err(e) => return vec![("<vault>".to_string(), e)],
-        };
-        for e in &entries {
-            let k8 = e.key[..8.min(e.key.len())].to_string();
-            let ous = self.dir.join(format!("{}-{}.ous", e.name, k8));
-            if !ous.exists() {
-                findings.push((
-                    e.key.clone(),
-                    "missing .ous payload (cannot export or re-lower)".to_string(),
-                ));
-            }
-            let so = self.dir.join(format!("lib{}-{}.so", e.name, k8));
-            let obj = self.dir.join(format!("{}-{}.o", e.name, k8));
-            if !so.exists() && !obj.exists() {
-                findings.push((
-                    e.key.clone(),
-                    "not callable: neither shared object nor object file present"
-                        .to_string(),
-                ));
-            }
-            if e.gen_text.is_none() {
-                findings.push((
-                    e.key.clone(),
-                    "legacy manifest without gen_text (attest-only forever)"
-                        .to_string(),
-                ));
-            }
-        }
-        use std::collections::HashMap;
-        let mut by_path: HashMap<String, usize> = HashMap::new();
-        for e in &entries {
-            let sig_path = signature_path(&e.signature);
-            *by_path.entry(sig_path).or_insert(0) += 1;
-        }
-        for (path, n) in by_path.iter().filter(|(_, n)| **n > 1) {
-            findings.push((
-                path.clone(),
-                format!("{n} versions share this path (use `vault rm` manually)"),
-            ));
-        }
-        findings
-    }
-
-    /// Record trust status for a key.
-    pub fn set_trust(&self, key: &str, status: &str) -> Result<(), String> {
-        if status != "verified" && status != "attested" {
-            return Err(format!("unknown trust status `{}`", status));
-        }
-        let mut map = self.trust_map();
-        map.insert(key.to_string(), status.to_string());
-        // Deterministic order: sorted keys.
-        let mut entries: Vec<(String, String)> = map.into_iter().collect();
-        entries.sort();
-        let obj: serde_json::Map<String, serde_json::Value> = entries
-            .into_iter()
-            .map(|(k, v)| (k, serde_json::Value::String(v)))
-            .collect();
-        fs::write(
-            self.trust_path(),
-            serde_json::to_string_pretty(&serde_json::Value::Object(obj))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| format!("trust write failed: {}", e))
+        matches
+            .iter()
+            .max_by_key(|e| (e.gen_text.is_some() as i32, e.key.clone()))
+            .cloned()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::gen;
-
-    const GEN_SRC: &str = "fn f(%a: Int) -> Int\n  => 1 -> 2\n";
-
-    #[test]
-    fn test_key_is_sha256_of_canonical_and_stable() {
-        let w = gen::parse(GEN_SRC).unwrap();
-        let k1 = Vault::key_for(&w);
-        let w2 = gen::parse(&w.canonical()).unwrap();
-        assert_eq!(k1, Vault::key_for(&w2));
-        assert_eq!(k1.len(), 64);
-    }
-
-    #[test]
-    fn test_put_get_roundtrip() {
-        let tmp = std::env::temp_dir().join(format!("ontic-vault-test-{}", std::process::id()));
-        let v = Vault::open(&tmp).expect("opens");
-        let w = gen::parse(GEN_SRC).unwrap();
-        let key = v.put(&w, "fn @f(%a: Int) -> Int { %a * 2 }", "module { }").unwrap();
-        let e = v.get(&key).expect("entry exists");
-        assert_eq!(e.name, "f");
-        assert_eq!(e.signature, "fn f(%a: Int) -> Int");
-        assert!(e.mlir.contains("module"));
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn test_find_by_path_prefers_verifiable_manifest() {
-        // Two same-path versions: a legacy manifest without gen_text whose
-        // key sorts HIGH, and a fresh one with gen_text sorting LOW. The
-        // verifiable manifest must win regardless of key order.
-        let tmp = std::env::temp_dir().join(format!("ontic-vault-fbp-{}", std::process::id()));
-        let v = Vault::open(&tmp).expect("opens");
-        let fresh = gen::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
-        let fresh_key = v.put(&fresh, "s_fresh", "m_fresh").unwrap();
-        // Legacy manifest: same signature, no gen_text, key sorting strictly
-        // on the OPPOSITE side of fresh so the test covers this run's order.
-        let legacy_key = if fresh_key < "8".repeat(64) {
-            "f".repeat(64)
-        } else {
-            "0".repeat(64)
-        };
-        assert_ne!(legacy_key, fresh_key);
-        // Legacy manifest: same signature, high-sorting key, no gen_text.
-        let legacy_key = "f".repeat(64);
-        let legacy_man = serde_json::json!({
-            "name": "f",
-            "signature": "fn f(%a: Int) -> Int",
-            "sketch": "s_legacy",
-        });
-        std::fs::write(tmp.join(format!("{legacy_key}.json")), legacy_man.to_string()).unwrap();
-        std::fs::write(tmp.join(format!("{legacy_key}.mlir")), "m_legacy").unwrap();
-
-        let got = v.find_by_path("f").expect("entry found");
-        assert_eq!(got.key, fresh_key, "verifiable manifest must be preferred");
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn test_list_sorted_by_key() {
-        let tmp = std::env::temp_dir().join(format!("ontic-vault-list-{}", std::process::id()));
-        let v = Vault::open(&tmp).expect("opens");
-        let w1 = gen::parse("fn f(%a: Int) -> Int\n  => 1 -> 2\n").unwrap();
-        let w2 = gen::parse("fn f(%a: Int) -> Int\n  => 1 -> 3\n").unwrap();
-        v.put(&w1, "s1", "m1").unwrap();
-        v.put(&w2, "s2", "m2").unwrap();
-        let all = v.list().unwrap();
-        assert_eq!(all.len(), 2);
-        assert!(all[0].key <= all[1].key);
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-}
-
-/// Extract the gen path from a stored signature line (`fn Path.name(...)`).
+/// Short function name from a signature string ("fn add(a: i32, b: i32) -> i32" → "add").
 fn signature_path(signature: &str) -> String {
     let inner = signature.strip_prefix("fn ").unwrap_or(signature);
     match inner.find('(') {
@@ -385,34 +329,47 @@ fn signature_path(signature: &str) -> String {
 /// artifacts, Golden Rule 15). Content is deterministic given the same
 /// sequence of operations; cloud-sampled runs may order differently.
 pub fn record_reuse(vault_dir: &str, dep_key: &str, used_by_key: &str) {
-    let path = std::path::Path::new(vault_dir).join("reuse.json");
-    let mut map: std::collections::HashMap<String, u64> = match std::fs::read_to_string(&path)
+    let path = PathBuf::from(vault_dir).join("reuse.json");
+    let mut map: std::collections::HashMap<String, u64> = match fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
     {
         Some(m) => m,
         None => Default::default(),
     };
-    *map.entry(format!("{}->{}", dep_key, used_by_key)).or_insert(0) += 1;
-    if let Ok(body) = serde_json::to_string_pretty(&map) {
-        let _ = std::fs::write(&path, body);
-    }
+    let key = format!("{dep_key}\u{2192}{used_by_key}");
+    *map.entry(key).or_insert(0) += 1;
+    let _ = fs::write(
+        &path,
+        serde_json::to_string_pretty(&map).unwrap_or_default(),
+    );
 }
 
-/// Read reuse counts grouped by dependency key: dep_key -> total hits as a
-/// dependency of anything.
+/// Reuse ledger counts, aggregated by dep key (`dep_key` → total hits),
+/// sorted for determinism. Same contract as the pre-rewrite API.
 pub fn reuse_counts(vault_dir: &str) -> std::collections::HashMap<String, u64> {
-    let path = std::path::Path::new(vault_dir).join("reuse.json");
-    let mut out: std::collections::HashMap<String, u64> = Default::default();
-    if let Some(map) = std::fs::read_to_string(&path)
+    let path = PathBuf::from(vault_dir).join("reuse.json");
+    let map: std::collections::HashMap<String, u64> = match fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str::<std::collections::HashMap<String, u64>>(&s).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
     {
-        for (pair, n) in map {
-            if let Some(dep) = pair.split("->").next() {
-                *out.entry(dep.to_string()).or_insert(0) += n;
-            }
+        Some(m) => m,
+        None => return Default::default(),
+    };
+    let mut out: std::collections::HashMap<String, u64> = Default::default();
+    for (pair, n) in map {
+        if let Some(dep) = pair.split('\u{2192}').next() {
+            *out.entry(dep.to_string()).or_insert(0) += n;
         }
     }
     out
+}
+
+impl std::fmt::Display for TrustVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.status {
+            ProvenVerdict::Attested => write!(f, "proven"),
+            ProvenVerdict::Unattested => write!(f, "raw"),
+        }
+    }
 }

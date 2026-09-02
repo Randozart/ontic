@@ -80,12 +80,14 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         let cn = format!("v{}", seq);
                         seq += 1;
                         let items: Vec<String> = vs.iter().map(|v| v.to_string()).collect();
-                        body.push_str(&format!(
-                            "  long {}[] = {{{}}};\n",
-                            cn,
-                            items.join(", ")
+                        body.push_str(&format!("  long {}[] = {{{}}};\n", cn, items.join(", ")));
+                        locals.push((
+                            name.clone(),
+                            Local::List {
+                                c_name: cn,
+                                len: vs.len(),
+                            },
                         ));
-                        locals.push((name.clone(), Local::List { c_name: cn, len: vs.len() }));
                     }
                     crate::gen::Value::Int(v) => {
                         let cn = format!("v{}", seq);
@@ -109,12 +111,14 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         let cn = format!("v{}", seq);
                         seq += 1;
                         let items: Vec<String> = vs.iter().map(|x| format!("{:e}", x)).collect();
-                        body.push_str(&format!(
-                            "  double {}[] = {{{}}};\n",
-                            cn,
-                            items.join(", ")
+                        body.push_str(&format!("  double {}[] = {{{}}};\n", cn, items.join(", ")));
+                        locals.push((
+                            name.clone(),
+                            Local::ListF {
+                                c_name: cn,
+                                len: vs.len(),
+                            },
                         ));
-                        locals.push((name.clone(), Local::ListF { c_name: cn, len: vs.len() }));
                     }
                     crate::gen::Value::Str(_) => unreachable!("Str recipe literal"),
                 }
@@ -132,12 +136,10 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                     match (arg, is_list) {
                         (CallArg::Var(v), true) => match lookup(&locals, v)? {
                             Local::List { c_name, len } => {
-                                call_args
-                                    .push_str(&format!("{0}, {0}, 0, {1}, 1, ", c_name, len));
+                                call_args.push_str(&format!("{0}, {0}, 0, {1}, 1, ", c_name, len));
                             }
                             Local::ListF { c_name, len } => {
-                                call_args
-                                    .push_str(&format!("{0}, {0}, 0, {1}, 1, ", c_name, len));
+                                call_args.push_str(&format!("{0}, {0}, 0, {1}, 1, ", c_name, len));
                             }
                             Local::Scalar { .. } | Local::ScalarF { .. } => {
                                 return Err(format!("%{} is scalar, `{}` wants list", v, callee))
@@ -156,11 +158,11 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                         },
                         (CallArg::Lit(value), false) => match value {
                             crate::gen::Value::Tuple(_) => {
-                                return Err("recipe call arg: tuple literals unsupported".to_string())
+                                return Err(
+                                    "recipe call arg: tuple literals unsupported".to_string()
+                                )
                             }
-                            crate::gen::Value::Int(v) => {
-                                call_args.push_str(&format!("{}L, ", v))
-                            }
+                            crate::gen::Value::Int(v) => call_args.push_str(&format!("{}L, ", v)),
                             crate::gen::Value::Float(v) => {
                                 call_args.push_str(&format!("{:e}, ", v))
                             }
@@ -226,12 +228,7 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                                 fmt.push_str("%.17g");
                                 args.push(c_name.clone());
                             }
-                            _ => {
-                                return Err(format!(
-                                    "log cannot print lists (%{}) in v0",
-                                    n
-                                ))
-                            }
+                            _ => return Err(format!("log cannot print lists (%{}) in v0", n)),
                         },
                     }
                 }
@@ -240,21 +237,14 @@ pub fn driver_source(prog: &crate::recipe::Program, deps: &[DepBinding]) -> Resu
                 } else {
                     format!(", {}", args.join(", "))
                 };
-                body.push_str(&format!(
-                    "  printf(\"{}\\n\"{});\n",
-                    c_escape(&fmt),
-                    arg_s
-                ));
+                body.push_str(&format!("  printf(\"{}\\n\"{});\n", c_escape(&fmt), arg_s));
             }
             Stmt::Print(name) => match lookup(&locals, name)? {
                 Local::Scalar { c_name } => {
                     body.push_str(&format!("  printf(\"%ld\\n\", {});\n", c_name));
                 }
                 Local::ScalarF { c_name } => {
-                    body.push_str(&format!(
-                        "  printf(\"%.17g\\n\", {});\n",
-                        c_name
-                    ));
+                    body.push_str(&format!("  printf(\"%.17g\\n\", {});\n", c_name));
                 }
                 Local::List { .. } | Local::ListF { .. } => {
                     return Err(format!("cannot print list %{} (v0 prints scalars)", name))
@@ -277,9 +267,7 @@ fn c_escape(s: &str) -> String {
         match c {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '%'
-                if false =>
-            {
+            '%' if false => {
                 // percent is legal in plain text; only printf FORMAT strings
                 // need escaping, and we only escape the template separately.
             }
@@ -323,10 +311,7 @@ pub fn run(file: &OntFile) -> Result<Vec<String>, String> {
 
 /// Execute a parsed file against an explicit vault directory.
 pub fn run_in(file: &OntFile, vault_dir: &str) -> Result<Vec<String>, String> {
-    let prog = file
-        .program
-        .as_ref()
-        .ok_or("no program block in file")?;
+    let prog = file.program.as_ref().ok_or("no program block in file")?;
     let dir = scratch();
     let mut bindings: Vec<DepBinding> = Vec::new();
     let mut objects: Vec<PathBuf> = Vec::new();
@@ -338,7 +323,7 @@ pub fn run_in(file: &OntFile, vault_dir: &str) -> Result<Vec<String>, String> {
             .find(|w| &w.path == dep_path)
             .ok_or_else(|| format!("dependency `{}` not among same-file gens", dep_path))?;
         let key = crate::vault::Vault::key_for(w);
-        let v = crate::vault::Vault::open(vault_dir)?;
+        let v = crate::vault::Vault::open(vault_dir);
         let entry = v.get(&key).ok_or_else(|| {
             format!(
                 "dependency `{}` is not solved+vaulted yet — run: ontic solve <file> --hand <candidate>",
@@ -356,7 +341,18 @@ pub fn run_in(file: &OntFile, vault_dir: &str) -> Result<Vec<String>, String> {
         bindings.push(DepBinding {
             path: dep_path.clone(),
             c_fn,
-            params_is_list: w.params.iter().map(|(_, t)| matches!(t, crate::sketch::Ty::ListInt | crate::sketch::Ty::ListF64 | crate::sketch::Ty::ListF32)).collect(),
+            params_is_list: w
+                .params
+                .iter()
+                .map(|(_, t)| {
+                    matches!(
+                        t,
+                        crate::sketch::Ty::ListInt
+                            | crate::sketch::Ty::ListF64
+                            | crate::sketch::Ty::ListF32
+                    )
+                })
+                .collect(),
             mlir: entry.mlir.clone(),
         });
     }
@@ -404,8 +400,6 @@ fn scratch() -> PathBuf {
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
 }
-
-
 
 /// Thin command wrapper returning clean errors.
 fn run_cmd(cc: &PathBuf, args: &[&str]) -> Result<(), String> {
@@ -457,7 +451,7 @@ end
 
         // Solve both gens by hand into an isolated vault.
         let vault_dir = scratch();
-        let v = crate::vault::Vault::open(&vault_dir).expect("vault opens");
+        let mut v = crate::vault::Vault::open(&vault_dir);
         let cands: &[(&str, &str)] = &[
             (
                 "Ledger.total",
@@ -481,7 +475,9 @@ end
                 &crate::lower::CallMap::new(),
             )
             .expect("lowers");
-            v.put(w, text, &mlir).expect("vaults");
+            let key = crate::vault::Vault::key_for(w);
+            v.put(&key, &w.name, "", text, &mlir, Some(&w.source))
+                .expect("vaults");
         }
 
         let lines = run_in(&file, vault_dir.to_str().expect("dir")).expect("runs");
@@ -519,7 +515,7 @@ end
 
         // Solve Twice into an isolated vault.
         let vault_dir = scratch();
-        let v = Vault::open(&vault_dir).expect("vault opens");
+        let mut v = Vault::open(&vault_dir);
         let w = &file.gens[0];
         let cand = crate::sketch::parse("fn @Twice(%n: Int) -> Int { %n * 2 }").unwrap();
         crate::check::check(&cand).unwrap();
@@ -531,7 +527,16 @@ end
             &crate::lower::CallMap::new(),
         )
         .unwrap();
-        v.put(w, "fn @Twice(%n: Int) -> Int { %n * 2 }", &mlir).unwrap();
+        let key = crate::sha256::sha256_hex(b"Twice");
+        v.put(
+            &key,
+            "Twice",
+            "",
+            "fn @Twice(%n: Int) -> Int { %n * 2 }",
+            &mlir,
+            None,
+        )
+        .unwrap();
 
         // Run from a working dir containing the effect outputs.
         let workdir = scratch();
@@ -551,7 +556,6 @@ end
         );
     }
 }
-
 
 #[cfg(test)]
 mod ffi_tests {
@@ -589,14 +593,9 @@ mod ffi_tests {
         let so_path = dir.join("libTwice.so");
         pipeline::build_shared_so(&mlir, &so_path).expect("builds so");
 
-        let header = crate::lower::emit_header(
-            &cand.name,
-            &cand.params,
-            &cand.ret,
-            "testkey1",
-            false,
-        )
-        .unwrap();
+        let header =
+            crate::lower::emit_header(&cand.name, &cand.params, &cand.ret, "testkey1", false)
+                .unwrap();
         let h_path = dir.join("Twice.h");
         std::fs::write(&h_path, &header).unwrap();
 
@@ -617,7 +616,11 @@ mod ffi_tests {
             .arg(bin.to_str().unwrap())
             .output()
             .expect("caller compile spawns");
-        assert!(out.status.success(), "link failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "link failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let run = std::process::Command::new(&bin).output().expect("runs");
         assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
     }

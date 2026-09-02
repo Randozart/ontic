@@ -1,18 +1,18 @@
 //! Ontic CLI: `check` a gen, `solve` it (hand candidates or forge), `bench`
 //! survivors, and inspect the `vault`. Hand-rolled arg parsing — no clap.
 
-use std::process::Command;
-use ontic::forge::{self, ForgeConfig};
 use ontic::check;
+use ontic::forge::{self, ForgeConfig};
+use ontic::gen;
 use ontic::interp;
 use ontic::lower;
 use ontic::pipeline;
 use ontic::program;
 use ontic::recipe;
-use ontic::sketch;
 use ontic::sieve::{self, SiegeConfig};
+use ontic::sketch;
 use ontic::vault::Vault;
-use ontic::gen;
+use std::process::Command;
 
 fn main() {
     // .env is the lowest-precedence source; real env always wins.
@@ -142,7 +142,11 @@ fn cmd_check(path: &str) -> i32 {
                 }
             }
             println!("transparent examples: {}", w.transparent.len());
-            println!("opaque examples     : {}{}", w.opaque.len(), if w.auto_split { " (auto-split)" } else { "" });
+            println!(
+                "opaque examples     : {}{}",
+                w.opaque.len(),
+                if w.auto_split { " (auto-split)" } else { "" }
+            );
             let cfg = SiegeConfig::default();
             let ctx = interp::Ctx::checked();
             match probes::generate(&w, cfg.probe_count, cfg.seed, cfg.edge_budget, &ctx) {
@@ -156,18 +160,17 @@ fn cmd_check(path: &str) -> i32 {
                     if plan.quality == probes::PlanQuality::EdgesOnly {
                         println!("anomaly   : random sampling could not satisfy the contract in {} attempts — relational invariants defeat independent sampling", plan.attempts);
                         for (inv, n) in &plan.rejects {
-                            println!(
-                                "  rejected {}x by `{}`",
-                                n,
-                                inv
-                            );
+                            println!("  rejected {}x by `{}`", n, inv);
                         }
                         println!("fix hint  : pass shape params explicitly (e.g. %n: Int with len relations) or provide more transparent examples; probe coverage is edge-only");
                     }
                 }
                 Err(_) => {
-                    let invs: Vec<String> =
-                        w.invariants.iter().map(|i| lower::expr_display(i)).collect();
+                    let invs: Vec<String> = w
+                        .invariants
+                        .iter()
+                        .map(|i| lower::expr_display(i))
+                        .collect();
                     println!(
                         "probe plan: 0 rows — ANOMALY: no input satisfies the declared contract [{}]",
                         invs.join("; ")
@@ -204,7 +207,10 @@ fn forge_config(opts: &SolveOpts) -> ForgeConfig {
             _ => forge::Backend::Llama,
         };
         cfg.backend = kind;
-        if matches!(kind, forge::Backend::OpenAICompat | forge::Backend::GeminiNative) {
+        if matches!(
+            kind,
+            forge::Backend::OpenAICompat | forge::Backend::GeminiNative
+        ) {
             cfg.model = opts
                 .model
                 .clone()
@@ -383,8 +389,7 @@ fn parse_solve_args(args: &[String]) -> Result<SolveOpts, String> {
 fn load_hand(paths: &[String]) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     for (i, p) in paths.iter().enumerate() {
-        let text =
-            std::fs::read_to_string(p).map_err(|e| format!("read {}: {}", p, e))?;
+        let text = std::fs::read_to_string(p).map_err(|e| format!("read {}: {}", p, e))?;
         out.push((format!("hand-{}:{}", i, p), text));
     }
     Ok(out)
@@ -429,8 +434,7 @@ fn cmd_bench(args: &[String]) -> i32 {
 /// Shared solve/bench pipeline. When `store` is true the winner is lowered
 /// to MLIR and written to the vault.
 fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
-    let w = match load_file(&opts.wish_path).and_then(|f| pick_gen(&f, opts.wish_sel.as_deref()))
-    {
+    let w = match load_file(&opts.wish_path).and_then(|f| pick_gen(&f, opts.wish_sel.as_deref())) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("invalid gen: {}", e);
@@ -458,7 +462,9 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
         } else {
             println!(
                 "forging {} candidates via {} ({}) ...",
-                fcfg.samples, fcfg.backend.label(), fcfg.model
+                fcfg.samples,
+                fcfg.backend.label(),
+                fcfg.model
             );
         }
         match forge::sample(&w, &fcfg, &[], &dep_block(&resolved)) {
@@ -467,7 +473,11 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
                     "tokens  : prompt={} completion={}",
                     usage.prompt, usage.completion
                 );
-                texts.into_iter().enumerate().map(|(i, t)| (format!("forge-{}", i), t)).collect()
+                texts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| (format!("forge-{}", i), t))
+                    .collect()
             }
             Err(e) => {
                 eprintln!("forge failed: {}", e);
@@ -501,7 +511,10 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
             c.temperature = 0.4;
             c
         };
-        println!("feedback round: {} resamples at T={} ...", fcfg.samples, fcfg.temperature);
+        println!(
+            "feedback round: {} resamples at T={} ...",
+            fcfg.samples, fcfg.temperature
+        );
         match forge::sample(&w, &fcfg, &feedback, &dep_block(&resolved)) {
             Ok((texts, usage)) => {
                 println!(
@@ -558,9 +571,7 @@ fn run_solve(opts: &SolveOpts, store: bool) -> i32 {
                     emit_and_store(&w, winner, &resolved, &fcfg, &first_prompt)
                 }
                 None => {
-                    eprintln!(
-                        "no candidate survived native differential (all natives unproven)"
-                    );
+                    eprintln!("no candidate survived native differential (all natives unproven)");
                     1
                 }
             }
@@ -592,15 +603,16 @@ fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<siev
                 // calls resolve at lowering time.
                 let mut parts = dep_mlirs.clone();
                 parts.push(cand_mlir);
-                let mlir =
-                    lower::compose_modules(&parts).expect("composite compose");
+                let mlir = lower::compose_modules(&parts).expect("composite compose");
                 let kind_of = |t: &sketch::Ty| match t {
                     sketch::Ty::ListInt => pipeline::CK::List,
                     sketch::Ty::ListF64 => pipeline::CK::ListF64,
                     sketch::Ty::ListF32 => pipeline::CK::ListF32,
                     sketch::Ty::F64 => pipeline::CK::F64,
                     sketch::Ty::F32 => pipeline::CK::F32,
-                    sketch::Ty::Bool | sketch::Ty::Tuple(_) | sketch::Ty::Int | sketch::Ty::Str => pipeline::CK::I64,
+                    sketch::Ty::Bool | sketch::Ty::Tuple(_) | sketch::Ty::Int | sketch::Ty::Str => {
+                        pipeline::CK::I64
+                    }
                 };
                 let kinds: Vec<pipeline::CK> =
                     s.candidate.params.iter().map(|(_, t)| kind_of(t)).collect();
@@ -618,7 +630,13 @@ fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<siev
                 // S7: bench on the real row, then GR6 differential parity —
                 // native must reproduce the oracle's VALUE, not merely run.
                 let benched = pipeline::bench_native(
-                    &mlir, &s.candidate.name, &kinds, 2_000, &[], &ret_kinds, &row,
+                    &mlir,
+                    &s.candidate.name,
+                    &kinds,
+                    2_000,
+                    &[],
+                    &ret_kinds,
+                    &row,
                 );
                 if let Err(e) = benched {
                     eprintln!(
@@ -634,7 +652,13 @@ fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<siev
                     continue;
                 }
                 let ns = pipeline::bench_native(
-                    &mlir, &s.candidate.name, &kinds, 2_000, &[], &ret_kinds, &row,
+                    &mlir,
+                    &s.candidate.name,
+                    &kinds,
+                    2_000,
+                    &[],
+                    &ret_kinds,
+                    &row,
                 )
                 .unwrap_or_else(|_| s.ns_per_call);
                 measured.push((s.clone(), ns));
@@ -650,13 +674,15 @@ fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<siev
     }
     if !measured.is_empty() {
         measured.sort_by_key(|(s, ns)| (*ns, sieve::ast_size(&s.candidate.body)));
-        *survivors = measured.into_iter().map(|(mut s, ns)| {
-            s.ns_per_call = ns;
-            s
-        }).collect();
+        *survivors = measured
+            .into_iter()
+            .map(|(mut s, ns)| {
+                s.ns_per_call = ns;
+                s
+            })
+            .collect();
     }
 }
-
 
 /// Differential value parity: oracle vs native on one row. Ok when the
 /// return shape has a supported driver AND values agree; Err kills.
@@ -676,7 +702,9 @@ fn differential_parity(
         sketch::Ty::ListF64 => pipeline::RetSpec::ListF64,
         sketch::Ty::ListF32 => pipeline::RetSpec::ListF32,
         sketch::Ty::ListInt => pipeline::RetSpec::ListI64,
-        sketch::Ty::Str => return Err("Str return not supported in differential parity".to_string()),
+        sketch::Ty::Str => {
+            return Err("Str return not supported in differential parity".to_string())
+        }
         sketch::Ty::Tuple(cs) => pipeline::RetSpec::Tuple(
             cs.iter()
                 .map(|t| match t {
@@ -776,9 +804,7 @@ fn differential_parity(
                     Value::Int(v) => *v as f64,
                     Value::Bool(b) => *b as i64 as f64,
                     Value::Float(f) => *f,
-                    other => {
-                        return Err(format!("tuple component {other:?} unsupported"))
-                    }
+                    other => return Err(format!("tuple component {other:?} unsupported")),
                 };
                 if !close(g, w) {
                     return Err(format!("comp {i}: oracle says {w}, native says {g}"));
@@ -836,13 +862,9 @@ impl ResolvedDeps {
 }
 
 fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
-    let vault_dir =
-        std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
+    let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
     let w_key = Vault::key_for(w);
-    let v = match Vault::open(&vault_dir) {
-        Ok(v) => v,
-        Err(_) => return ResolvedDeps::empty(),
-    };
+    let v = Vault::open(&vault_dir);
     let mut map = interp::DepMap::new();
     let mut mlirs = Vec::new();
     let mut calls = lower::CallMap::new();
@@ -855,11 +877,12 @@ fn resolve_deps(w: &gen::Gen) -> ResolvedDeps {
                     .split("func.func @")
                     .nth(1)
                     .and_then(|r| r.find('('))
-                    .map(|i| entry.mlir[..].split("func.func @").nth(1).unwrap()[..i].trim().to_string());
-                map.insert(
-                    path.clone(),
-                    interp::DepFn { cand: cand.clone() },
-                );
+                    .map(|i| {
+                        entry.mlir[..].split("func.func @").nth(1).unwrap()[..i]
+                            .trim()
+                            .to_string()
+                    });
+                map.insert(path.clone(), interp::DepFn { cand: cand.clone() });
                 ontic::vault::record_reuse(&vault_dir, &entry.key, &w_key);
                 if let Some(sym) = symbol {
                     calls.insert(
@@ -934,7 +957,10 @@ fn emit_and_store(
     ) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("lowering failed (candidate verified but not emittable): {}", e);
+            eprintln!(
+                "lowering failed (candidate verified but not emittable): {}",
+                e
+            );
             return 1;
         }
     };
@@ -959,13 +985,7 @@ fn emit_and_store(
         }
     }
     let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
-    let v = match Vault::open(&vault_dir) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
+    let mut v = Vault::open(&vault_dir);
     // Kernel artifacts: header + shared library, built from the composite
     // (candidate + deps) so linked .so files are self-contained.
     let key8 = {
@@ -1035,7 +1055,8 @@ fn emit_and_store(
                 }
                 // Guarded twin: C shim wrapping the kernel with runtime
                 // precondition checks.  Non-fatal — raw .so always lands.
-                let guarded_lib_name = format!("lib{}-{}.guarded.so", survivor.candidate.name, key8);
+                let guarded_lib_name =
+                    format!("lib{}-{}.guarded.so", survivor.candidate.name, key8);
                 let guarded_so_path = std::path::Path::new(&vault_dir).join(&guarded_lib_name);
                 match lower::emit_shim_c(
                     &survivor.candidate.name,
@@ -1053,7 +1074,8 @@ fn emit_and_store(
                         ) {
                             Ok(_shim_text) => {
                                 println!("GUARDED : {}/{}", vault_dir, guarded_lib_name);
-                                let shim_name = format!("{}-{}.guarded.c", survivor.candidate.name, key8);
+                                let shim_name =
+                                    format!("{}-{}.guarded.c", survivor.candidate.name, key8);
                                 let shim_path = std::path::Path::new(&vault_dir).join(&shim_name);
                                 let _ = std::fs::write(&shim_path, &shim_src);
                                 artifacts.insert(
@@ -1112,17 +1134,35 @@ fn emit_and_store(
         meta_val["artifacts"] = serde_json::Value::Object(artifacts);
     }
     let meta = meta_val;
-    match v.put_meta(w, &survivor.source_text, &mlir, &meta) {
-        Ok(key) => {
-            println!("VAULTED {} ({})", w.path, key);
-            emit_ous(w, survivor, resolved, &key, &vault_dir);
-            0
-        }
-        Err(e) => {
+    // New vault API: key is derived by the caller; prompt provenance rides
+    // beside the entry as {key}.meta.json (Entry has no meta field).
+    let key = Vault::key_for(w);
+    {
+        let params: Vec<String> = w
+            .params
+            .iter()
+            .map(|(n, t)| format!("%{}: {}", n, t.name()))
+            .collect();
+        let signature = format!("fn {}({}) -> {}", w.path, params.join(", "), w.ret.name());
+        if let Err(e) = v.put(
+            &key,
+            &w.name,
+            &signature,
+            &survivor.source_text,
+            &mlir,
+            Some(w.source.as_str()),
+        ) {
             eprintln!("{}", e);
-            1
+            return 1;
         }
+        let _ = std::fs::write(
+            std::path::Path::new(&vault_dir).join(format!("{key}.meta.json")),
+            serde_json::to_string_pretty(&meta).unwrap_or_default(),
+        );
     }
+    println!("VAULTED {} ({})", w.path, key);
+    emit_ous(w, survivor, resolved, &key, &vault_dir);
+    0
 }
 
 fn cmd_vault(args: &[String]) -> i32 {
@@ -1145,67 +1185,58 @@ fn cmd_vault(args: &[String]) -> i32 {
         },
         None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
     };
-    let v = match Vault::open(&dir) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
-    match v.list() {
-        Ok(entries) => {
-            if entries.is_empty() {
-                println!("vault empty at {}", dir);
-            }
-            let promoted = read_lib_manifest();
-            let reuse = ontic::vault::reuse_counts(&dir);
-            if json {
-                let mut arr = Vec::new();
-                for e in &entries {
-                    let path = sig_path_of(e);
-                    arr.push(serde_json::json!({
-                        "key": e.key,
-                        "name": e.name,
-                        "path": path,
-                        "signature": e.signature,
-                        "trust": v.trust_of(&e.key),
-                        "reuse": reuse.get(&e.key).copied().unwrap_or(0),
-                    }));
-                }
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::Value::Array(arr))
-                        .unwrap_or_else(|_| "[]".to_string())
-                );
-                return 0;
-            }
-            for e in entries {
-                let path = {
-                    let inner = e.signature.strip_prefix("fn ").unwrap_or(&e.signature);
-                    match inner.find('(') {
-                        Some(i) => inner[..i].trim().to_string(),
-                        None => inner.trim().to_string(),
-                    }
-                };
-                let badge = if promoted.iter().any(|p| *p == path) { " [LIB]" } else { "" };
-                let hits = reuse.get(&e.key).copied().unwrap_or(0);
-                println!(
-                    "{}  {}{}  [{}]  [reuse {}]  {}",
-                    &e.key[..12.min(e.key.len())],
-                    e.name,
-                    badge,
-                    v.trust_of(&e.key),
-                    hits,
-                    e.signature
-                );
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("{}", e);
-            1
-        }
+    let v = Vault::open(&dir);
+    let entries = v.list();
+    if entries.is_empty() {
+        println!("vault empty at {}", dir);
     }
+    let promoted = read_lib_manifest();
+    let reuse = ontic::vault::reuse_counts(&dir);
+    if json {
+        let mut arr = Vec::new();
+        for e in &entries {
+            let path = sig_path_of(e);
+            arr.push(serde_json::json!({
+                "key": e.key,
+                "name": e.name,
+                "path": path,
+                "signature": e.signature,
+                "trust": trust_label(&v, &e.key),
+                "reuse": reuse.get(&e.key).copied().unwrap_or(0),
+            }));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Array(arr))
+                .unwrap_or_else(|_| "[]".to_string())
+        );
+        return 0;
+    }
+    for e in entries {
+        let path = {
+            let inner = e.signature.strip_prefix("fn ").unwrap_or(&e.signature);
+            match inner.find('(') {
+                Some(i) => inner[..i].trim().to_string(),
+                None => inner.trim().to_string(),
+            }
+        };
+        let badge = if promoted.iter().any(|p| *p == path) {
+            " [LIB]"
+        } else {
+            ""
+        };
+        let hits = reuse.get(&e.key).copied().unwrap_or(0);
+        println!(
+            "{}  {}{}  [{}]  [reuse {}]  {}",
+            &e.key[..12.min(e.key.len())],
+            e.name,
+            badge,
+            trust_label(&v, &e.key),
+            hits,
+            e.signature
+        );
+    }
+    0
 }
 
 /// `ontic vault status <name>` — all versions of one path with trust and
@@ -1222,14 +1253,12 @@ fn cmd_vault_status(args: &[String]) -> i32 {
         },
         None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
     };
-    let v = match Vault::open(&dir) {
-        Ok(v) => v,
-        Err(e) => return die(&e),
-    };
-    let entries: Vec<VaultEntry> = match v.list() {
-        Ok(es) => es.into_iter().filter(|e| sig_path_of(e) == name).collect(),
-        Err(e) => return die(&e),
-    };
+    let v = Vault::open(&dir);
+    let entries: Vec<&VaultEntry> = v
+        .list()
+        .into_iter()
+        .filter(|e| sig_path_of(e) == name)
+        .collect();
     if entries.is_empty() {
         return die(&format!("no vault entry for `{name}`"));
     }
@@ -1240,7 +1269,7 @@ fn cmd_vault_status(args: &[String]) -> i32 {
             "{}  {}  [{}]",
             &e.key[..12.min(e.key.len())],
             e.signature,
-            v.trust_of(&e.key)
+            trust_label(&v, &e.key)
         );
         let mut artifacts = Vec::new();
         for (label, file) in [
@@ -1278,21 +1307,15 @@ fn cmd_vault_rm(args: &[String]) -> i32 {
         },
         None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
     };
-    let v = match Vault::open(&dir) {
-        Ok(v) => v,
-        Err(e) => return die(&e),
-    };
+    let mut v = Vault::open(&dir);
     // Resolve prefix to full key.
     let full_key = match v.get(&key) {
         Some(e) => e.key.clone(),
         None => return die(&format!("no vault entry matching prefix `{key}`")),
     };
-    match v.remove(&full_key) {
-        Ok(files) => {
+    match v.delete(&full_key) {
+        Ok(()) => {
             println!("removed {} entry", &full_key[..12.min(full_key.len())]);
-            for f in &files {
-                println!("  {}", f.display());
-            }
             0
         }
         Err(e) => die(&e),
@@ -1307,10 +1330,7 @@ fn cmd_vault_doctor(args: &[String]) -> i32 {
         },
         None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
     };
-    let v = match Vault::open(&dir) {
-        Ok(v) => v,
-        Err(e) => return die(&e),
-    };
+    let v = Vault::open(&dir);
     let findings = v.doctor();
     if findings.is_empty() {
         println!("vault doctor: clean");
@@ -1331,15 +1351,10 @@ fn cmd_vault_gc(args: &[String]) -> i32 {
         },
         None => std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
     };
-    let v = match Vault::open(&dir) {
-        Ok(v) => v,
-        Err(e) => return die(&e),
-    };
-    let entries = match v.list() {
-        Ok(es) => es,
-        Err(e) => return die(&e),
-    };
+    let mut v = Vault::open(&dir);
+    let entries = v.list();
     let mut removed = 0u32;
+    let mut entries_ref = Vec::new();
     for e in &entries {
         let k8 = e.key[..8.min(e.key.len())].to_string();
         let dirp = std::path::Path::new(&dir);
@@ -1348,13 +1363,13 @@ fn cmd_vault_gc(args: &[String]) -> i32 {
         let obj = dirp.join(format!("{}-{}.o", e.name, k8));
         let orphan = !ous.exists() || (!so.exists() && !obj.exists()) || e.gen_text.is_none();
         if orphan {
-            if let Ok(files) = v.remove(&e.key) {
-                println!("gc: removed {} ({})", &e.key[..12.min(e.key.len())], e.name);
-                for f in &files {
-                    println!("  {}", f.display());
-                }
-                removed += 1;
-            }
+            entries_ref.push((e.key.clone(), e.name.clone()));
+        }
+    }
+    for (key, name) in entries_ref {
+        if v.delete(&key).is_ok() {
+            println!("gc: removed {} ({})", &key[..12.min(key.len())], name);
+            removed += 1;
         }
     }
     if removed == 0 {
@@ -1390,10 +1405,7 @@ fn parse_vault_sub(args: &[String]) -> Result<VaultSubOpts, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--dir" => {
-                o.dir = args
-                    .get(i + 1)
-                    .ok_or("--dir needs a path")?
-                    .clone();
+                o.dir = args.get(i + 1).ok_or("--dir needs a path")?.clone();
                 i += 2;
             }
             "--out" => {
@@ -1426,8 +1438,18 @@ fn parse_vault_sub(args: &[String]) -> Result<VaultSubOpts, String> {
 }
 
 /// Extract the gen path from a signature (`fn A.b(…) -> T` → `A.b`).
-fn sig_path_of(entry: &VaultEntry) -> String {
-    let inner = entry.signature.strip_prefix("fn ").unwrap_or(&entry.signature);
+/// Trust badge for listings: `Some(verdict)` renders the tier, `None` = NONE.
+fn trust_label(v: &Vault, key: &str) -> String {
+    match v.trust(key) {
+        Some(t) => format!("{:?}", t.status),
+        None => "NONE".to_string(),
+    }
+}
+
+fn sig_path_of(entry: &VaultEntry) -> String {    let inner = entry
+        .signature
+        .strip_prefix("fn ")
+        .unwrap_or(&entry.signature);
     match inner.find('(') {
         Some(i) => inner[..i].trim().to_string(),
         None => inner.trim().to_string(),
@@ -1437,10 +1459,7 @@ fn sig_path_of(entry: &VaultEntry) -> String {
 use ontic::vault::Entry as VaultEntry;
 
 /// Depth-first dep closure in topological order (deps before dependents).
-fn export_closure(
-    v: &Vault,
-    wanted: &[String],
-) -> Result<Vec<VaultEntry>, String> {
+fn export_closure(v: &Vault, wanted: &[String]) -> Result<Vec<VaultEntry>, String> {
     let mut ordered: Vec<VaultEntry> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut missing: Vec<String> = Vec::new();
@@ -1457,19 +1476,14 @@ fn export_closure(
         }
         // All versions of this path; prefer a re-verifiable manifest
         // (gen_text present), then the greatest key (latest content).
-        let mut candidates: Vec<VaultEntry> = match v.list() {
-            Ok(es) => es
-                .into_iter()
-                .filter(|e| sig_path_of(&e) == path)
-                .collect(),
-            Err(e) => {
-                missing.push(format!("{path} ({e})"));
-                return;
-            }
-        };
+        let mut candidates: Vec<&VaultEntry> = v
+            .list()
+            .into_iter()
+            .filter(|e| sig_path_of(e) == path)
+            .collect();
         candidates.sort_by_key(|e| (e.gen_text.is_some() as i32, e.key.clone()));
         let entry = match candidates.pop() {
-            Some(e) => e,
+            Some(e) => e.clone(),
             None => {
                 missing.push(path.to_string());
                 return;
@@ -1521,7 +1535,8 @@ fn gather_nous_entry(vault_dir: &str, entry: VaultEntry) -> Result<ontic::nous::
             entry.name, k8, vault_dir
         ));
     }
-    let raw = std::fs::read(&ous_path).map_err(|e| format!("read {}: {}", ous_path.display(), e))?;
+    let raw =
+        std::fs::read(&ous_path).map_err(|e| format!("read {}: {}", ous_path.display(), e))?;
     let un = ontic::ous::unpack(&raw)?;
     if un.manifest["key"].as_str() != Some(entry.key.as_str()) {
         return Err(format!("key mismatch inside {} ", ous_path.display()));
@@ -1551,8 +1566,7 @@ fn gather_nous_entry(vault_dir: &str, entry: VaultEntry) -> Result<ontic::nous::
     ] {
         let p = dirp.join(&file);
         if p.exists() {
-            let bytes =
-                std::fs::read(&p).map_err(|e| format!("read {}: {}", p.display(), e))?;
+            let bytes = std::fs::read(&p).map_err(|e| format!("read {}: {}", p.display(), e))?;
             extras.push((kind.to_string(), bytes));
         }
     }
@@ -1576,15 +1590,9 @@ fn cmd_vault_export(args: &[String]) -> i32 {
     if !opts.all && opts.names.is_empty() {
         return usage("export needs kernel names or --all");
     }
-    let v = match Vault::open(&opts.dir) {
-        Ok(v) => v,
-        Err(e) => return die(&e),
-    };
+    let v = Vault::open(&opts.dir);
     let wanted: Vec<String> = if opts.all {
-        match v.list() {
-            Ok(es) => es.iter().map(sig_path_of).collect(),
-            Err(e) => return die(&e),
-        }
+        v.list().iter().map(|e| sig_path_of(e)).collect()
     } else {
         opts.names.clone()
     };
@@ -1634,18 +1642,15 @@ fn cmd_vault_export(args: &[String]) -> i32 {
 
 /// Land one unpacked entry into the local vault (files + trust status).
 fn land_entry(
-    v: &Vault,
+    v: &mut Vault,
     dir: &str,
     ne: &ontic::nous::NousEntry,
     status: &str,
 ) -> Result<(), String> {
     let k8 = ne.entry.key[..8.min(ne.entry.key.len())].to_string();
     let dirp = std::path::Path::new(dir);
-    std::fs::write(
-        dirp.join(format!("{}.mlir", ne.entry.key)),
-        &ne.entry.mlir,
-    )
-    .map_err(|e| format!("mlir write failed: {}", e))?;
+    std::fs::write(dirp.join(format!("{}.mlir", ne.entry.key)), &ne.entry.mlir)
+        .map_err(|e| format!("mlir write failed: {}", e))?;
     // Full manifest ships as a "manifest" extra; fall back to a minimal
     // reconstruction for foreign packages that lack it.
     let manifest_json = match ne.extras.iter().find(|(k, _)| k == "manifest") {
@@ -1701,7 +1706,8 @@ fn build_import_binaries(ne: &ontic::nous::NousEntry, dirp: &std::path::Path) ->
         let has_chain =
             pipeline::find_tool("mlir-opt").is_some() && pipeline::find_tool("llc").is_some();
         if !has_chain {
-            warnings.push("guarded .so skipped: mlir-opt/llc missing for __raw re-lower".to_string());
+            warnings
+                .push("guarded .so skipped: mlir-opt/llc missing for __raw re-lower".to_string());
             return warnings;
         }
         // Rename the kernel to `__raw` exactly like solve-time guard builds.
@@ -1720,7 +1726,9 @@ fn build_import_binaries(ne: &ontic::nous::NousEntry, dirp: &std::path::Path) ->
             warnings.push("guarded .so skipped: temp write failed".to_string());
             return warnings;
         }
-        match pipeline::mlir_to_llvmir(&mlir_p, &ll_p).and_then(|_| pipeline::object_from_ll(&ll_p, &o_p)) {
+        match pipeline::mlir_to_llvmir(&mlir_p, &ll_p)
+            .and_then(|_| pipeline::object_from_ll(&ll_p, &o_p))
+        {
             Ok(_) => {
                 let shim = dirp.join(format!("{}-{}.guarded.c", ne.entry.name, k8));
                 let gso = dirp.join(format!("lib{}-{}.guarded.so", ne.entry.name, k8));
@@ -1810,10 +1818,7 @@ fn cmd_vault_import(args: &[String]) -> i32 {
         }
         return 0;
     }
-    let v = match Vault::open(&opts.dir) {
-        Ok(v) => v,
-        Err(e) => return die(&e),
-    };
+    let mut v = Vault::open(&opts.dir);
     // Topo order is preserved from export; deps land before dependents so
     // --verify can resolve chains locally.
     let mut landed = 0usize;
@@ -1834,7 +1839,7 @@ fn cmd_vault_import(args: &[String]) -> i32 {
             }
         }
         let status = if opts.verify { "verified" } else { "attested" };
-        if let Err(e) = land_entry(&v, &opts.dir, ne, status) {
+        if let Err(e) = land_entry(&mut v, &opts.dir, ne, status) {
             eprintln!("FAILED   : {} — {}", ne.entry.name, e);
             failed += 1;
             continue;
@@ -1852,7 +1857,11 @@ fn cmd_vault_import(args: &[String]) -> i32 {
     println!(
         "SUMMARY  : {landed} imported ({verified} verified), {skipped} skipped, {failed} rejected"
     );
-    if failed > 0 { 1 } else { 0 }
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// Print error to stderr and return failure exit code.
@@ -1927,17 +1936,16 @@ fn cmd_lint(path: &str) -> i32 {
         Ok(f) => f,
         Err(e) => return die(&format!("{path}: invalid gen: {e}")),
     };
-    let vault = Vault::open(
-        std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()),
-    )
-    .ok();
-    let findings = ontic::lint::lint_file(&file.gens, vault.as_ref());
+    let vault =
+        Vault::open(std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string()));
+    let report = ontic::lint::lint_file(&file.gens, Some(&vault));
+    let findings = &report;
     if findings.is_empty() {
         println!("lint: {} gen(s) clean", file.gens.len());
         return 0;
     }
     let mut errs = 0;
-    for f in &findings {
+    for f in findings.iter() {
         if f.severity == ontic::lint::Severity::Err {
             errs += 1;
         }
@@ -1952,7 +1960,11 @@ fn cmd_lint(path: &str) -> i32 {
         "lint: {} finding(s) — {errs} err, {warn} warn, {info} info",
         findings.len()
     );
-    if errs > 0 { 1 } else { 0 }
+    if errs > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// `ontic run <file.ont>` — execute a recipe over vault-verified functions.
@@ -1989,7 +2001,6 @@ fn cmd_run(path: &str) -> i32 {
     }
 }
 
-
 /// Auto-emit .ous bundle after successful vault.
 fn emit_ous(
     w: &gen::Gen,
@@ -2020,10 +2031,19 @@ fn emit_ous(
     let mlir_p = dir.join("composite.mlir");
     let ll_p = dir.join("c_llvm.mlir");
     let o_p = dir.join("c.o");
-    if std::fs::write(&mlir_p, &composite).is_err() { return; }
-    if pipeline::mlir_to_llvmir(&mlir_p, &ll_p).is_err() { return; }
-    if pipeline::object_from_ll(&ll_p, &o_p).is_err() { return; }
-    let obj_bytes = match std::fs::read(&o_p) { Ok(b) => b, Err(_) => return };
+    if std::fs::write(&mlir_p, &composite).is_err() {
+        return;
+    }
+    if pipeline::mlir_to_llvmir(&mlir_p, &ll_p).is_err() {
+        return;
+    }
+    if pipeline::object_from_ll(&ll_p, &o_p).is_err() {
+        return;
+    }
+    let obj_bytes = match std::fs::read(&o_p) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
 
     let hdr = lower::emit_header(
         &survivor.candidate.name,
@@ -2031,7 +2051,8 @@ fn emit_ous(
         &survivor.candidate.ret,
         &key[..8.min(key.len())],
         false,
-    ).unwrap_or_default();
+    )
+    .unwrap_or_default();
 
     let entry = ontic::vault::Entry {
         key: key.to_string(),
@@ -2040,10 +2061,14 @@ fn emit_ous(
         sketch_text: survivor.source_text.clone(),
         gen_text: Some(w.source.clone()),
         mlir: cand_m.clone(),
+        proof: None,
     };
     let ous_data = ontic::ous::pack_full(&entry, &obj_bytes, &hdr);
-    let ous_name = format!("{}-{}.ous",
-        survivor.candidate.name, &key[..8.min(key.len())]);
+    let ous_name = format!(
+        "{}-{}.ous",
+        survivor.candidate.name,
+        &key[..8.min(key.len())]
+    );
     let ous_path = std::path::Path::new(vault_dir).join(&ous_name);
     match std::fs::write(&ous_path, &ous_data) {
         Ok(()) => println!("OUS     : {}", ous_path.display()),
@@ -2063,8 +2088,6 @@ fn build_shared_lib(
     let so_p = std::path::Path::new(vault_dir).join(lib_name);
     ontic::pipeline::build_shared_so(composite_mlir, &so_p)
 }
-
-
 
 /// Extract individual func.func chunks from a full module text.
 /// Strips the outer module{} wrapper, then chunks at each top-indented
@@ -2095,7 +2118,11 @@ fn split_module_funcs(full_module: &str) -> Vec<String> {
 /// `ontic lib build <file.ont>` — solve ALL gens in the file sequentially
 /// and emit ONE composite shared library + combined header.
 fn cmd_lib_build(args: &[String]) -> i32 {
-    let path = match args.iter().position(|a| a == "build").and_then(|p| args.get(p + 1)) {
+    let path = match args
+        .iter()
+        .position(|a| a == "build")
+        .and_then(|p| args.get(p + 1))
+    {
         Some(p) => p.clone(),
         None => return usage("lib build needs a .ont file"),
     };
@@ -2138,15 +2165,8 @@ fn cmd_lib_build(args: &[String]) -> i32 {
     let fcfg = forge_config(&opts);
     let cfg = SiegeConfig::default();
 
-    let vault_dir =
-        std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
-    let v = match Vault::open(&vault_dir) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
+    let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
+    let mut v = Vault::open(&vault_dir);
 
     let dir = std::env::temp_dir().join(format!(
         "ontic-libbuild-{}-{}",
@@ -2170,17 +2190,16 @@ fn cmd_lib_build(args: &[String]) -> i32 {
         // Cache hit: use stored mlir + sketch.
         if v.get(&key).is_some() {
             let entry = v.get(&key).expect("checked");
-            let cand =
-                match crate::sketch::parse(&entry.sketch_text) {
-                    Ok(c) => c,
-                    Err(pe) => {
-                        eprintln!(
-                            "cached sketch unparsable for {}: {} at {}",
-                            g.path, pe.message, pe.offset
-                        );
-                        return 1;
-                    }
-                };
+            let cand = match crate::sketch::parse(&entry.sketch_text) {
+                Ok(c) => c,
+                Err(pe) => {
+                    eprintln!(
+                        "cached sketch unparsable for {}: {} at {}",
+                        g.path, pe.message, pe.offset
+                    );
+                    return 1;
+                }
+            };
             check::check(&cand).unwrap();
             let m = lower::emit_fn(
                 &cand.name,
@@ -2195,14 +2214,8 @@ fn cmd_lib_build(args: &[String]) -> i32 {
                     all_funcs.push(chunk);
                 }
             }
-            let h = lower::emit_header(
-                &g.name,
-                &g.params,
-                &g.ret,
-                &key[..8.min(key.len())],
-                false,
-            )
-            .unwrap();
+            let h = lower::emit_header(&g.name, &g.params, &g.ret, &key[..8.min(key.len())], false)
+                .unwrap();
             headers.push(h);
             members.push(key.clone());
             println!("  cache hit ({})", &key[..12.min(key.len())]);
@@ -2273,8 +2286,23 @@ fn cmd_lib_build(args: &[String]) -> i32 {
             .unwrap();
         headers.push(h);
         members.push(key.clone());
-        let k2 = v.put_meta(g, &survivor.source_text, &m, &serde_json::json!({}))
-            .unwrap_or_else(|_| key.clone());
+        let k2 = Vault::key_for(g);
+        let params2: Vec<String> = g
+            .params
+            .iter()
+            .map(|(n, t)| format!("%{}: {}", n, t.name()))
+            .collect();
+        let sig2 = format!("fn {}({}) -> {}", g.path, params2.join(", "), g.ret.name());
+        if let Err(e) = v.put(
+            &k2,
+            &g.name,
+            &sig2,
+            &survivor.source_text,
+            &m,
+            Some(g.source.as_str()),
+        ) {
+            eprintln!("vault put failed: {e}");
+        }
         println!("  solved+vaulted ({})", &k2[..12.min(k2.len())]);
     }
 
@@ -2303,7 +2331,11 @@ fn cmd_lib_build(args: &[String]) -> i32 {
     let guard = format!(
         "ONTIC_{}_H",
         stem.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+            .map(|c| if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            })
             .collect::<String>()
     );
     let mut header_out = format!(
@@ -2402,8 +2434,7 @@ fn write_lib_manifest(entries: &[String]) -> Result<(), String> {
             .unwrap_or(std::path::Path::new(".")),
     )
     .map_err(|e| e.to_string())?;
-    std::fs::write(lib_manifest_path(), sorted.join("\n") + "\n")
-        .map_err(|e| e.to_string())
+    std::fs::write(lib_manifest_path(), sorted.join("\n") + "\n").map_err(|e| e.to_string())
 }
 
 /// `ontic lib ...` — graduation of verified gens into the stdlib.
@@ -2474,9 +2505,7 @@ fn cmd_ablate(args: &[String]) -> i32 {
     if opts.sampler_backend.is_none() {
         opts.sampler_backend = Some("llama".to_string());
     }
-    let w = match load_file(&opts.wish_path)
-        .and_then(|f| pick_gen(&f, opts.wish_sel.as_deref()))
-    {
+    let w = match load_file(&opts.wish_path).and_then(|f| pick_gen(&f, opts.wish_sel.as_deref())) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("invalid gen: {}", e);
@@ -2573,33 +2602,34 @@ fn cmd_ablate(args: &[String]) -> i32 {
     0
 }
 
-
 /// `ontic pack <key|Path> -o name.ous` — bundle a vault entry.
 fn cmd_pack(args: &[String]) -> i32 {
-    let key_or_path = match args.iter().position(|a| a == "pack").and_then(|p| args.get(p + 1)) {
+    let key_or_path = match args
+        .iter()
+        .position(|a| a == "pack")
+        .and_then(|p| args.get(p + 1))
+    {
         Some(k) => k.clone(),
         None => return usage("pack needs a key or wish path"),
     };
-    let out_path = match args.iter().position(|a| a == "-o").and_then(|p| args.get(p + 1)) {
+    let out_path = match args
+        .iter()
+        .position(|a| a == "-o")
+        .and_then(|p| args.get(p + 1))
+    {
         Some(o) => o.clone(),
         None => return usage("pack needs -o <output.ous>"),
     };
 
-    let vault_dir =
-        std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
-    let v = match Vault::open(&vault_dir) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
+    let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
+    let v = Vault::open(&vault_dir);
 
     // Resolve by key or by path.
+    let by_path = v.find_by_path(&key_or_path);
     let entry = if key_or_path.len() >= 16 && !key_or_path.contains('.') {
         v.get(&key_or_path)
     } else {
-        v.find_by_path(&key_or_path)
+        by_path.as_ref()
     };
     let entry = match entry {
         Some(e) => e,
@@ -2609,7 +2639,11 @@ fn cmd_pack(args: &[String]) -> i32 {
         }
     };
 
-    let obj_name = format!("lib{}-{}.o", entry.name, &entry.key[..8.min(entry.key.len())]);
+    let obj_name = format!(
+        "lib{}-{}.o",
+        entry.name,
+        &entry.key[..8.min(entry.key.len())]
+    );
     let obj_path = std::path::Path::new(&vault_dir).join(&obj_name);
     let obj_bytes = match std::fs::read(&obj_path) {
         Ok(b) => b,
@@ -2620,7 +2654,9 @@ fn cmd_pack(args: &[String]) -> i32 {
             let m_p = dir.join("k.mlir");
             let ll_p = dir.join("k_llvm.mlir");
             let o_p = dir.join("k.o");
-            if std::fs::write(&m_p, &entry.mlir).is_err() { return 1; }
+            if std::fs::write(&m_p, &entry.mlir).is_err() {
+                return 1;
+            }
             if ontic::pipeline::mlir_to_llvmir(&m_p, &ll_p).is_err()
                 || ontic::pipeline::object_from_ll(&ll_p, &o_p).is_err()
             {
@@ -2665,11 +2701,19 @@ fn cmd_pack(args: &[String]) -> i32 {
 
 /// `ontic unpack x.ous -d dir` — extract artifacts from an .ous bundle.
 fn cmd_unpack(args: &[String]) -> i32 {
-    let src_path = match args.iter().position(|a| a == "unpack").and_then(|p| args.get(p + 1)) {
+    let src_path = match args
+        .iter()
+        .position(|a| a == "unpack")
+        .and_then(|p| args.get(p + 1))
+    {
         Some(s) => s.clone(),
         None => return usage("unpack needs an .ous file"),
     };
-    let out_dir = match args.iter().position(|a| a == "-d").and_then(|p| args.get(p + 1)) {
+    let out_dir = match args
+        .iter()
+        .position(|a| a == "-d")
+        .and_then(|p| args.get(p + 1))
+    {
         Some(d) => d.clone(),
         None => ".".to_string(),
     };
@@ -2697,7 +2741,10 @@ fn cmd_unpack(args: &[String]) -> i32 {
         .to_string();
     let h_name = format!("{}.h", name);
     let files: Vec<(&str, Vec<u8>)> = vec![
-        ("manifest.json", serde_json::to_vec_pretty(&unpacked.manifest).unwrap_or_default()),
+        (
+            "manifest.json",
+            serde_json::to_vec_pretty(&unpacked.manifest).unwrap_or_default(),
+        ),
         ("sketch.sketch", unpacked.sketch_text.clone().into_bytes()),
         ("kernel.mlir", unpacked.mlir.clone().into_bytes()),
         ("kernel.o", unpacked.obj_bytes.clone()),
@@ -2705,7 +2752,9 @@ fn cmd_unpack(args: &[String]) -> i32 {
     ];
     for (fname, bytes) in &files {
         let p = std::path::Path::new(&out_dir).join(fname);
-        if std::fs::write(&p, bytes).is_err() { return 1; }
+        if std::fs::write(&p, bytes).is_err() {
+            return 1;
+        }
         println!("EXTRACTED {}", p.display());
     }
 
@@ -2753,19 +2802,17 @@ fn cmd_decompose(args: &[String]) -> i32 {
     };
     let yes = args.iter().any(|a| a == "--yes");
     let outdir = flag("--outdir").unwrap_or_else(|| "decomposed".to_string());
-    let repair_rounds: usize =
-        flag("--repair-rounds").and_then(|v| v.parse().ok()).unwrap_or(2);
+    let repair_rounds: usize = flag("--repair-rounds")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
     let recuts: usize = flag("--recuts").and_then(|v| v.parse().ok()).unwrap_or(2);
 
     let paper = read_paper(&input);
     let mut entries: Vec<String> = Vec::new();
     let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
-    if let Ok(v) = Vault::open(&vault_dir) {
-        if let Ok(list) = v.list() {
-            for e in list {
-                entries.push(format!("{}  # {}", e.name, e.signature));
-            }
-        }
+    let v = Vault::open(&vault_dir);
+    for e in v.list() {
+        entries.push(format!("{}  # {}", e.name, e.signature));
     }
     entries.sort();
 
@@ -2774,7 +2821,9 @@ fn cmd_decompose(args: &[String]) -> i32 {
         wish_sel: None,
         hand: vec![],
         samples: 1,
-        seed: flag("--seed").and_then(|v| v.parse().ok()).unwrap_or(0x5EED),
+        seed: flag("--seed")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0x5EED),
         forge: flag("--forge"),
         sampler_backend: flag("--spec-backend").filter(|s| !s.starts_with("file:")),
         endpoint: flag("--endpoint"),
@@ -2791,7 +2840,10 @@ fn cmd_decompose(args: &[String]) -> i32 {
     };
 
     let prompt = ask::build_decompose_prompt(&paper, &ask::inventory_block(&entries));
-    println!("decompose: drafting (backend {})…", spec_backend_label(&src));
+    println!(
+        "decompose: drafting (backend {})…",
+        spec_backend_label(&src)
+    );
 
     let nodes_a = match fetch_validated(&src, &prompt) {
         Ok(n) => n,
@@ -2909,11 +2961,17 @@ fn cmd_decompose(args: &[String]) -> i32 {
                         break;
                     }
                     if repairs >= repair_rounds {
-                        eprintln!("{}: solve failed; repair budget exhausted\n{}", spec.filename, tail);
+                        eprintln!(
+                            "{}: solve failed; repair budget exhausted\n{}",
+                            spec.filename, tail
+                        );
                         break;
                     }
                     repairs += 1;
-                    println!("{}: failed (repair {}/{}); asking spec backend", spec.filename, repairs, repair_rounds);
+                    println!(
+                        "{}: failed (repair {}/{}); asking spec backend",
+                        spec.filename, repairs, repair_rounds
+                    );
                     repair_log.push(format!("{} round {}: {}", spec.filename, repairs, tail));
                     match repair_node(&src, &prompt, &spec.filename, &tail) {
                         Some(new_text) => {
@@ -3008,7 +3066,12 @@ fn report_diff(a: &[(ask::NodeSpec, gen::Gen)], b: Option<&[(ask::NodeSpec, gen:
     }
 }
 
-fn repair_node(src: &SpecSource, prompt: &str, filename: &str, failure_tail: &str) -> Option<String> {
+fn repair_node(
+    src: &SpecSource,
+    prompt: &str,
+    filename: &str,
+    failure_tail: &str,
+) -> Option<String> {
     let rp = format!(
         "{prompt}\n\nYOUR FILE {f} FAILED VALIDATION OR SOLVE:\n{tail}\n\n\
          Re-emit ONLY that file, corrected, in the same === file: === block format.",
@@ -3030,8 +3093,11 @@ fn repair_node(src: &SpecSource, prompt: &str, filename: &str, failure_tail: &st
 fn print_gate_table(nodes: &[(ask::NodeSpec, gen::Gen)]) {
     println!("\nPROPOSED TREE ({} files):", nodes.len());
     for (spec, g) in nodes {
-        let params: Vec<String> =
-            g.params.iter().map(|(n, t)| format!("%{}: {}", n, t.name())).collect();
+        let params: Vec<String> = g
+            .params
+            .iter()
+            .map(|(n, t)| format!("%{}: {}", n, t.name()))
+            .collect();
         println!(
             "  {:<22} {}({}) -> {}   uses:[{}]  ex={} inv={}",
             spec.filename,
@@ -3066,20 +3132,8 @@ fn cmd_corpus(args: &[String]) -> i32 {
 
 fn corpus_backfill() -> i32 {
     let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
-    let v = match Vault::open(&vault_dir) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
-    let entries = match v.list() {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
+    let v = Vault::open(&vault_dir);
+    let entries = v.list();
     let mut n = 0usize;
     // Idempotence: never append a reconstructed record twice.
     let corpus_file = std::path::Path::new(&vault_dir)
@@ -3309,73 +3363,75 @@ fn cmd_eval(args: &[String]) -> i32 {
             }
         };
         for g in gens {
-        let key = Vault::key_for(&g);
-        if !trained_keys.is_empty() && trained_keys.contains(&key) {
-            println!(
-                "{:<28} SKIP (contaminated: key in training data)",
-                g.path
-            );
-            contaminated += 1;
-            results.push(serde_json::json!({
-                "file": f.display().to_string(), "gen_key": key,
-                "path": g.path, "passed": null, "contaminated": true,
-            }));
-            continue;
-        }
-        print!("{:<28} ", g.path);
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-        // Collection stays OFF during eval children regardless of .env:
-        // held-out solves must never leak into training records.
-        let out = std::process::Command::new(&exe)
-            .arg("solve")
-            .arg(f)
-            .arg("--sampler-backend")
-            .arg(&backend)
-            .arg("--samples")
-            .arg(&samples)
-            .env("ONTIC_COLLECT", "0")
-            .output();
-        let (ok, ns) = match out {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-                let success = o.status.success();
-                // Best survivor timing from PASS lines.
-                let mut best_ns: Option<u64> = None;
-                for line in stdout.lines() {
-                    if line.starts_with("PASS") {
-                        let toks: Vec<&str> = line.split_whitespace().collect();
-                        if toks.len() >= 3 {
-                            if let Ok(v) = toks[2].parse::<u64>() {
-                                best_ns = Some(best_ns.map_or(v, |b: u64| b.min(v)));
+            let key = Vault::key_for(&g);
+            if !trained_keys.is_empty() && trained_keys.contains(&key) {
+                println!("{:<28} SKIP (contaminated: key in training data)", g.path);
+                contaminated += 1;
+                results.push(serde_json::json!({
+                    "file": f.display().to_string(), "gen_key": key,
+                    "path": g.path, "passed": null, "contaminated": true,
+                }));
+                continue;
+            }
+            print!("{:<28} ", g.path);
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+            // Collection stays OFF during eval children regardless of .env:
+            // held-out solves must never leak into training records.
+            let out = std::process::Command::new(&exe)
+                .arg("solve")
+                .arg(f)
+                .arg("--sampler-backend")
+                .arg(&backend)
+                .arg("--samples")
+                .arg(&samples)
+                .env("ONTIC_COLLECT", "0")
+                .output();
+            let (ok, ns) = match out {
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                    let success = o.status.success();
+                    // Best survivor timing from PASS lines.
+                    let mut best_ns: Option<u64> = None;
+                    for line in stdout.lines() {
+                        if line.starts_with("PASS") {
+                            let toks: Vec<&str> = line.split_whitespace().collect();
+                            if toks.len() >= 3 {
+                                if let Ok(v) = toks[2].parse::<u64>() {
+                                    best_ns = Some(best_ns.map_or(v, |b: u64| b.min(v)));
+                                }
                             }
                         }
                     }
+                    (success, best_ns)
                 }
-                (success, best_ns)
+                Err(e) => {
+                    eprintln!("spawn failed: {}", e);
+                    (false, None)
+                }
+            };
+            if ok {
+                passed += 1;
             }
-            Err(e) => {
-                eprintln!("spawn failed: {}", e);
-                (false, None)
-            }
-        };
-        if ok {
-            passed += 1;
-        }
-        println!(
-            "{}{}",
-            if ok { "PASS" } else { "FAIL" },
-            ns.map(|v| format!(" ({:.1}µs)", v as f64 / 1000.0)).unwrap_or_default()
-        );
-        results.push(serde_json::json!({
-            "file": f.display().to_string(), "gen_key": key,
-            "path": g.path, "passed": ok, "best_ns": ns,
-        }));
+            println!(
+                "{}{}",
+                if ok { "PASS" } else { "FAIL" },
+                ns.map(|v| format!(" ({:.1}µs)", v as f64 / 1000.0))
+                    .unwrap_or_default()
+            );
+            results.push(serde_json::json!({
+                "file": f.display().to_string(), "gen_key": key,
+                "path": g.path, "passed": ok, "best_ns": ns,
+            }));
         }
     }
 
     let scored = results.len() - contaminated;
-    let rate = if scored > 0 { passed as f64 / scored as f64 } else { 0.0 };
+    let rate = if scored > 0 {
+        passed as f64 / scored as f64
+    } else {
+        0.0
+    };
     println!(
         "\neval [{tag}]: {passed}/{scored} passed ({rate:.1}%), {contaminated} contaminated-skips"
     );
@@ -3413,10 +3469,11 @@ fn cmd_sweep(args: &[String]) -> i32 {
         None => return usage("sweep needs <topics.txt>"),
     };
     let outdir = flag("--outdir").unwrap_or_else(|| "swept".into());
-    let limit: usize = flag("--limit").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let limit: usize = flag("--limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
     let spec_backend = flag("--spec-backend");
-    let candidate_backend =
-        flag("--candidate-backend").unwrap_or_else(|| "gemini".into());
+    let candidate_backend = flag("--candidate-backend").unwrap_or_else(|| "gemini".into());
 
     let topics = match std::fs::read_to_string(&topics_path) {
         Ok(t) => t
@@ -3435,8 +3492,7 @@ fn cmd_sweep(args: &[String]) -> i32 {
     // Keys already in the corpus: skip duplicates by construction.
     let mut have_keys: std::collections::HashSet<String> = Default::default();
     {
-        let vault_dir =
-            std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
+        let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
         let corpus = std::path::Path::new(&vault_dir)
             .parent()
             .unwrap_or(std::path::Path::new(".ontic"))
@@ -3456,7 +3512,9 @@ fn cmd_sweep(args: &[String]) -> i32 {
         wish_sel: None,
         hand: vec![],
         samples: 1,
-        seed: flag("--seed").and_then(|v| v.parse().ok()).unwrap_or(0x5EED),
+        seed: flag("--seed")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0x5EED),
         forge: flag("--forge"),
         sampler_backend: spec_backend.clone().filter(|s| !s.starts_with("file:")),
         endpoint: flag("--endpoint"),
@@ -3479,12 +3537,9 @@ fn cmd_sweep(args: &[String]) -> i32 {
 
     let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".into());
     let mut entries: Vec<String> = Vec::new();
-    if let Ok(v) = Vault::open(&vault_dir) {
-        if let Ok(list) = v.list() {
-            for e in list {
-                entries.push(format!("{}  # {}", e.name, e.signature));
-            }
-        }
+    let v = Vault::open(&vault_dir);
+    for e in v.list() {
+        entries.push(format!("{}  # {}", e.name, e.signature));
     }
 
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ontic"));
@@ -3507,7 +3562,8 @@ fn cmd_sweep(args: &[String]) -> i32 {
                 Ok(n) => break n,
                 Err(e) => {
                     eprintln!("sweep[{}] draft failed ({}); retrying once", idx, e);
-                    if let Ok(n) = ask::fetch_draft(&src, &prompt).and_then(|d| ask::parse_tree(&d)) {
+                    if let Ok(n) = ask::fetch_draft(&src, &prompt).and_then(|d| ask::parse_tree(&d))
+                    {
                         break n;
                     }
                     println!("sweep[{}] draft unavailable; skipping", idx);
@@ -3518,7 +3574,11 @@ fn cmd_sweep(args: &[String]) -> i32 {
         let valid = match ask::validate_nodes_lenient(&nodes) {
             (v, _) if !v.is_empty() => v,
             (_, errs) => {
-                eprintln!("sweep[{}] invalid draft: {}", idx, errs.first().cloned().unwrap_or_default());
+                eprintln!(
+                    "sweep[{}] invalid draft: {}",
+                    idx,
+                    errs.first().cloned().unwrap_or_default()
+                );
                 continue;
             }
         };

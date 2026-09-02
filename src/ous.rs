@@ -88,10 +88,9 @@ pub fn unpack(data: &[u8]) -> Result<Unpacked, String> {
         return Err("not an .ous file (bad magic)".to_string());
     }
     let mut pos = MAGIC.len();
-    let manifest_raw = read_section(data, &mut pos)
-        .ok_or("truncated: MANIFEST")?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_raw)
-        .map_err(|e| format!("manifest JSON: {}", e))?;
+    let manifest_raw = read_section(data, &mut pos).ok_or("truncated: MANIFEST")?;
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_raw).map_err(|e| format!("manifest JSON: {}", e))?;
     let sketch = read_section(data, &mut pos).ok_or("truncated: SKETCH")?;
     let mlir = read_section(data, &mut pos).ok_or("truncated: MLIR")?;
     let obj = read_section(data, &mut pos).ok_or("truncated: OBJ")?;
@@ -122,6 +121,7 @@ mod tests {
             gen_text: None,
             sketch_text: "fn @mean(%xs: List<F64>) -> F64 { 0.0 }".to_string(),
             mlir: "module {\n  func.func @mean(%xs: memref<?xf64>) -> f64 {\n    return 0.0 : f64\n  }\n}".to_string(),
+            proof: None,
         }
     }
 

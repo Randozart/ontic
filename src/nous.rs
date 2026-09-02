@@ -195,6 +195,7 @@ pub fn unpack(data: &[u8]) -> Result<NousPackage, String> {
                 sketch_text: un.sketch_text.clone(),
                 gen_text: un.manifest["gen_text"].as_str().map(String::from),
                 mlir: un.mlir.clone(),
+                proof: un.manifest["proof"].as_str().map(String::from),
             },
             obj: un.obj_bytes.clone(),
             header: un.header_text.clone(),
@@ -212,8 +213,9 @@ pub fn unpack(data: &[u8]) -> Result<NousPackage, String> {
             entries.len()
         ));
     }
+    let generator = toc["generator"].as_str().unwrap_or("?").to_string();
     Ok(NousPackage {
-        generator: toc["generator"].as_str().unwrap_or("?").to_string(),
+        generator,
         created_unix: toc["created_unix"].as_u64().unwrap_or(0),
         target: toc["target"].as_str().unwrap_or("?").to_string(),
         entries,
@@ -245,14 +247,12 @@ mod tests {
                     None
                 },
                 mlir: format!("module {{ func.func @{name}() -> i64 }}"),
+                proof: None,
             },
             obj: vec![0xDE, 0xAD],
             header: format!("long {name}(long x);"),
             quality: "full".to_string(),
-            extras: vec![(
-                "guarded_so".to_string(),
-                vec![0x01, 0x02, 0x03],
-            )],
+            extras: vec![("guarded_so".to_string(), vec![0x01, 0x02, 0x03])],
         }
     }
 
@@ -271,7 +271,10 @@ mod tests {
         assert_eq!(pkg.entries[0].extras[0].1, vec![0x01, 0x02, 0x03]);
         assert!(pkg.entries[0].entry.gen_text.is_some());
         assert!(pkg.entries[1].entry.gen_text.is_none());
-        assert_eq!(pkg.generator, format!("ontic {}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            pkg.generator,
+            format!("ontic {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

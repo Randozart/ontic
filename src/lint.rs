@@ -189,7 +189,7 @@ fn check_postcondition_note(g: &Gen) -> Vec<Finding> {
 fn check_duplicate_path(g: &Gen, vault: &crate::vault::Vault) -> Vec<Finding> {
     let versions = vault
         .list()
-        .unwrap_or_default()
+        .into_iter().collect::<Vec<_>>()
         .into_iter()
         .filter(|e| e.signature.starts_with(&format!("fn {}(", g.path)))
         .count();

@@ -2,3 +2,5 @@
 /.ontic
 Cargo.lock.orig
 .env
+/.pi
+/.officina
