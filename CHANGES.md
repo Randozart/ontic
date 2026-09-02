@@ -1,5 +1,25 @@
 # CHANGES
 
+### 2026-09-02 18:46 — Vault API modernisation: modular trust ledger (`3bdf50b`)
+
+`Vault` reshaped per `docs/plans/2026-08-31-vault-rewrite-completion.md`:
+four sub-structs (Manifest / Entries / Trust / Artifacts), enum trust
+verdicts (`Attested` / `Unattested`), per-entry `ProofStamp`, borrowed
+access (`list()`/`get()` return references), `delete()` replaces `remove()`
+(path-keyed: mlir + manifest + proof), `open()` infallible.
+`Vault::key_for(gen)` removed — keys are caller-side `sha256(name)`.
+`put_meta` removed: prompt provenance now rides beside entries as
+`{key}.meta.json` (never in the manifest). `reuse_counts` restored to the
+aggregated dep-key contract; `vault ls` [reuse N] listings index by entry
+key.
+
+All caller sites migrated: `main.rs` (822 lines touched), `lint.rs`,
+`nous.rs`, `ous.rs`, `program.rs`. `cargo check` clean; 177/177 tests
+green (down from 181: 4 legacy-API tests dropped in the rewrite, 0 new
+behaviors lost). Attestation plumbing (`put_proven`, `ProofStamp`) is in
+place but forge still lands via the unattested path until the z3 `prove`
+tier (feature `proven`) wires it — known gap, next leg.
+
 ## Changes Made on 2026-08-26 (production master plan, phases 1–8)
 
 Plan: docs/plans/2026-08-26-production-master.md. All eight phases
