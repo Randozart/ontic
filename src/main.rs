@@ -772,6 +772,7 @@ fn proven_equivalence_gate(
             &si_i,
             &si_f,
             &si_f32,
+            &[],
             pipeline::RetSpec::I64,
             &[],
         ) {
@@ -814,9 +815,7 @@ fn differential_parity(
         sketch::Ty::ListF64 => pipeline::RetSpec::ListF64,
         sketch::Ty::ListF32 => pipeline::RetSpec::ListF32,
         sketch::Ty::ListInt => pipeline::RetSpec::ListI64,
-        sketch::Ty::Str => {
-            return Err("Str return not supported in differential parity".to_string())
-        }
+        sketch::Ty::Str => pipeline::RetSpec::Str,
         sketch::Ty::Tuple(cs) => pipeline::RetSpec::Tuple(
             cs.iter()
                 .map(|t| match t {
@@ -839,6 +838,7 @@ fn differential_parity(
     let mut si_i = Vec::new();
     let mut si_f = Vec::new();
     let mut si_f32 = Vec::new();
+    let mut strs: Vec<String> = Vec::new();
     for (v, (_, t)) in row.iter().zip(cand.params.iter()) {
         match (v, t) {
             (Value::Int(x), _) => si_i.push(*x),
@@ -849,7 +849,7 @@ fn differential_parity(
             (Value::FloatList(vs), sketch::Ty::ListF32) => lists_f32.push(vs.clone()),
             (Value::FloatList(vs), _) => lists_f.push(vs.clone()),
             (Value::Tuple(_), _) => {}
-            (Value::Str(_), _) => {}
+            (Value::Str(s), _) => strs.push(s.clone()),
         }
     }
 
@@ -868,24 +868,54 @@ fn differential_parity(
             sketch::Ty::ListF32 => pipeline::CK::ListF32,
             sketch::Ty::F64 => pipeline::CK::F64,
             sketch::Ty::F32 => pipeline::CK::F32,
+            sketch::Ty::Str => pipeline::CK::Str,
             _ => pipeline::CK::I64,
         })
         .collect();
 
-    let got = pipeline::eval_native(
-        mlir,
-        &cand.name,
-        &kinds,
-        &lists_i,
-        &lists_f,
-        &lists_f32,
-        &si_i,
-        &si_f,
-        &si_f32,
-        ret_spec.clone(),
-        &[],
-    )
-    .map_err(|e| format!("native eval failed: {e}"))?;
+    let got = if matches!(ret_spec, pipeline::RetSpec::Str) {
+        // Str return: compare raw bytes, not numbers.
+        let got_str = pipeline::eval_native_str(
+            mlir,
+            &cand.name,
+            &kinds,
+            &lists_i,
+            &lists_f,
+            &lists_f32,
+            &si_i,
+            &si_f,
+            &si_f32,
+            &strs,
+            ret_spec.clone(),
+            &[],
+        )
+        .map_err(|e| format!("native eval failed: {e}"))?;
+        if let Value::Str(want) = &expect {
+            if got_str != *want {
+                return Err(format!(
+                    "oracle says {:?}, native says {:?}",
+                    want, got_str
+                ));
+            }
+        }
+        return Ok(());
+    } else {
+        pipeline::eval_native(
+            mlir,
+            &cand.name,
+            &kinds,
+            &lists_i,
+            &lists_f,
+            &lists_f32,
+            &si_i,
+            &si_f,
+            &si_f32,
+            &strs,
+            ret_spec.clone(),
+            &[],
+        )
+        .map_err(|e| format!("native eval failed: {e}"))?
+    };
 
     // Shape-aware comparison against the oracle value.
     let close = |g: f64, w: f64| (g - w).abs() <= 1e-6_f64.max(w.abs() * 1e-9);

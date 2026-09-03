@@ -30,6 +30,7 @@ fn kind_ctype(k: &CK) -> &'static str {
         CK::F64 => "double",
         CK::F32 => "float",
         CK::List | CK::ListF64 | CK::ListF32 => "MR",
+        CK::Str => "S",
     }
 }
 
@@ -85,6 +86,8 @@ pub enum RetSpec {
     ListF32,
     /// Multi-value struct return; components printed space-separated.
     Tuple(Vec<CK>),
+    /// Str return: print the raw UTF-8 bytes (bounded by len field).
+    Str,
 }
 
 /// Harness-level ABI kind per function parameter / return.
@@ -102,6 +105,8 @@ pub enum CK {
     F64,
     /// f32 scalar
     F32,
+    /// Str: (char* data, long len)
+    Str,
 }
 
 impl CK {
@@ -111,6 +116,7 @@ impl CK {
             CK::I64 => "long",
             CK::F64 => "double",
             CK::F32 => "float",
+            CK::Str => "char*, long",
         }
     }
 }
@@ -395,7 +401,6 @@ int main(void) {{
 /// the result (%.17g). Used by differential tests: interpreter and native
 /// must agree bit-for-bit.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn eval_c_source(
     fn_name: &str,
     kinds: &[CK],
@@ -405,12 +410,14 @@ pub fn eval_c_source(
     scalars_i64: &[i64],
     scalars_f64: &[f64],
     scalars_f32: &[f64],
+    strs: &[String],
     ret: RetSpec,
 ) -> Result<String, String> {
     let mut proto = String::new();
     let mut decls = String::new();
     let mut call_args = String::new();
-    let (mut li, mut si, mut sf, mut lf32, mut sf32) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut li, mut si, mut sf, mut lf32, mut sf32, mut si_str) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
     for k in kinds {
         if !proto.is_empty() {
             proto.push_str(", ");
@@ -465,6 +472,26 @@ pub fn eval_c_source(
                 call_args.push_str(&format!("e{0}, e{0}, 0, {1}, 1, ", lf32, g.len()));
                 lf32 += 1;
             }
+            CK::Str => {
+                let s = &strs[si_str];
+                // Escape for C string literal: backslash and double-quote.
+                let escaped: String = s
+                    .chars()
+                    .map(|c| match c {
+                        '\\' => "\\\\".to_string(),
+                        '"' => "\\\"".to_string(),
+                        '\n' => "\\n".to_string(),
+                        '\t' => "\\t".to_string(),
+                        _ => c.to_string(),
+                    })
+                    .collect();
+                decls.push_str(&format!(
+                    "  static char s{0}[] = \"{1}\";\\n",
+                    si_str, escaped
+                ));
+                call_args.push_str(&format!("s{0}, {1}, ", si_str, s.len()));
+                si_str += 1;
+            }
         }
     }
     let call_args_tail = call_args.trim_end_matches(", ");
@@ -480,8 +507,16 @@ pub fn eval_c_source(
             ("MR".to_string(), String::new())
         }
         RetSpec::Tuple(_) => (tuple_tag(&tuple_kinds), String::new()),
+        RetSpec::Str => ("S".to_string(), String::new()),
     };
     let mr_def = "typedef struct { void* base; void* data; long off; long size; long stride; } MR;";
+    let str_def = if matches!(ret, RetSpec::Str)
+        || kinds.iter().any(|k| matches!(k, CK::Str))
+    {
+        "typedef struct { char* data; long len; } S;"
+    } else {
+        ""
+    };
     let tup_def = if matches!(ret, RetSpec::Tuple(_)) {
         tuple_typedef(&tuple_kinds)
     } else {
@@ -520,6 +555,11 @@ pub fn eval_c_source(
                 prints = prints.join("\n"),
             )
         }
+        RetSpec::Str => format!(
+            "  S r = {fname}({args});\n  fwrite(r.data, 1, (size_t)r.len, stdout);\n  fflush(stdout);\n",
+            fname = fn_name,
+            args = call_args_tail
+        ),
         _ => format!(
             "  {ret_t} v = {fname}({args});\n  printf(\"{fmt}\\n\", v);",
             ret_t = ret_t,
@@ -575,9 +615,94 @@ pub fn eval_native(
     scalars_i64: &[i64],
     scalars_f64: &[f64],
     scalars_f32: &[f64],
+    strs: &[String],
     ret: RetSpec,
     extra_mls: &[String],
 ) -> Result<Vec<f64>, String> {
+    let dir = scratch_dir("eval");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mlir_p = dir.join("cand.mlir");
+    let ll_mlir = dir.join("cand_llvm.mlir");
+    let o_p = dir.join("cand.o");
+    let c_p = dir.join("eval.c");
+    let bin_p = dir.join("eval");
+
+    std::fs::write(&mlir_p, mlir_text).map_err(|e| e.to_string())?;
+    mlir_to_llvmir(&mlir_p, &ll_mlir)?;
+    object_from_ll(&ll_mlir, &o_p)?;
+    let mut objects = vec![o_p.clone()];
+    for (i, extra) in extra_mls.iter().enumerate() {
+        let ep_mlir = dir.join(format!("extra{}.mlir", i));
+        let ep_ll = dir.join(format!("extra{}_llvm.mlir", i));
+        let ep_o = dir.join(format!("extra{}.o", i));
+        std::fs::write(&ep_mlir, extra).map_err(|e| e.to_string())?;
+        mlir_to_llvmir(&ep_mlir, &ep_ll)?;
+        object_from_ll(&ep_ll, &ep_o)?;
+        objects.push(ep_o);
+    }
+    let is_str = matches!(ret, RetSpec::Str);
+    let c_text = eval_c_source(
+        fn_name,
+        kinds,
+        lists_i,
+        lists_f64,
+        lists_f32,
+        scalars_i64,
+        scalars_f64,
+        scalars_f32,
+        strs,
+        ret,
+    )?;
+    std::fs::write(&c_p, c_text).map_err(|e| e.to_string())?;
+    let cc = find_tool("clang").unwrap_or_else(|| PathBuf::from("clang"));
+    let mut link_args: Vec<&str> =
+        vec!["-O2", c_p.to_str().ok_or("bad c path")?];
+    for o in &objects {
+        link_args.push(o.to_str().ok_or("bad obj path")?);
+    }
+    link_args.push("-o");
+    link_args.push(bin_p.to_str().ok_or("bad bin path")?);
+    run(&cc, &link_args, "differential link")?;
+    let out = Command::new(&bin_p)
+        .output()
+        .map_err(|e| format!("differential exec failed: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "differential exec failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Str returns: stdout IS the result string (fwrite of raw bytes).
+    // We can't represent a string in Vec<f64>, so the caller must use
+    // eval_native_str for RetSpec::Str. This path is a bug if reached.
+    if is_str {
+        return Err("use eval_native_str for RetSpec::Str".to_string());
+    }
+    let vals: Result<Vec<f64>, _> = text
+        .split_whitespace()
+        .map(|t| t.parse::<f64>())
+        .collect();
+    vals.map_err(|_| format!("bad differential output `{}`", text))
+}
+
+/// Run the function once natively for a Str return; returns the raw
+/// UTF-8 string printed by the C harness (fwrite of the data field).
+#[allow(clippy::too_many_arguments)]
+pub fn eval_native_str(
+    mlir_text: &str,
+    fn_name: &str,
+    kinds: &[CK],
+    lists_i: &[Vec<i64>],
+    lists_f64: &[Vec<f64>],
+    lists_f32: &[Vec<f64>],
+    scalars_i64: &[i64],
+    scalars_f64: &[f64],
+    scalars_f32: &[f64],
+    strs: &[String],
+    ret: RetSpec,
+    extra_mls: &[String],
+) -> Result<String, String> {
     let dir = scratch_dir("eval");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mlir_p = dir.join("cand.mlir");
@@ -608,6 +733,7 @@ pub fn eval_native(
         scalars_i64,
         scalars_f64,
         scalars_f32,
+        strs,
         ret,
     )?;
     std::fs::write(&c_p, c_text).map_err(|e| e.to_string())?;
@@ -629,12 +755,8 @@ pub fn eval_native(
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let vals: Result<Vec<f64>, _> = text
-        .split_whitespace()
-        .map(|t| t.parse::<f64>())
-        .collect();
-    vals.map_err(|_| format!("bad differential output `{}`", text))
+    // Raw stdout IS the result string (no parsing).
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 /// Full native measurement: write mlir, lower, emit object, build harness,
@@ -740,6 +862,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             RetSpec::I64,
             &[],
         )
@@ -783,9 +906,8 @@ mod trap_tests {
         let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new()).unwrap();
 
         // Clean inputs: both tiers agree.
-        let got =
-            eval_native(&mlir, "f", &[CK::List], &[vec![3, 4, 5]], &[], &[], &[], &[], &[], RetSpec::I64, &[])
-                .expect("clean runs");
+        let got = eval_native(&mlir, "f", &[CK::List], &[vec![3, 4, 5]], &[], &[], &[], &[], &[], &[], RetSpec::I64, &[])
+            .expect("clean runs");
         assert_eq!(got, vec![12.0]);
 
         // Overflowing inputs: interpreter kills...
@@ -796,10 +918,8 @@ mod trap_tests {
         );
         assert!(killed.is_err());
         // ...and native must not return a value either.
-        assert!(
-            eval_native(&mlir, "f", &[CK::List], &[vec![i64::MAX, 1]], &[], &[], &[], &[], &[], RetSpec::I64, &[]).is_err(),
-            "native returned a value where the oracle kills"
-        );
+        assert!(eval_native(&mlir, "f", &[CK::List], &[vec![i64::MAX, 1]], &[], &[], &[], &[], &[], &[], RetSpec::I64, &[]).is_err(),
+            "native returned a value where the oracle kills");
     }
 
     /// F32 bit-parity: interpreter oracle vs native float pipeline must
@@ -827,6 +947,7 @@ mod trap_tests {
             &[],
             &[],
             &[1.5],
+            &[],
             RetSpec::F32,
             &[],
         )
@@ -841,6 +962,58 @@ mod trap_tests {
             }
             other => panic!("unexpected oracle value {other:?}"),
         }
+    }
+
+    // Differential parity for a Str kernel: str_len.
+    #[test]
+    fn differential_str_len_parity() {
+        if find_tool("mlir-opt").is_none() || find_tool("clang").is_none() {
+            eprintln!("toolchain missing; str_len parity skipped");
+            return;
+        }
+        let cand = sketch::parse("fn @len(%s: Str) -> Int { str_len %s }").unwrap();
+        check::check(&cand).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new()).unwrap();
+        let row = vec![Value::Str("hello".to_string())];
+        let ictx = interp::Ctx::checked();
+        let expect = interp::eval_candidate(&cand, &row, &ictx).unwrap();
+        assert_eq!(expect, Value::Int(5));
+        let got = eval_native(
+            &mlir, "len", &[CK::Str], &[], &[], &[], &[], &[], &[], &["hello".to_string()],
+            RetSpec::I64, &[],
+        ).expect("native str_len runs");
+        assert_eq!(got[0], 5.0);
+    }
+
+    // Differential parity for a Str kernel: str_eq.
+    #[test]
+    fn differential_str_eq_parity() {
+        if find_tool("mlir-opt").is_none() || find_tool("clang").is_none() {
+            eprintln!("toolchain missing; str_eq parity skipped");
+            return;
+        }
+        let cand = sketch::parse("fn @eq(%a: Str, %b: Str) -> Bool { str_eq %a %b }").unwrap();
+        check::check(&cand).unwrap();
+        let mlir = lower::emit_fn(&cand.name, &cand.params, &cand.ret, &cand.body, &lower::CallMap::new()).unwrap();
+        let row = vec![Value::Str("abc".to_string()), Value::Str("abc".to_string())];
+        let ictx = interp::Ctx::checked();
+        let expect = interp::eval_candidate(&cand, &row, &ictx).unwrap();
+        assert_eq!(expect, Value::Bool(true));
+        let got = eval_native(
+            &mlir, "eq", &[CK::Str, CK::Str], &[], &[], &[], &[], &[], &[],
+            &["abc".to_string(), "abc".to_string()],
+            RetSpec::I64, &[],
+        ).expect("native str_eq runs");
+        assert_eq!(got[0], 1.0);
+        let row2 = vec![Value::Str("abc".to_string()), Value::Str("abd".to_string())];
+        let expect2 = interp::eval_candidate(&cand, &row2, &ictx).unwrap();
+        assert_eq!(expect2, Value::Bool(false));
+        let got2 = eval_native(
+            &mlir, "eq", &[CK::Str, CK::Str], &[], &[], &[], &[], &[], &[],
+            &["abc".to_string(), "abd".to_string()],
+            RetSpec::I64, &[],
+        ).expect("native str_eq runs");
+        assert_eq!(got2[0], 0.0);
     }
 }
 
@@ -880,6 +1053,7 @@ mod float_tests {
             &[],
             &[],
             &[1.5, 2.5],
+            &[],
             &[],
             RetSpec::F64,
             &[],
@@ -923,6 +1097,7 @@ mod listf64_tests {
             &[CK::ListF64],
             &[],
             &[vec![1.5, 2.0, -0.5]],
+            &[],
             &[],
             &[],
             &[],
@@ -974,6 +1149,7 @@ mod broadcast_tests {
             &[CK::ListF64],
             &[],
             &[vec![1.0, 2.0]],
+            &[],
             &[],
             &[],
             &[],
