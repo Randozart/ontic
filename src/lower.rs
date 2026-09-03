@@ -283,10 +283,9 @@ fn mlir_param_type(ty: &Ty) -> &'static str {
         Ty::ListInt => "memref<?xi64>",
         Ty::ListF64 => "memref<?xf64>",
         Ty::ListF32 => "memref<?xf32>",
-        // Checker rejects tuple and Str params before emission; arms
-        // keep the match exhaustive without inventing an ABI.
+        // Checker rejects tuple params before emission.
         Ty::Tuple(_) => "",
-        Ty::Str => "",
+        Ty::Str => "memref<?xi8>",
     }
 }
 
@@ -301,7 +300,7 @@ fn mlir_ret_type(ty: &Ty) -> Result<&'static str, String> {
         // Multi-result emission is a separate path; single-type callers
         // must reject tuples before asking for one MLIR type.
         Ty::Tuple(_) => Err("tuple return needs multi-result emitter".to_string()),
-        Ty::Str => Err("Str return rejected at S2".to_string()),
+        Ty::Str => Ok("memref<?xi8>"),
     }
 }
 
@@ -533,6 +532,9 @@ fn emit_expr(
         }
         Expr::Builtin2(crate::sketch::Builtin::Index, l, r) => {
             emit_index(l, r, env, tyenv, em)
+        }
+        Expr::Builtin2(crate::sketch::Builtin::StrEq, l, r) => {
+            emit_str_eq(l, r, env, tyenv, em)
         }
         Expr::FlatMap { var, list, body } => {
             emit_flatmap(var, list, body, env, tyenv, em)
@@ -865,9 +867,24 @@ fn emit_builtin(
             em.line(&format!("{} = {} {} : f64", out, op, xf));
             Ok(out)
         }
-        Builtin::StrLen | Builtin::StrEq => {
-            Err(format!("lowering: Str builtins not supported in MLIR"))
+        // StrLen: byte length of the UTF-8 buffer (memref<?xi8>). Same
+        // shape as len(): read dim0, cast index -> i64.
+        Builtin::StrLen => {
+            let m = emit_expr(inner, env, tyenv, em)?;
+            let dim = em.fresh("sldim");
+            let c0 = em.const_index(0);
+            em.line(&format!(
+                "{} = \"memref.dim\"({}, {}) : (memref<?xi8>, index) -> index",
+                dim,
+                m,
+                c0
+            ));
+            let cast = em.fresh("sllen");
+            em.line(&format!("{} = arith.index_cast {} : index to i64", cast, dim));
+            Ok(cast)
         }
+        // StrEq routes through the binary path (emit_str_eq).
+        Builtin::StrEq => Err("str_eq is binary (internal routing error)".to_string()),
     }
 }
 
@@ -1152,6 +1169,78 @@ fn emit_concat(
     em.line("}");
 
     Ok(alloc)
+}
+
+/// Emit `str_eq(a, b)` as an i64 (1 equal, 0 not): compare byte lengths,
+/// then a scf.for over the common length loading and comparing each byte.
+/// Short-circuits to 0 on the first mismatched byte; lengths differing
+/// means 0 without the loop. Mirrors the oracle's exact-bytes equality.
+fn emit_str_eq(
+    l: &Expr,
+    r: &Expr,
+    env: &mut Vec<Binding>,
+    tyenv: &mut HashMap<String, Ty>,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let a = emit_expr(l, env, tyenv, em)?;
+    let b = emit_expr(r, env, tyenv, em)?;
+    let idx0 = em.const_index(0);
+    let da = em.fresh("sqda");
+    let db = em.fresh("sqdb");
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : (memref<?xi8>, index) -> index",
+        da, a, idx0
+    ));
+    em.line(&format!(
+        "{} = \"memref.dim\"({}, {}) : (memref<?xi8>, index) -> index",
+        db, b, idx0
+    ));
+    // Lengths must match, otherwise unequal.
+    let len_eq = em.fresh("sqlen");
+    em.line(&format!("{} = arith.cmpi eq, {}, {} : index", len_eq, da, db));
+    let out = em.fresh("sqres");
+    // scf.if with two branches; each branch yields an i64 (1 equal, 0 not).
+    em.line(&format!("{} = scf.if {} -> (i64) {{", out, len_eq));
+    em.indent += 1;
+    // THEN branch (lengths equal): byte-by-byte loop.
+    let zero = em.const_i64(0);
+    let one = em.const_i64(1);
+    let i = em.fresh("sqi");
+    let acc = em.fresh("sqacc");
+    let sqa = em.fresh("sqa");
+    let step = em.const_index(1);
+    em.line(&format!(
+        "{} = scf.for {} = {} to {} step {} iter_args({} = {}) -> (i64) {{",
+        sqa, i, idx0, da, step, acc, zero
+    ));
+    em.indent += 1;
+    let ba = em.fresh("sqba");
+    let bb = em.fresh("sqbb");
+    em.line(&format!("{} = memref.load {}[{}] : memref<?xi8>", ba, a, i));
+    em.line(&format!("{} = memref.load {}[{}] : memref<?xi8>", bb, b, i));
+    let ne = em.fresh("sqne");
+    em.line(&format!("{} = arith.cmpi ne, {}, {} : i8", ne, ba, bb));
+    // If bytes differ, short-circuit: yield 0 from the loop.
+    // Else carry acc forward to next iteration.
+    em.line(&format!("scf.if {} {{", ne));
+    em.indent += 1;
+    em.line(&format!("scf.yield {} : i64", zero));
+    em.indent -= 1;
+    em.line(&format!("}} else {{"));
+    em.indent += 1;
+    em.line(&format!("scf.yield {} : i64", acc));
+    em.indent -= 1;
+    em.line("}");
+    em.indent -= 1;
+    // Close the scf.for and yield 1 (all bytes matched) from the then-branch.
+    em.line(&format!("}} yield {} : i64", one));
+    // ELSE branch of scf.if (lengths differ): yield 0.
+    em.line(&format!("}} else {{"));
+    em.indent += 1;
+    em.line(&format!("scf.yield {} : i64", zero));
+    em.indent -= 1;
+    em.line("}");
+    Ok(out)
 }
 
 
@@ -2268,6 +2357,56 @@ mod tests {
         assert!(ir.contains("arith.cmpi sgt"));
         assert!(ir.contains("arith.extui"));
         assert!(ir.contains("arith.trunci"));
+    }
+
+    #[test]
+    fn test_str_param_emits_memref_xi8() {
+        let ir = lower("fn @sl(%s: Str) -> Int { str_len(%s) }");
+        assert!(
+            ir.contains("func.func @sl(%s: memref<?xi8>) -> i64"),
+            "Str param must be memref<?xi8>, got:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn test_str_len_lowers_to_memref_dim() {
+        let ir = lower("fn @sl(%s: Str) -> Int { str_len(%s) }");
+        assert!(
+            ir.contains("memref.dim"),
+            "str_len must read memref dim, got:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("arith.index_cast"),
+            "str_len must cast index to i64, got:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn test_str_eq_lowers_to_byte_loop() {
+        let ir = lower("fn @se(%a: Str, %b: Str) -> Bool { str_eq(%a, %b) }");
+        assert!(
+            ir.contains("memref<?xi8>"),
+            "str_eq params must be memref<?xi8>, got:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("scf.for"),
+            "str_eq must have a byte-compare loop, got:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("arith.cmpi ne"),
+            "str_eq must compare bytes with cmpi ne, got:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("arith.cmpi eq"),
+            "str_eq must check length equality, got:\n{}",
+            ir
+        );
     }
 
     #[test]

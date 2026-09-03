@@ -55,24 +55,18 @@ pub fn infer_type(e: &Expr, env: &HashMap<String, Ty>) -> Result<Ty, String> {
     infer(e, env)
 }
 
-/// Str params/returns have no native ABI yet (no Str construction in the
-/// grammar); rejected at S2 exactly like tuple params. Widening later is
-/// additive (GR7).
+/// Tuple params/returns have no native ABI; rejected at S2. Str params
+/// and returns ARE emittable (memref<?xi8> + C `char*, long` ABI);
+/// only the tuple position is still fail-closed.
 fn reject_str_positions(cand: &Candidate) -> Result<(), String> {
     for (n, t) in &cand.params {
-        if matches!(t, Ty::Str) {
-            return Err(format!(
-                "param %{n}: Str params unsupported (opaque FFI ABI pending)"
-            ));
+        if matches!(t, Ty::Tuple(_)) {
+            return Err(format!("param %{n}: tuple params unsupported"));
         }
     }
-    let str_ret = match &cand.ret {
-        Ty::Str => true,
-        Ty::Tuple(cs) => cs.iter().any(|c| matches!(c, Ty::Str)),
-        _ => false,
-    };
-    if str_ret {
-        return Err("return type: Str returns unsupported (no Str construction)".to_string());
+    // Str returns are emittable (memref<?xi8>); tuple returns are not.
+    if matches!(&cand.ret, Ty::Tuple(_)) {
+        return Err("return type: tuple returns unsupported".to_string());
     }
     Ok(())
 }
@@ -802,6 +796,31 @@ mod tests {
             "fn @t(%items: List<Int>) -> Int { fold %x in %items, %acc from 0 { %acc + %x } }",
         )
         .unwrap();
+        assert!(check(&c).is_ok());
+    }
+
+    #[test]
+    fn test_str_param_passes_check() {
+        let c = sketch::parse("fn @sl(%s: Str) -> Int { str_len(%s) }").unwrap();
+        assert!(
+            check(&c).is_ok(),
+            "Str params are emittable; S2 must not reject them"
+        );
+    }
+
+    #[test]
+    fn test_str_return_passes_check() {
+        // A candidate whose body is a Str param (returns Str).
+        let c = sketch::parse("fn @id(%s: Str) -> Str { %s }").unwrap();
+        assert!(
+            check(&c).is_ok(),
+            "Str returns are emittable; S2 must not reject them"
+        );
+    }
+
+    #[test]
+    fn test_str_eq_types_to_bool() {
+        let c = sketch::parse("fn @eq(%a: Str, %b: Str) -> Bool { str_eq(%a, %b) }").unwrap();
         assert!(check(&c).is_ok());
     }
 
