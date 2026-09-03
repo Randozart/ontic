@@ -7,8 +7,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+/// Shared manifest payload. `Entry` and `Manifest` are the same struct
+/// (the manifest file IS the entry); this keeps the serde surface single.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Entry {
+pub struct EntryPayload {
     pub key: String,
     pub name: String,
     pub signature: String,
@@ -16,23 +18,30 @@ pub struct Entry {
     pub mlir: String,
     pub gen_text: Option<String>,
     pub proof: Option<String>,
+    /// Emission tier: "checked" (default) or "proven" (flag-free arith,
+    /// gated on a recorded z3 proof). Serde default keeps old manifests
+    /// parsing unchanged.
+    #[serde(default = "default_tier")]
+    pub tier: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Manifest {
-    pub key: String,
-    pub name: String,
-    pub signature: String,
-    pub sketch_text: String,
-    pub mlir: String,
-    pub gen_text: Option<String>,
-    pub proof: Option<String>,
+/// serde default for `EntryPayload::tier` — old manifests predate the field.
+fn default_tier() -> String {
+    "checked".to_string()
 }
+
+pub type Entry = EntryPayload;
+pub type Manifest = EntryPayload;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofStamp {
     pub reason: String,
     pub details: Vec<String>,
+    /// True when the verdict comes from a machine proof (z3 Unsat).
+    /// `#[serde(default)]`: legacy stamps predate the field and parse as
+    /// unattested — the safe direction.
+    #[serde(default)]
+    pub attested: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,21 +61,15 @@ pub struct Vault {
 }
 
 impl Vault {
-    /// Set the trust verdict for a key by rewriting its manifest `proof` field.
-    pub fn set_trust(&mut self, key: &str, verdict: &str) -> Result<(), String> {
+    /// Set the trust verdict for a key: write the stamp file and mirror it
+    /// into the manifest `proof` field. The stamp file is authoritative
+    /// (`trust()` reads it first); the manifest copy is a listing fallback.
+    pub fn set_trust(&mut self, key: &str, stamp: &ProofStamp) -> Result<(), String> {
         let entry = self
             .index
             .get_mut(key)
             .ok_or_else(|| format!("no vault entry {key}"))?;
-        let stamp = ProofStamp {
-            reason: if verdict == "proven" {
-                "machine-checked".to_string()
-            } else {
-                "unverified".to_string()
-            },
-            details: Vec::new(),
-        };
-        let proof = serde_json::to_string_pretty(&stamp).unwrap_or_default();
+        let proof = serde_json::to_string_pretty(stamp).unwrap_or_default();
         entry.proof = Some(proof.clone());
         let manifest_path = self.dir.join(format!("{}.manifest", key));
         fs::write(
@@ -74,8 +77,8 @@ impl Vault {
             serde_json::to_string_pretty(entry).unwrap_or_default(),
         )
         .map_err(|e| e.to_string())?;
-        let proof_path = self.dir.join(format!("{}.proof", key));
-        fs::write(&proof_path, proof).map_err(|e| e.to_string())?;
+        let stamp_path = self.dir.join(format!("{}.stamp.json", key));
+        fs::write(&stamp_path, proof).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -117,6 +120,7 @@ impl Vault {
                             mlir,
                             gen_text: manifest.gen_text,
                             proof: manifest.proof,
+                            tier: manifest.tier,
                         },
                     );
                 } else {
@@ -130,6 +134,7 @@ impl Vault {
                             mlir,
                             gen_text: None,
                             proof: None,
+                            tier: default_tier(),
                         },
                     );
                 }
@@ -155,6 +160,7 @@ impl Vault {
             mlir: mlir.to_string(),
             gen_text: gen_text.map(String::from),
             proof: None,
+            tier: default_tier(),
         };
         let manifest_path = self.dir.join(&format!("{}.manifest", key));
         let proof_path = self.dir.join(&format!("{}.proof", key));
@@ -194,6 +200,7 @@ impl Vault {
             mlir: mlir.to_string(),
             gen_text: gen_text.map(String::from),
             proof: Some(serde_json::to_string_pretty(stamp).unwrap_or_default()),
+            tier: "proven".to_string(),
         };
         let manifest_path = self.dir.join(&format!("{}.manifest", key));
         fs::write(
@@ -201,10 +208,12 @@ impl Vault {
             serde_json::to_string_pretty(&entry).unwrap_or_default(),
         )
         .map_err(|e| e.to_string())?;
-        let proof_path = self.dir.join(&format!("{}.proof", key));
+        // The stamp file is the authoritative trust record; delete() removes
+        // both it and the legacy .proof artifact.
+        let stamp_path = self.dir.join(&format!("{}.stamp.json", key));
         self.index.insert(key.to_string(), entry);
         fs::write(
-            &proof_path,
+            &stamp_path,
             serde_json::to_string_pretty(stamp).unwrap_or_default(),
         )
         .map_err(|e| e.to_string())?;
@@ -224,24 +233,41 @@ impl Vault {
         let mlir_path = self.dir.join(&format!("{}.mlir", key));
         let manifest_path = self.dir.join(&format!("{}.manifest", key));
         let proof_path = self.dir.join(&format!("{}.proof", key));
+        let stamp_path = self.dir.join(&format!("{}.stamp.json", key));
         fs::remove_file(&mlir_path).ok();
         fs::remove_file(&manifest_path).ok();
         fs::remove_file(&proof_path).ok();
+        fs::remove_file(&stamp_path).ok();
         Ok(())
     }
 
+    /// Trust verdict from the recorded proof stamp. The `{key}.stamp.json`
+    /// file is authoritative; the in-memory manifest copy is the legacy
+    /// fallback (entries landed before stamps became files). `attested`
+    /// drives the verdict — no reason-string matching.
     pub fn trust(&self, key: &str) -> Option<TrustVerdict> {
-        self.index.get(key).and_then(|e| {
-            e.proof
-                .as_ref()
-                .and_then(|p| serde_json::from_str::<ProofStamp>(p).ok())
-                .map(|stamp| TrustVerdict {
-                    status: if stamp.reason.contains("checked") {
-                        ProvenVerdict::Attested
-                    } else {
-                        ProvenVerdict::Unattested
-                    },
-                })
+        let entry = self.index.get(key)?;
+        let stamp_path = self.dir.join(format!("{key}.stamp.json"));
+        let stamp = if stamp_path.exists() {
+            fs::read_to_string(&stamp_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<ProofStamp>(&s).ok())
+        } else {
+            None
+        };
+        let stamp = stamp
+            .or_else(|| {
+                entry
+                    .proof
+                    .as_ref()
+                    .and_then(|p| serde_json::from_str::<ProofStamp>(p).ok())
+            })?;
+        Some(TrustVerdict {
+            status: if stamp.attested {
+                ProvenVerdict::Attested
+            } else {
+                ProvenVerdict::Unattested
+            },
         })
     }
 
@@ -371,5 +397,117 @@ impl std::fmt::Display for TrustVerdict {
             ProvenVerdict::Attested => write!(f, "proven"),
             ProvenVerdict::Unattested => write!(f, "raw"),
         }
+    }
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+    use crate::sketch;
+
+    /// Helper: land a minimal checked entry into a temp vault.
+    fn land_checked(v: &mut Vault, name: &str) -> String {
+        let key = crate::sha256::sha256_hex(name.as_bytes());
+        v.put(
+            &key,
+            name,
+            "fn T.x(%a: Int, %b: Int) -> Int",
+            "sketch",
+            "module {}",
+            None,
+        )
+        .expect("put");
+        key
+    }
+
+    #[test]
+    fn test_legacy_entry_no_stamp_is_unattested() {
+        let dir = std::env::temp_dir().join(format!("ontic-vault-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut v = Vault::new(&dir);
+        let key = land_checked(&mut v, "legacy");
+        // No stamp file, no manifest proof: verdict is NONE.
+        assert!(v.trust(&key).is_none());
+    }
+
+    #[test]
+    fn test_set_trust_writes_stamp_file_and_drives_verdict() {
+        let dir = std::env::temp_dir().join(format!("ontic-vault-stamp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut v = Vault::new(&dir);
+        let key = land_checked(&mut v, "stamped");
+        // attested=true ⇒ Attested, driven by the flag — not reason text.
+        let att = ProofStamp { reason: "z3-unsat".into(), details: vec!["enc".into()], attested: true };
+        v.set_trust(&key, &att).expect("set_trust");
+        assert_eq!(
+            v.trust(&key).map(|t| t.status),
+            Some(ProvenVerdict::Attested)
+        );
+        // Same reason text, attested=false ⇒ Unattested (kills the
+        // old reason.contains matching disease).
+        let un = ProofStamp { reason: "z3-unsat".into(), details: vec![], attested: false };
+        v.set_trust(&key, &un).expect("set_trust");
+        assert_eq!(
+            v.trust(&key).map(|t| t.status),
+            Some(ProvenVerdict::Unattested)
+        );
+        // Legacy stamps (no attested field) parse as unattested — the
+        // safe direction.
+        let legacy = ProofStamp {
+            reason: "machine-checked".into(),
+            details: vec![],
+            attested: false,
+        };
+        let legacy_json = serde_json::json!({"reason": "machine-checked", "details": []})
+            .to_string();
+        fs::write(dir.join(format!("{key}.stamp.json")), legacy_json).unwrap();
+        assert_eq!(
+            v.trust(&key).map(|t| t.status),
+            Some(ProvenVerdict::Unattested),
+            "legacy stamp without attested field must parse unattested"
+        );
+        let _ = serde_json::from_str::<ProofStamp>(&serde_json::to_string(&legacy).unwrap());
+    }
+
+    #[test]
+    fn test_put_proven_stamps_tier_and_attested() {
+        let dir = std::env::temp_dir().join(format!("ontic-vault-proven-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut v = Vault::new(&dir);
+        let stamp = ProofStamp { reason: "z3-unsat".into(), details: vec!["3 sites".into()], attested: true };
+        v.put_proven(
+            "pk",
+            "pk",
+            "fn T.p() -> Int",
+            "sketch",
+            "module {}",
+            Some("gen text"),
+            &stamp,
+        )
+        .expect("put_proven");
+        let e = v.get("pk").expect("entry");
+        assert_eq!(e.tier, "proven");
+        assert_eq!(v.trust("pk").map(|t| t.status), Some(ProvenVerdict::Attested));
+        // delete removes the stamp file too.
+        v.delete("pk").expect("delete");
+        assert!(!dir.join("pk.stamp.json").exists());
+        assert!(v.trust("pk").is_none());
+    }
+
+    #[test]
+    fn test_old_manifest_without_tier_parses_checked() {
+        let dir = std::env::temp_dir().join(format!("ontic-vault-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let manifest = serde_json::json!({
+            "key": "old1", "name": "old", "signature": "fn T.o() -> Int",
+            "sketch_text": "s", "mlir": "module {}", "gen_text": null, "proof": null
+        });
+        fs::write(dir.join("old1.manifest"), manifest.to_string()).unwrap();
+        fs::write(dir.join("old1.mlir"), "module {}").unwrap();
+        let v = Vault::open(&dir);
+        let e = v.get("old1").expect("entry");
+        assert_eq!(e.tier, "checked", "missing tier field defaults to checked");
+        let _ = sketch::parse("fn @x(%a: Int) -> Int { %a }"); // touch dep
     }
 }

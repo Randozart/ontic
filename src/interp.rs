@@ -262,7 +262,9 @@ fn eval_broadcast(
 }
 
 /// Resolve a vault call: bind args against the dep's parameters, evaluate
-/// the dep's stored candidate under the DEP'S OWN tier.
+/// the dep's stored candidate. Dep bodies are trusted under their vaulted
+/// `[pre][post]` contract (GR: vault entries are contracts, not code
+/// trust); the sieve never re-verifies a dep body.
 fn eval_call(
     path: &str,
     args: &[Expr],
@@ -391,12 +393,14 @@ fn int_of(v: &Value) -> Result<i64, EvalError> {
     }
 }
 
-/// Evaluate `expr` under `env` in the default (checked) tier.
+/// Evaluate `expr` under `env` with no resolvable deps. Int arithmetic
+/// is checked: overflow kills the evaluation (the oracle's semantics —
+/// the lowering must match it tier for tier, GR6).
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
     eval_ctx(expr, env, &Ctx::checked())
 }
 
-/// Evaluate `expr` under `env` with explicit semantics tier + dep table.
+/// Evaluate `expr` under `env` with an explicit dep table.
 pub fn eval_ctx(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<Value, EvalError> {
     match expr {
         Expr::IntLit(v) => Ok(Value::Int(*v)),

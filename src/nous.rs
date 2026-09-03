@@ -196,6 +196,14 @@ pub fn unpack(data: &[u8]) -> Result<NousPackage, String> {
                 gen_text: un.manifest["gen_text"].as_str().map(String::from),
                 mlir: un.mlir.clone(),
                 proof: un.manifest["proof"].as_str().map(String::from),
+                // Tier rides the shipped manifest; old packages parse as
+                // checked (serde default) — the safe direction.
+                tier: un
+                    .manifest
+                    ["tier"]
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| "checked".to_string()),
             },
             obj: un.obj_bytes.clone(),
             header: un.header_text.clone(),
@@ -248,6 +256,7 @@ mod tests {
                 },
                 mlir: format!("module {{ func.func @{name}() -> i64 }}"),
                 proof: None,
+                tier: "checked".to_string(),
             },
             obj: vec![0xDE, 0xAD],
             header: format!("long {name}(long x);"),

@@ -1682,7 +1682,14 @@ fn land_entry(
         };
         std::fs::write(dirp.join(name), bytes).map_err(|e| format!("extra write failed: {}", e))?;
     }
-    v.set_trust(&ne.entry.key, status)
+    // Import provenance is vouching, not a machine proof: `attested`
+    // stays false until a z3 stamp lands locally (GR1 wall).
+    let stamp = ontic::vault::ProofStamp {
+        reason: format!("nous import: {status}"),
+        details: Vec::new(),
+        attested: false,
+    };
+    v.set_trust(&ne.entry.key, &stamp)
 }
 
 /// Build callable binaries for a landed entry: raw `.so` from the shipped
@@ -2062,6 +2069,7 @@ fn emit_ous(
         gen_text: Some(w.source.clone()),
         mlir: cand_m.clone(),
         proof: None,
+        tier: "checked".to_string(),
     };
     let ous_data = ontic::ous::pack_full(&entry, &obj_bytes, &hdr);
     let ous_name = format!(

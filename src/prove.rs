@@ -44,28 +44,40 @@ pub enum Proof {
     Unproven(String),
 }
 
-/// Analyze one accepted candidate against its gen's invariants.
-pub fn proof_for(gen: &Gen, cand: &Candidate) -> Proof {
-    // Scalar Int params only; anything else lacks a bounded domain story.
-    let mut names: Vec<String> = Vec::new();
+/// Shared proven-subset gate: `None` when the candidate body is within
+/// the flag-free proven subset (scalar-Int params, scalar Int/Bool return,
+/// straight-line Int shapes only). `Some(reason)` is the honest reason it
+/// is NOT. Both `proof_for` (z3 encoding) and `lower::emit_fn_tier`
+/// (emission selection) call this — a single source so the emitter and
+/// the prover cannot drift.
+pub fn subset_ok(cand: &Candidate) -> Option<String> {
     for (n, t) in &cand.params {
         if !matches!(t, Ty::Int) {
-            return Proof::Unproven(format!(
+            return Some(format!(
                 "param %{n}: {} — proven v1 covers scalar Int params",
                 t.name()
             ));
         }
-        names.push(n.clone());
     }
     if !matches!(cand.ret, Ty::Int | Ty::Bool) {
-        return Proof::Unproven(format!(
+        return Some(format!(
             "return {} outside scalar-Int scope of proven v1",
             cand.ret.name()
         ));
     }
-    if let Some(reason) = unsupported_shape(&cand.body) {
+    unsupported_shape(&cand.body)
+}
+
+/// Analyze one accepted candidate against its gen's invariants.
+pub fn proof_for(gen: &Gen, cand: &Candidate) -> Proof {
+    if let Some(reason) = subset_ok(cand) {
         return Proof::Unproven(reason);
     }
+    let names: Vec<String> = cand
+        .params
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect();
     let sites = count_arith(&cand.body);
     if sites == 0 && !contains_neg(&cand.body) {
         return Proof::Proven("no arithmetic sites in body".to_string());

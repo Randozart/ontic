@@ -122,6 +122,7 @@ mod tests {
             sketch_text: "fn @mean(%xs: List<F64>) -> F64 { 0.0 }".to_string(),
             mlir: "module {\n  func.func @mean(%xs: memref<?xf64>) -> f64 {\n    return 0.0 : f64\n  }\n}".to_string(),
             proof: None,
+            tier: "checked".to_string(),
         }
     }
 

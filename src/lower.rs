@@ -210,11 +210,23 @@ struct Binding {
 }
 
 /// One-shot MLIR text emitter for a single candidate function.
+/// Emission speed tier. `Checked` is the default: every Int add/sub/mul
+/// widens to i128, range-checks, and traps on overflow (GR11: mercy
+/// requires declaration). `Proven` emits flag-free i64 arithmetic —
+/// permitted only when the whole body is inside the proven subset AND a
+/// recorded z3 proof attests trap-absence (the proof IS the declaration).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Checked,
+    Proven,
+}
+
 struct Emitter {
     out: String,
     counter: usize,
     indent: usize,
     calls: CallMap,
+    tier: Tier,
 }
 
 impl Emitter {
@@ -224,7 +236,15 @@ impl Emitter {
             counter: 0,
             indent: 0,
             calls: CallMap::new(),
+            tier: Tier::Checked,
         }
+    }
+
+    /// Tiered variant: proven arithmetic skips widen-check-trap.
+    fn new_tier(tier: Tier) -> Self {
+        let mut e = Self::new();
+        e.tier = tier;
+        e
     }
 
     fn fresh(&mut self, prefix: &str) -> String {
@@ -286,12 +306,32 @@ fn mlir_ret_type(ty: &Ty) -> Result<&'static str, String> {
 }
 
 /// Emit a complete `module { func.func @name ... }` for a candidate.
+/// Default (checked) emission: every Int add/sub/mul carries the
+/// i128 widen + range check + trap expansion.
 pub fn emit_fn(
     name: &str,
     params: &[(String, Ty)],
     ret: &Ty,
     body: &Expr,
     calls: &CallMap,
+) -> Result<String, String> {
+    emit_fn_tier(name, params, ret, body, calls, Tier::Checked)
+}
+
+/// Tier-aware emission: `Tier::Proven` emits flag-free i64 arithmetic
+/// (plain `arith.addi/subi/muli`; negation as `arith.subi 0, x`),
+/// `Tier::Checked` (default) keeps today's widen-check-trap expansion.
+/// The proven path is only SOUND when the body lies inside the proven
+/// subset AND a machine proof attests trap-absence — callers must gate
+/// on `prove::subset_ok` plus a recorded `Proof` (GR11: the recorded
+/// proof is the declaration; no mercy without evidence).
+pub fn emit_fn_tier(
+    name: &str,
+    params: &[(String, Ty)],
+    ret: &Ty,
+    body: &Expr,
+    calls: &CallMap,
+    tier: Tier,
 ) -> Result<String, String> {
     // Tuple return: multi-result MLIR function. The body must be a tuple
     // literal whose components lower independently; the C ABI bridges the
@@ -308,7 +348,7 @@ pub fn emit_fn(
     } else {
         mlir_ret_type(ret)?.to_string()
     };
-    let mut em = Emitter::new();
+    let mut em = Emitter::new_tier(tier);
     em.calls = calls.clone();
 
     let sig: Vec<String> = params
@@ -1921,7 +1961,10 @@ fn emit_binop(
         return Ok(out);
     }
     if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
-        return emit_checked_arith(op, &lv_s, &rv_s, em);
+        return match em.tier {
+            Tier::Proven => emit_proven_arith(op, &lv_s, &rv_s, em),
+            Tier::Checked => emit_checked_arith(op, &lv_s, &rv_s, em),
+        };
     }
     let out = em.fresh("op");
     let stmt = match op {
@@ -1941,6 +1984,26 @@ fn emit_binop(
         }
         None => Err(format!("lowering: unhandled binop {:?}", op)),
     }
+}
+
+/// Proven-tier arithmetic: plain i64 add/sub/mul, no widen, no check,
+/// no trap. Sound ONLY inside the proven subset with a recorded z3 proof
+/// (the caller's obligation — see `emit_fn_tier`).
+fn emit_proven_arith(
+    op: BinOp,
+    lv: &str,
+    rv: &str,
+    em: &mut Emitter,
+) -> Result<String, String> {
+    let out = em.fresh("op");
+    let wide_op = match op {
+        BinOp::Add => "arith.addi",
+        BinOp::Sub => "arith.subi",
+        BinOp::Mul => "arith.muli",
+        _ => return Err(format!("proven expansion unsupported for {:?}", op)),
+    };
+    em.line(&format!("{} = {} {}, {} : i64", out, wide_op, lv, rv));
+    Ok(out)
 }
 
 /// Checked-tier arithmetic: compute in i128 (cannot overflow for any i64
@@ -2269,6 +2332,47 @@ mod tier_tests {
         assert!(ir.contains("ontic_trap"), "missing trap decl");
         assert!(ir.contains("i128"));
         assert!(ir.contains("scf.if"));
+    }
+
+    /// Proven emission is flag-free: plain i64 add/sub/mul, no i128
+    /// widening, no range-check branch, no trap CALL (the declaration
+    /// stays — structural broadcast guards use it in every tier).
+    #[test]
+    fn test_proven_arith_is_flag_free() {
+        let c = sketch::parse(
+            "fn @pf(%a: Int, %b: Int) -> Int { %a * %b - %a + -%b }",
+        ).unwrap();
+        let ir = emit_fn_tier(
+            &c.name, &c.params, &c.ret, &c.body, &CallMap::new(), Tier::Proven,
+        ).unwrap();
+        assert!(ir.contains("arith.muli"), "plain mul missing");
+        assert!(ir.contains("arith.subi"), "plain sub missing");
+        assert!(!ir.contains("i128"), "proven tier must not widen");
+        assert!(!ir.contains("scf.if"), "proven tier must not range-check");
+        assert!(!ir.contains("func.call @ontic_trap"), "no trap CALL in proven body");
+        assert!(ir.contains("arith.constant 0 : i64"), "neg lowers as subi 0, x");
+    }
+
+    /// Checked emission is byte-stable against emit_fn (the proven path
+    /// must not alter the default tier at all).
+    #[test]
+    fn test_checked_tier_unchanged_by_tier_param() {
+        let c = sketch::parse("fn @ct(%a: Int, %b: Int) -> Int { %a + %b }").unwrap();
+        let default_ir = emit_fn(&c.name, &c.params, &c.ret, &c.body, &CallMap::new()).unwrap();
+        let checked_ir = emit_fn_tier(
+            &c.name, &c.params, &c.ret, &c.body, &CallMap::new(), Tier::Checked,
+        ).unwrap();
+        assert_eq!(default_ir, checked_ir, "Checked tier must equal emit_fn");
+    }
+
+    /// Negative: a division candidate is OUTSIDE the proven subset —
+    /// `prove::subset_ok` reports it and only Checked emission is legal
+    /// for it. (Feature-gated: subset_ok lives in the proven module.)
+    #[cfg(feature = "proven")]
+    #[test]
+    fn test_division_candidate_fails_subset_gate() {
+        let c = sketch::parse("fn @dv(%a: Int, %b: Int) -> Int { %a / %b }").unwrap();
+        assert!(crate::prove::subset_ok(&c).is_some(), "div outside proven subset");
     }
 }
 
