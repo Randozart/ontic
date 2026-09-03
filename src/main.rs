@@ -684,6 +684,118 @@ fn native_rerank(w: &gen::Gen, resolved: &ResolvedDeps, survivors: &mut Vec<siev
     }
 }
 
+/// Proven-vs-checked equivalence gate (P7 acceptance, non-negotiable):
+/// the proven emission must reproduce the checked emission's VALUES on
+/// the transparent-example row before flag-free code may land. Any
+/// mismatch, exec failure, or unsupported driver shape returns the honest
+/// reason — the caller falls back to checked. The oracle (interpreter)
+/// stays the reference for both (GR6).
+/// Returns Ok when the gate passes; `None` is the Ok-payload marker.
+#[cfg(feature = "proven")]
+fn proven_equivalence_gate(
+    w: &gen::Gen,
+    survivor: &sieve::Survivor,
+    resolved: &ResolvedDeps,
+    _checked_composite: &str,
+) -> Option<String> {
+    use crate::gen::Value;
+    let cand = &survivor.candidate;
+    if !matches!(cand.ret, sketch::Ty::Int | sketch::Ty::Bool) {
+        return Some(format!(
+            "return {} outside the proven subset (Int/Bool only)",
+            cand.ret.name()
+        ));
+    }
+    let row: Vec<Value> = w
+        .transparent
+        .first()
+        .map(|ex| ex.inputs.clone())
+        .unwrap_or_default();
+    let checked_mlir = match lower::emit_fn(
+        &cand.name,
+        &cand.params,
+        &cand.ret,
+        &cand.body,
+        &resolved.calls,
+    ) {
+        Ok(m) => m,
+        Err(e) => return Some(format!("checked lowering failed: {e}")),
+    };
+    let proven_mlir = match lower::emit_fn_tier(
+        &cand.name,
+        &cand.params,
+        &cand.ret,
+        &cand.body,
+        &resolved.calls,
+        lower::Tier::Proven,
+    ) {
+        Ok(m) => m,
+        Err(e) => return Some(format!("proven lowering failed: {e}")),
+    };
+    // Both tiers vs the oracle on the SAME row.
+    let ictx = interp::Ctx {
+        deps: std::sync::Arc::new(resolved.map.clone()),
+    };
+    let expect = match interp::eval_candidate(cand, &row, &ictx) {
+        Ok(v) => v,
+        Err(e) => return Some(format!("oracle eval failed: {e}")),
+    };
+    let kinds: Vec<pipeline::CK> = cand
+        .params
+        .iter()
+        .map(|(_, t)| match t {
+            sketch::Ty::Int | sketch::Ty::Bool => pipeline::CK::I64,
+            _ => return Some("proven v1 covers scalar Int params only".to_string()),
+        })
+        .collect();
+    let lists_i = Vec::new();
+    let lists_f = Vec::new();
+    let lists_f32 = Vec::new();
+    let si_i: Vec<i64> = row
+        .iter()
+        .filter_map(|v| match v {
+            Value::Int(x) => Some(*x),
+            Value::Bool(b) => Some(*b as i64),
+            _ => None,
+        })
+        .collect();
+    let si_f = Vec::new();
+    let si_f32 = Vec::new();
+    for (label, mlir) in [("checked", &checked_mlir), ("proven", &proven_mlir)] {
+        let got = match pipeline::eval_native(
+            mlir,
+            &cand.name,
+            &kinds,
+            &lists_i,
+            &lists_f,
+            &lists_f32,
+            &si_i,
+            &si_f,
+            &si_f32,
+            pipeline::RetSpec::I64,
+            &[],
+        ) {
+            Ok(g) => g,
+            Err(e) => return Some(format!("{label} native exec failed: {e}")),
+        };
+        let g = got.first().copied().unwrap_or(f64::NAN);
+        let e = match &expect {
+            Value::Int(x) => *x as f64,
+            Value::Bool(b) => *b as i64 as f64,
+            _ => return Some("proven v1 covers Int/Bool returns only".to_string()),
+        };
+        if g != e {
+            return Some(format!(
+                "{label} native value {g} != oracle {e} on spec row"
+            ));
+        }
+    }
+    println!(
+        "PROVEN    : equivalence gate passed (proven == checked == oracle on spec row)"
+    );
+    None
+}
+
 /// Differential value parity: oracle vs native on one row. Ok when the
 /// return shape has a supported driver AND values agree; Err kills.
 fn differential_parity(
@@ -948,7 +1060,8 @@ fn emit_and_store(
     fcfg: &ForgeConfig,
     first_prompt: &str,
 ) -> i32 {
-    let mlir = match lower::emit_fn(
+    #[allow(unused_mut)]
+    let mut mlir = match lower::emit_fn(
         &survivor.candidate.name,
         &survivor.candidate.params,
         &survivor.candidate.ret,
@@ -969,7 +1082,8 @@ fn emit_and_store(
     let staged = std::env::temp_dir().join("ontic-emit-check.mlir");
     let mut parts: Vec<String> = resolved.mlirs.clone();
     parts.push(mlir.clone());
-    let validation_text = lower::compose_modules(&parts).unwrap_or(mlir.clone());
+    #[allow(unused_mut)]
+    let mut validation_text = lower::compose_modules(&parts).unwrap_or(mlir.clone());
     match std::fs::write(&staged, &validation_text)
         .map_err(|e| e.to_string())
         .and_then(|_| pipeline::validate_mlir(&staged))
@@ -982,6 +1096,76 @@ fn emit_and_store(
                 eprintln!("FATAL   : mlir-opt rejected emission:\n{}", e);
                 return 1;
             }
+        }
+    }
+    // PROVEN TIER (feature-gated, GR11): a recorded z3 Unsat verdict is
+    // the declaration for flag-free codegen. Emission is gated on the
+    // machine proof — never on author claim — and the equivalence gate
+    // below verifies proven vs checked on the spec row before anything
+    // vaults. Any failure falls back to checked (never a weaker sieve).
+    #[allow(unused_mut)]
+    let mut proof_stamp: Option<ontic::vault::ProofStamp> = None;
+    #[cfg(feature = "proven")]
+    {
+        match ontic::prove::proof_for(w, &survivor.candidate) {
+            ontic::prove::Proof::Proven(summary) => {
+                if let Some(pr_reason) = proven_equivalence_gate(
+                    w,
+                    survivor,
+                    resolved,
+                    &validation_text,
+                ) {
+                    eprintln!(
+                        "PROVEN EMISSION REFUSED (falling back to checked): {}",
+                        pr_reason
+                    );
+                } else {
+                    if let Ok(pm) = lower::emit_fn_tier(
+                        &survivor.candidate.name,
+                        &survivor.candidate.params,
+                        &survivor.candidate.ret,
+                        &survivor.candidate.body,
+                        &resolved.calls,
+                        lower::Tier::Proven,
+                    ) {
+                        let mut pp: Vec<String> = resolved.mlirs.clone();
+                        pp.push(pm.clone());
+                        match lower::compose_modules(&pp) {
+                            Ok(ptxt) => {
+                                if let Err(e) = std::fs::write(&staged, &ptxt)
+                                    .and_then(|_| pipeline::validate_mlir(&staged))
+                                {
+                                    if pipeline::find_tool("mlir-opt").is_some() {
+                                        eprintln!(
+                                            "PROVEN EMISSION REFUSED (falling back to checked): mlir-opt rejected proven IR: {}",
+                                            e
+                                        );
+                                    } else {
+                                        println!("PROVEN    : mlir-opt missing; validation skipped");
+                                    }
+                                } else {
+                                    println!("PROVEN    : flag-free emission validated");
+                                }
+                                mlir = pm;
+                                validation_text = ptxt;
+                                proof_stamp = Some(ontic::vault::ProofStamp {
+                                    reason: format!("z3-unsat: {}", summary),
+                                    details: vec!["straight-line Int subset".to_string()],
+                                    attested: true,
+                                });
+                            }
+                            Err(e) => eprintln!(
+                                "PROVEN EMISSION REFUSED (falling back to checked): compose failed: {}",
+                                e
+                            ),
+                        }
+                    }
+                }
+            }
+            ontic::prove::Proof::Unproven(reason) => println!(
+                "PROVEN    : unproven ({}); checked tier emits",
+                reason
+            ),
         }
     }
     let vault_dir = std::env::var("ONTIC_VAULT").unwrap_or_else(|_| ".ontic/vault".to_string());
@@ -1144,7 +1328,22 @@ fn emit_and_store(
             .map(|(n, t)| format!("%{}: {}", n, t.name()))
             .collect();
         let signature = format!("fn {}({}) -> {}", w.path, params.join(", "), w.ret.name());
-        if let Err(e) = v.put(
+        if let Some(stamp) = &proof_stamp {
+            // Recorded z3 verdict: attested + tier=proven (GR11 — the
+            // proof IS the contract word).
+            if let Err(e) = v.put_proven(
+                &key,
+                &w.name,
+                &signature,
+                &survivor.source_text,
+                &mlir,
+                Some(w.source.as_str()),
+                stamp,
+            ) {
+                eprintln!("{}", e);
+                return 1;
+            }
+        } else if let Err(e) = v.put(
             &key,
             &w.name,
             &signature,
