@@ -167,6 +167,22 @@ Measured on `geo(0.75)` (pass path, 100k iterations):
 - Guarded: **1.0 ns/call**
 - Overhead: **0.1 ns** (branch predictor eliminates cost)
 
+## Proven tier and guards
+
+Guarded twins are **invariant-driven**, not overflow-driven: the shim
+translates the gen's `|` invariants into pre-conditions. Overflow traps
+live in the kernel itself (the checked tier's i128 expansion) and are
+not part of the guard story. Consequences:
+
+- A **proven** kernel (flag-free codegen, recorded z3 Unsat verdict)
+  still ships its guarded twin — structural guards (broadcast bounds,
+  `len()` conjuncts, user invariants) remain meaningful. The only
+  thing that vanishes is the overflow widen-check-trap expansion, and
+  its absence IS the recorded proof.
+- `vault status` reports the verdict: **proven** (attested stamp) vs
+  **raw** (proven subset without a recorded proof) vs plain checked.
+  The attested flag — not the reason string — drives this.
+
 ## Limitations
 
 - **Preconditions only** — postconditions checked by the sieve at proof

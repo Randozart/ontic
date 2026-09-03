@@ -163,12 +163,19 @@ came from verifier work while the model stayed frozen.
 
 ## Overflow semantics
 
-Integer arithmetic is checked: overflow kills candidates in the sieve and
-traps natively. Keep intermediate values in range via invariants or small
-domains. A future `proven` tier plans Z3 absence proofs for flag-free
-codegen.
+Integer arithmetic is checked by default: overflow kills candidates in
+the sieve and traps natively (i128 widen + range check). Keep
+intermediate values in range via invariants or small domains.
 
-Speed requires declaration.
+**Proven tier** (feature `proven`): a kernel whose body lies inside the
+straight-line Int subset can earn flag-free codegen — but ONLY with a
+recorded Z3 verdict (every trap is UNSAT under the invariants, over the
+whole domain, not the probed sample). The recorded proof is the
+declaration; a proven entry stamps `tier: proven` +
+`attested: true` and prints a `PROVEN` banner. Unproven candidates fall
+back to checked emission with an honest reason.
+
+Speed requires declaration: mercy without a recorded proof is forbidden.
 
 ## Type and expression surface
 

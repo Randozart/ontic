@@ -1,4 +1,36 @@
 # CHANGES
+### 2026-09-03 12:55 — Proven-tier emission arc: flag-free codegen gated on recorded proofs (`9f5fe58`, `19c4106`)
+
+Implements `docs/plans/2026-09-02-proven-tier-emission.md` (P1–P9).
+
+- **vault**: `EntryPayload` unifies Entry/Manifest (shared `tier`,
+  serde-defaulted `"checked"` — old manifests parse unchanged);
+  `ProofStamp.attested` (serde default `false`, legacy-safe) replaces
+  reason-string matching in `trust()`; stamps persist as
+  `{key}.stamp.json` (first read source, in-memory manifest legacy
+  fallback); `put_proven` lands tier=proven + attested stamp;
+  `delete` removes the stamp file.
+- **prove**: `subset_ok(cand)` — the single proven-subset gate shared
+  by the z3 encoding and the emitter (no drift, GR2).
+- **lower**: `Tier` enum + `emit_fn_tier`; `emit_proven_arith` (plain
+  i64 add/sub/mul, neg = `subi 0,x`, no i128 widen/check/trap);
+  `emit_fn` delegates Checked (zero churn). The `@ontic_trap`
+  declaration stays in every tier — structural broadcast guards use it;
+  only overflow CALLS vanish in proven.
+- **solve** (feature `proven`): emission gated on `proof_for`'s
+  recorded verdict; proven IR composed + mlir-opt validated; the
+  proven-vs-checked equivalence gate (both tiers vs oracle on the
+  spec row) must pass before flag-free code lands. Any refusal prints
+  the honest reason and falls back to checked. Default build
+  (no z3) is byte-identical.
+- **tests**: 10 new (4 vault trust, 3 tier emission, 3 gated under
+  `proven`). 177 → 183.
+- **docs**: README overflow semantics, AGENTS proven-tier pillar,
+  GUARDS.md proven+guards section.
+
+z3 is absent on this machine: `--features proven` paths are compile-
+gated but not execution-verified here (plan's accepted risk).
+
 
 ### 2026-09-02 18:46 — Vault API modernisation: modular trust ledger (`3bdf50b`)
 

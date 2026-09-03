@@ -104,6 +104,13 @@ Patches are unacceptable. There is no "go fast and break things."
   precondition checks). Guarded builds are non-fatal — raw always lands.
   Violation messages carry actual param values as evidence (GR12).
   See `docs/GUARDS.md`.
+- **The proven tier is proof-gated, never claim-gated.** Flag-free
+  (checked-less) codegen exists only behind a recorded z3 Unsat verdict
+  over the whole invariant domain, and only for the straight-line Int
+  subset (`prove::subset_ok`). The recorded `ProofStamp { attested }`
+  drives `vault status` (Attested / Unattested) — never reason-text
+  matching. A proven kernel still ships the guarded twin: structural
+  guards (broadcast bounds) are invariant-driven, not overflow-driven.
 
 ## Sieve Rules
 

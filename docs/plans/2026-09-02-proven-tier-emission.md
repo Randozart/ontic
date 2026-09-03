@@ -1,5 +1,11 @@
 # Proven Tier Emission — Plan (2026-09-02)
 
+**Status: done (2026-09-03).** Commits `9f5fe58` (tier-aware emission +
+trust stamps) and `19c4106` (solve wiring + equivalence gate). All 9
+steps landed as planned; default build 183/183 green. `--features
+proven` paths are compile-gated but not execution-verified on this
+machine (z3 absent — the plan's accepted risk).
+
 **Date:** 2026-09-02
 **Timestamp:** 2026-09-02 22:20
 
