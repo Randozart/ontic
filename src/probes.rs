@@ -81,7 +81,11 @@ pub const ELEM_HI: i64 = 100;
 /// Canonical edge cases prepended before random rows (deterministic).
 fn edges(ty: &Ty) -> Vec<Value> {
     match ty {
-        Ty::Str => vec![],
+        Ty::Str => vec![
+            Value::Str(String::new()),
+            Value::Str("a".to_string()),
+            Value::Str("hello".to_string()),
+        ],
         Ty::Int => vec![Value::Int(0), Value::Int(1), Value::Int(-1)],
         Ty::F64 | Ty::F32 => vec![
             Value::Float(0.0),
@@ -127,7 +131,11 @@ fn sample(ty: &Ty, rng: &mut Rng) -> Value {
                 .collect();
             Value::List(items)
         }
-        Ty::Str => unreachable!("Str not supported here"),
+        Ty::Str => {
+            let len = (rng.next_u64() % 8) as usize;
+            let s: String = (0..len).map(|i| char::from(b'a' + i as u8)).collect();
+            Value::Str(s)
+        }
     }
 }
 
@@ -162,7 +170,11 @@ fn materialize(
                     .collect();
                 row.push(Value::FloatList(items));
             }
-        Ty::Str => unreachable!("Str not supported here"),
+        Ty::Str => {
+            let len = (rng.next_u64() % 8) as usize;
+            let s: String = (0..len).map(|i| char::from(b'a' + i as u8)).collect();
+            row.push(Value::Str(s));
+        }
         }
     }
     if first_violation(gen, &row, ctx).is_some() {
