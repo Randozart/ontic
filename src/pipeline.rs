@@ -572,6 +572,7 @@ pub fn eval_c_source(
         r#"#include <stdio.h>
 #include <stdlib.h>
 
+{str_def}
 {mr_def}
 {tup_def}
 
@@ -591,6 +592,7 @@ int main(void) {{
   return 0;
 }}
 "#,
+        str_def = str_def,
         mr_def = mr_def,
         tup_def = tup_def,
         ret_t = ret_t,
