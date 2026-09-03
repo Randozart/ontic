@@ -2,7 +2,9 @@
 
 **Date:** 2026-09-03
 **Timestamp:** 2026-09-03 13:10
-**Status:** plan — ready to execute.
+**Status:** done (2026-09-03). Commits `c7b3fe0` (lowering+S2),
+`9bc7443` (driver+parity), `70fb248` (header/shim), `2b963f0` (probes),
+`a320e75` (S typedef fix). 194/194 tests green; functional solve verified.
 
 Completes survey F3 (`2026-09-02-next-work-survey.md`): Str kernels can
 currently solve in interpret mode only; S2 (`check::reject_str_positions`)

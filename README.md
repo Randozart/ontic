@@ -189,7 +189,7 @@ Speed requires declaration: mercy without a recorded proof is forbidden.
 | `List<F64>` | `List<F64>` | `MR` |
 | `List<F32>` | `List<F32>` | `MR` |
 | `(T, U)` | `-> (T, U)` (return only) | struct `ontic_tup2_*` |
-| `Str` | declare-only v1; specs load, solves fail-closed at S2 | pending |
+| `Str` | `Str` | `(char* d, long l)` param; `S` struct return |
 
 | Expression | Purpose |
 |------------|---------|
@@ -201,6 +201,8 @@ Speed requires declaration: mercy without a recorded proof is forbidden.
 | `xs ++ ys` | list concatenation |
 | `let (a, b) = Dep.fn(...)` | destructure tuple returns |
 | `min_el(a, b)` / `max_el(a, b)` | scalar min/max |
+| `str_len(s)` | byte length of a Str (i64) |
+| `str_eq(a, b)` | byte-exact string equality (Bool) |
 
 ## Setup
 

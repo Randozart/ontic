@@ -1,4 +1,41 @@
 # CHANGES
+### 2026-09-03 17:45 — Str native ABI: string kernels vault with real artifacts (`c7b3fe0` … `a320e75`)
+
+Implements `docs/plans/2026-09-03-str-native-abi.md` (survey F3). Str
+kernels previously solved in interpret mode only; S2 fail-closed any
+candidate with a Str param/return ("opaque FFI ABI pending").
+
+- **ABI**: Str = `(char* data, long len)` — pointer + length, not
+  NUL-terminated C strings (GR: `Value::Str` may contain NULs and may
+  be empty; `len` is authoritative, matching oracle `s.len()`).
+  Return Str = `S` struct by value (LLVM `{ptr, i64}` ↔ C struct,
+  same convention as tuple returns).
+- **lower**: `Ty::Str` → `memref<?xi8>` in MLIR (param and return);
+  `str_len` → `memref.dim` + `index_cast` to i64; `str_eq` → length
+  compare + `scf.for` byte-comparison loop (i64 1/0).
+- **check**: S2 no longer rejects Str params/returns; type inference
+  already handled Str (`StrLen → Int`, `StrEq → Bool`).
+- **pipeline**: `CK::Str` (char*, long) + `RetSpec::Str` (S struct);
+  `eval_c_source` embeds UTF-8 bytes as `static char` arrays and passes
+  `(pointer, length)`; `eval_native_str` returns raw stdout bytes for
+  Str returns (no numeric parse).
+- **main**: `differential_parity` handles `Ty::Str` — Str params route
+  to `CK::Str`, Str returns compare byte-exact via `eval_native_str`.
+- **probes**: Str edge cases (empty, 1-char, 5-char) + deterministic
+  seeded Str sampling (no more `unreachable!` panics).
+- **header/shim**: `c_ret_ty` Str → `S`; `emit_header` / `emit_header_hpp`
+  / `emit_shim_c` emit `(char* d, long l)` params and the `S` typedef
+  when Str is used; guard diagnostics print `%p/%ld` for Str params.
+- **tests**: 14 new (6 lowering/check, 2 differential parity, 3
+  header/shim, 3 probe edges). 183 → 194 (plus 1 fix commit: S typedef
+  in the native C driver).
+- **docs**: README type table (Str now native) + builtins table
+  (`str_len`, `str_eq`).
+
+Functional verification: `ontic check` runs 259 probe rows on a Str
+gen; `ontic solve --hand` vaults a Str kernel end-to-end (mlir-opt
+absent here → native artifacts skipped, vault entry still lands).
+
 ### 2026-09-03 12:55 — Proven-tier emission arc: flag-free codegen gated on recorded proofs (`9f5fe58`, `19c4106`)
 
 Implements `docs/plans/2026-09-02-proven-tier-emission.md` (P1–P9).

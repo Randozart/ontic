@@ -55,11 +55,22 @@ This is the natural next leg: the proof machinery is in, the payoff
   word. The 08-31 completion plan had `Proven/Guarded/Raw` variants; the
   landed enum collapsed to `Attested/Unattested`, which muddies that.
 
-### F3 — Str native parity (honest boundary, medium)
+### F3 — Str native parity (honest boundary, medium) — DONE 2026-09-03
 
-Str v1 (`ee0a7d0`) is fail-closed at S2: "opaque FFI ABI pending" because
-no Str construction exists natively. Grammar/oracle/builtins/par-harness
-side is done; what's missing is the native ABI:
+Str v1 (`ee0a7d0`) was fail-closed at S2: "opaque FFI ABI pending".
+Now implemented per `2026-09-03-str-native-abi.md` (`c7b3fe0`…`a320e75`):
+ABI is `(char* data, long len)` (len authoritative, NUL-safe), return is
+an `S` struct. `str_len`/`str_eq` lower to MLIR; S2 unblocked; native
+driver + byte-exact parity + probes + header/shim all in. 194/194 green.
+(Original scope, for the record:)
+- `lower.rs`: `(char* data, long len)` per Str param (plan P6 wording),
+  `str_len` = len-field load, `str_eq` = length compare + byte loop,
+  header/shim/hpp emission.
+- `pipeline.rs`: driver arms for string args + `const char*` returns
+  printed bounded.
+- `main.rs` parity: strings compare exactly.
+- Unblocks Str kernels from being vaulted with native artifacts —
+  currently they can only solve in interpret mode.
 - `lower.rs`: `(char* data, long len)` per Str param (plan P6 wording),
   `str_len` = len-field load, `str_eq` = length compare + byte loop,
   header/shim/hpp emission.
