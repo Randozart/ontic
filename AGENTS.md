@@ -67,9 +67,12 @@ Patches are unacceptable. There is no "go fast and break things."
     verdicts and vault keys remain deterministic. Prompt provenance is
     stored per solve so runs stay auditable.
 11. **SPEED REQUIRES DECLARATION**: the fast path never exists without a
-    visible contract word in the gen (`wrapping`, future `prop` proofs).
-    Compiler mercy is forbidden: semantics must be identical between the
-    oracle interpreter and emitted native code, tier for tier.
+    visible contract word in the gen. The proven tier's declaration is
+    the **recorded z3 Unsat verdict** — a machine proof stored in the
+    vault stamp, not an author claim. Emission is gated on the stamp,
+    not on a keyword in the gen text. Compiler mercy is forbidden:
+    semantics must be identical between the oracle interpreter and
+    emitted native code, tier for tier.
 12. **HINTS ARE ADVICE, NEVER EVIDENCE**: `hint` lines shape forge prompts
     only. They never touch canonical text, vault keys, sieve verdicts, or
     any acceptance decision.

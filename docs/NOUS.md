@@ -32,9 +32,11 @@ The container guarantees integrity only. It carries no verdicts.
 
 ## Trust model
 
-Imported kernels land **attested**: structurally intact, but their bytes
-came from someone else's machine. Promote to **verified** with
-`--verify`, which re-runs the deterministic sieve locally:
+Imported kernels land **unattested** (status: "raw"): structurally
+intact, but their bytes came from someone else's machine. The import
+stamp records `attested: false` — import provenance is vouching, not a
+machine proof. Promote to **verified** with `--verify`, which re-runs
+the deterministic sieve locally:
 
 1. canonical-key check — the shipped gen text must hash to the package's
    claimed key (catches any tampering with spec or examples);
@@ -47,6 +49,12 @@ way; trust status only records who vouches for it. Local solves always
 write `verified`. The ledger lives in `<vault>/trust.json` (local-only,
 never shipped) and shows in `ontic vault`.
 
+> **Terminology:** "attested" in `vault status` means *proof-verified*
+> (a recorded z3 Unsat verdict, `attested: true`). Imported kernels are
+> *unattested* ("raw") until re-verified locally. The word "attested"
+> in this document's prose refers to the proof-verification concept,
+> not the import state.
+
 ## Commands
 
 ```bash
@@ -57,7 +65,7 @@ ontic vault export --all --out full.nous
 # inspect without landing anything
 ontic vault import full.nous --dry-run
 
-# land as attested; collisions skipped unless --force
+# land as unattested (raw); collisions skipped unless --force
 ontic vault import mean.nous
 
 # land only what this machine's sieve can re-prove
@@ -69,7 +77,7 @@ ontic vault
 
 Export closes dependencies automatically from each gen's `use` lines
 (topological order). Entries whose manifests predate `gen_text` export
-with `verifiable: false` — they can be imported attested but never
+with `verifiable: false` — they can be imported (unattested) but never
 verified.
 
 ## Compatibility notes
