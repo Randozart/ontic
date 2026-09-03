@@ -2779,7 +2779,7 @@ fn c_ret_ty(ty: &Ty) -> Result<&'static str, String> {
         Ty::ListInt | Ty::ListF64 | Ty::ListF32 => Ok("void*"),
         // Tuple returns use a by-value C struct (see c_tuple_tag).
         Ty::Tuple(_) => Err("tuple return uses struct ABI, not c_ret_ty".to_string()),
-        Ty::Str => Err("Str return rejected at S2".to_string()),
+        Ty::Str => Ok("S"),
     }
 }
 
@@ -2866,6 +2866,13 @@ pub fn emit_header(
     } else {
         (String::new(), c_ret_ty(ret)?.to_string())
     };
+    // Str typedef: emitted when any param or the return uses Str.
+    let needs_str = matches!(ret, Ty::Str) || params.iter().any(|(_, t)| matches!(t, Ty::Str));
+    let str_typedef = if needs_str {
+        "typedef struct { char* data; long len; } S;\n"
+    } else {
+        ""
+    };
     let mut parts: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
@@ -2875,8 +2882,8 @@ pub fn emit_header(
             Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
             Ty::F64 => parts.push(format!("double {n}")),
             Ty::F32 => parts.push(format!("float {n}")),
-            // Checker rejects tuple and Str params; arms exhaustive only.
-            Ty::Tuple(_) | Ty::Str => {}
+            Ty::Str => parts.push(format!("char* {n}_d, long {n}_l")),
+            Ty::Tuple(_) => {}
         }
     }
     // Deterministic sanitized guard tokens from key8 + kernel name.
@@ -2920,7 +2927,7 @@ pub fn emit_header(
          #ifdef __cplusplus\n\
          extern \"C\" {{\n\
          #endif\n\n\
-         {typedef}
+         {str_typedef}{typedef}
          {rt} {name}({args});\n\
          {guarded_section}\n\
          #ifdef __cplusplus\n\
@@ -2928,6 +2935,7 @@ pub fn emit_header(
          #endif\n\n\
          #endif /* ONTIC_{gk}_{gn}_H */\n",
         typedef = typedef,
+        str_typedef = str_typedef,
     );
     Ok(body)
 }
@@ -2963,6 +2971,13 @@ pub fn emit_header_hpp(
     } else {
         (String::new(), c_ret_ty(ret)?.to_string())
     };
+    // Str typedef: emitted when any param or the return uses Str.
+    let needs_str = matches!(ret, Ty::Str) || params.iter().any(|(_, t)| matches!(t, Ty::Str));
+    let str_typedef = if needs_str {
+        "typedef struct { char* data; long len; } S;\n"
+    } else {
+        ""
+    };
     let mut parts: Vec<String> = Vec::new();
     for (n, t) in params {
         match t {
@@ -2972,8 +2987,8 @@ pub fn emit_header_hpp(
             Ty::Int | Ty::Bool => parts.push(format!("long {n}")),
             Ty::F64 => parts.push(format!("double {n}")),
             Ty::F32 => parts.push(format!("float {n}")),
-            // Checker rejects tuple and Str params; arms exhaustive only.
-            Ty::Tuple(_) | Ty::Str => {}
+            Ty::Str => parts.push(format!("char* {n}_d, long {n}_l")),
+            Ty::Tuple(_) => {}
         }
     }
     let sanitize = |s: &str| -> String {
@@ -3062,7 +3077,7 @@ fn strip_outer(s: &str) -> String {
         "// Ontic kernel (verified; do not edit - re-solve instead)\n\
          // ABI v1: Flat-MemRef; List<T> param -> (allocated*, aligned*, offset, size, stride)\n\
          #ifndef ONTIC_{gk}_{gn}_HPP\n#define ONTIC_{gk}_{gn}_HPP\n\n\
-         #include <cstddef>\n\n{typedef}{meta}\n\
+         #include <cstddef>\n\n{str_typedef}{typedef}{meta}\n\
          #if defined(ONTIC_CONTRACTS) && defined(__cplusplus) && __cplusplus >= 202601L\n\
          #ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n{decl_native}\n\n\
          #ifdef __cplusplus\n}}\n#endif\n\
@@ -3071,6 +3086,7 @@ fn strip_outer(s: &str) -> String {
          #ifdef __cplusplus\n}}\n#endif\n#endif /* ONTIC_CONTRACTS */\n\n\
          #endif /* ONTIC_{gk}_{gn}_HPP */\n",
         typedef = typedef,
+        str_typedef = str_typedef,
     ))
 }
 
@@ -3263,7 +3279,8 @@ pub fn c_guard_sentinel(ty: &Ty) -> &'static str {
         Ty::Int | Ty::Bool => "LONG_MIN",
         // List returns are flat-MemRef descriptors: NULL pointer.
         Ty::ListInt | Ty::ListF64 | Ty::ListF32 => "0",
-        Ty::Tuple(_) | Ty::Str => "LONG_MIN",
+        Ty::Str => "0",
+        Ty::Tuple(_) => "LONG_MIN",
     }
 }
 
@@ -3272,7 +3289,8 @@ fn c_guard_printf_spec(ty: &Ty) -> &'static str {
     match ty {
         Ty::F64 | Ty::F32 => "%.17g",
         Ty::Int | Ty::Bool | Ty::ListInt | Ty::ListF64 | Ty::ListF32 => "%ld",
-        Ty::Tuple(_) | Ty::Str => "%ld",
+        Ty::Str => "%p/%ld",
+        Ty::Tuple(_) => "%ld",
     }
 }
 
@@ -3322,6 +3340,13 @@ pub fn emit_shim_c(
     } else {
         (String::new(), c_ret_ty(ret)?.to_string())
     };
+    // Str typedef: emitted when any param or the return uses Str.
+    let needs_str = matches!(ret, Ty::Str) || params.iter().any(|(_, t)| matches!(t, Ty::Str));
+    let str_typedef = if needs_str {
+        "typedef struct { char* data; long len; } S;\n"
+    } else {
+        ""
+    };
     let sentinel_expr = if let Some(cs) = ret.tuple_components() {
         let comps: Result<Vec<String>, String> = cs
             .iter()
@@ -3352,8 +3377,8 @@ pub fn emit_shim_c(
             Ty::Int | Ty::Bool => c_params.push(format!("long {n}")),
             Ty::F64 => c_params.push(format!("double {n}")),
             Ty::F32 => c_params.push(format!("float {n}")),
-            // Checker rejects tuple and Str params; shim never sees one.
-            Ty::Tuple(_) | Ty::Str => {}
+            Ty::Str => c_params.push(format!("char* {n}_d, long {n}_l")),
+            Ty::Tuple(_) => {}
         }
     }
     let c_args_str = if c_params.is_empty() {
@@ -3404,6 +3429,11 @@ pub fn emit_shim_c(
                 fmt_parts.push(format!("long {n}=%ld"));
                 val_parts.push(format!("{n}_s"));
             }
+            Ty::Str => {
+                fmt_parts.push(format!("Str {n}={}", c_guard_printf_spec(t)));
+                val_parts.push(format!("{n}_d"));
+                val_parts.push(format!("{n}_l"));
+            }
             _ => {
                 fmt_parts.push(format!("long {n}={}", c_guard_printf_spec(t)));
                 val_parts.push(n.clone());
@@ -3453,6 +3483,7 @@ pub fn emit_shim_c(
                 format!("{n}_s"),
                 format!("{n}_st"),
             ],
+            Ty::Str => vec![format!("{n}_d"), format!("{n}_l")],
             _ => vec![n.clone()],
         })
         .collect();
@@ -3480,7 +3511,7 @@ pub fn emit_shim_c(
          void ontic_set_violation_policy(int p) {{ tl_policy = p; }}\n\
          int  ontic_violation_policy(void) {{ return tl_policy; }}\n\n\
          /* ---- tuple ABI ---- */\n\
-         {tup_typedef}\n\n\
+         {str_typedef}{tup_typedef}\n\n\"
          /* ---- raw kernel ---- */\n\
          extern {rt} {name}__raw({c_args});\n\n\
          /* ---- guarded public symbol ---- */\n\
@@ -3492,6 +3523,7 @@ pub fn emit_shim_c(
         key8 = key8,
         rt = rt,
         tup_typedef = tup_typedef,
+        str_typedef = str_typedef,
         name = name,
         c_args = c_args_str,
         guard_body = guard_body,
@@ -3608,5 +3640,38 @@ mod shim_tests {
         let c = emit_shim_c("f", &params, &Ty::F64, "cc", &[expr]).unwrap();
         assert!(c.contains("if (!((x > 0)))"), "real check:\n{}", c);
         assert!(!c.contains("if (!((true)))"), "no dead guard:\n{}", c);
+    }
+
+    // Str param in header: (char*, long) ABI + S typedef.
+    #[test]
+    fn header_str_param() {
+        let params = vec![
+            ("a".to_string(), Ty::Str),
+            ("b".to_string(), Ty::Int),
+        ];
+        let h = emit_header("f", &params, &Ty::Int, "abc12345", false).unwrap();
+        assert!(h.contains("typedef struct { char* data; long len; } S;"), "S typedef:\n{}", h);
+        assert!(h.contains("char* a_d, long a_l"), "str param:\n{}", h);
+        assert!(h.contains("long b"), "int param:\n{}", h);
+    }
+
+    // Str return in header: S return type + S typedef.
+    #[test]
+    fn header_str_return() {
+        let params = vec![("x".to_string(), Ty::Int)];
+        let h = emit_header("f", &params, &Ty::Str, "abc12345", false).unwrap();
+        assert!(h.contains("typedef struct { char* data; long len; } S;"), "S typedef:\n{}", h);
+        assert!(h.contains("S f(long x)"), "S return:\n{}", h);
+    }
+
+    // Str param in shim: (char*, long) ABI + S typedef + call args.
+    #[test]
+    fn shim_str_param() {
+        let params = vec![("s".to_string(), Ty::Str)];
+        let invariants: Vec<crate::sketch::Expr> = vec![];
+        let c = emit_shim_c("f", &params, &Ty::Int, "abc12345", &invariants).unwrap();
+        assert!(c.contains("typedef struct { char* data; long len; } S;"), "S typedef:\n{}", c);
+        assert!(c.contains("char* s_d, long s_l"), "str param:\n{}", c);
+        assert!(c.contains("s_d, s_l"), "call args:\n{}", c);
     }
 }
